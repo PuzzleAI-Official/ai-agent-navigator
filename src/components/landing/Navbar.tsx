@@ -34,21 +34,24 @@ const Navbar = () => {
         </a>
 
         <div className="hidden md:flex items-center gap-10">
-          {["Home", "Feature", "About"].map((item) => (
+          {[
+            { label: "Home", href: "/" },
+            { label: "Feature", href: "/playground" },
+            { label: "About", href: "#about" },
+          ].map((item) => (
             <a
-              key={item}
-              href={`#${item.toLowerCase().replace(/\s/g, "-")}`}
+              key={item.label}
+              href={item.href}
               className="relative text-[13px] font-grotesk font-medium tracking-[-0.01em] text-muted-foreground hover:text-foreground transition-colors duration-300 group"
             >
-              {item}
-              {/* Diagonal underline — unique to PuzzleAI */}
+              {item.label}
               <span className="absolute -bottom-1 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-300 origin-left" style={{ transform: "skewX(-12deg)" }} />
             </a>
           ))}
         </div>
 
         <a
-          href="#start"
+          href="/playground"
           className="group text-[13px] font-grotesk font-semibold tracking-[-0.01em] text-foreground border border-foreground px-5 py-2.5 hover:bg-foreground hover:text-background transition-all duration-300 flex items-center gap-2 relative overflow-hidden"
         >
           <span className="relative z-10">Get started</span>

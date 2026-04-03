@@ -157,7 +157,7 @@ const Hero = () => {
             className="mt-10 flex flex-col sm:flex-row items-start sm:items-center gap-5"
           >
             <a
-              href="#start"
+              href="/playground"
               className="group relative inline-flex items-center gap-3 bg-foreground text-background px-8 py-4 font-grotesk font-semibold text-[12px] uppercase tracking-[0.1em] overflow-hidden transition-all duration-500 hover:shadow-[0_20px_60px_-15px_hsl(215_20%_50%/0.3)]"
             >
               <span className="relative z-10">Try PuzzleAI</span>

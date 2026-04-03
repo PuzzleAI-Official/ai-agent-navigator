@@ -69,7 +69,7 @@ const CTASection = () => {
               </p>
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
                 <a
-                  href="#"
+                  href="/playground"
                   className="group relative inline-flex items-center gap-3 bg-foreground text-background px-10 py-5 font-grotesk font-semibold text-[13px] uppercase tracking-[0.08em] overflow-hidden transition-all duration-300 hover:shadow-[0_12px_40px_-12px_hsl(215_20%_50%/0.4)] shimmer-hover"
                 >
                   <span className="relative z-10">Get started — it's free</span>

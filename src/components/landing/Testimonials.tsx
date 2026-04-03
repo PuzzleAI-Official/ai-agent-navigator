@@ -40,9 +40,6 @@ const Testimonials = () => {
     <section ref={containerRef} id="companies" className="py-32 overflow-hidden relative">
       <div className="absolute inset-0 bg-gradient-to-b from-background via-card/20 to-background" />
 
-      {/* Decorative horizontal line */}
-      <div className="absolute top-[50%] left-0 w-full h-px bg-gradient-to-r from-transparent via-accent/[0.06] to-transparent pointer-events-none" />
-
       <div className="max-w-[1400px] mx-auto px-8 mb-16 relative">
         <motion.div
           initial={{ opacity: 0, y: 30 }}
@@ -50,18 +47,11 @@ const Testimonials = () => {
           viewport={{ once: true }}
           transition={{ duration: 0.6 }}
         >
-          <div className="flex items-center gap-4 mb-6">
-            <motion.div
-              className="w-12 h-px bg-gradient-to-r from-accent to-accent/20"
-              initial={{ scaleX: 0 }}
-              whileInView={{ scaleX: 1 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.6 }}
-              style={{ transformOrigin: "left" }}
-            />
-            <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+          <div className="mb-8">
+            <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block">
               Companies
             </span>
+            <div className="w-8 h-[2px] bg-accent/30 mt-3" style={{ transform: "skewX(-20deg)" }} />
           </div>
           <h2 className="font-display text-[clamp(2.5rem,5vw,4.5rem)] leading-[1] tracking-[-0.02em] max-w-3xl">
             Trusted by teams who
@@ -81,11 +71,12 @@ const Testimonials = () => {
             transition={{ duration: 0.6, delay: i * 0.15 }}
             className="flex-shrink-0 w-[480px] border border-border p-10 group hover:border-accent/30 transition-all duration-500 cursor-default bg-background/60 backdrop-blur-sm relative overflow-hidden"
           >
-            <div className="absolute top-0 left-0 w-0 h-[2px] bg-gradient-to-r from-accent to-accent/30 group-hover:w-full transition-all duration-700" />
+            {/* Diagonal hover accent */}
+            <div className="absolute bottom-0 left-0 w-0 h-[2px] bg-accent/40 group-hover:w-[35%] transition-all duration-700" style={{ transform: "skewX(-20deg)" }} />
 
             <div className="mb-8">
               <span className="font-display text-5xl md:text-6xl tracking-tight text-accent italic">{t.metric}</span>
-              <span className="font-mono text-[10px] uppercase tracking-[0.15em] text-muted-foreground ml-3">{t.metricLabel}</span>
+              <span className="font-grotesk text-[10px] uppercase tracking-[0.15em] text-muted-foreground ml-3">{t.metricLabel}</span>
             </div>
 
             <blockquote className="text-foreground/70 leading-relaxed mb-8 text-[15px]">
@@ -95,7 +86,7 @@ const Testimonials = () => {
             <div className="flex items-center justify-between pt-6 border-t border-border">
               <div>
                 <div className="font-grotesk font-medium text-sm">{t.name}</div>
-                <div className="font-mono text-[10px] text-muted-foreground tracking-wider">{t.role}</div>
+                <div className="font-grotesk text-[10px] text-muted-foreground tracking-wider">{t.role}</div>
               </div>
               <span className="font-grotesk font-semibold text-foreground/30 text-sm group-hover:text-accent/60 transition-colors">{t.company}</span>
             </div>

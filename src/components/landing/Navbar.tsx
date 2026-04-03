@@ -20,7 +20,8 @@ const Navbar = () => {
       }`}
     >
       <div className="max-w-[1400px] mx-auto flex h-20 items-center justify-between px-8">
-        <a href="#" className="group flex items-baseline gap-0">
+        {/* Logo with diagonal slash motif */}
+        <a href="#" className="group flex items-center gap-0">
           <span className="font-grotesk font-bold text-[20px] tracking-[-0.03em] text-foreground">
             puzzle
           </span>
@@ -37,20 +38,21 @@ const Navbar = () => {
             <a
               key={item}
               href={`#${item.toLowerCase().replace(/\s/g, "-")}`}
-              className="relative text-[13px] font-mono uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground transition-colors duration-300 group"
+              className="relative text-[13px] font-grotesk font-medium tracking-[-0.01em] text-muted-foreground hover:text-foreground transition-colors duration-300 group"
             >
               {item}
-              <span className="absolute -bottom-1 left-0 w-0 h-px bg-accent group-hover:w-full transition-all duration-300" />
+              {/* Diagonal underline — unique to PuzzleAI */}
+              <span className="absolute -bottom-1 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-300 origin-left" style={{ transform: "skewX(-12deg)" }} />
             </a>
           ))}
         </div>
 
         <a
           href="#start"
-          className="group text-[13px] font-mono uppercase tracking-[0.12em] text-foreground border border-foreground px-5 py-2.5 hover:bg-foreground hover:text-background transition-all duration-300 flex items-center gap-2"
+          className="group text-[13px] font-grotesk font-semibold tracking-[-0.01em] text-foreground border border-foreground px-5 py-2.5 hover:bg-foreground hover:text-background transition-all duration-300 flex items-center gap-2 relative overflow-hidden"
         >
-          Get started
-          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-300">
+          <span className="relative z-10">Get started</span>
+          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="relative z-10 opacity-0 -translate-x-2 group-hover:opacity-100 group-hover:translate-x-0 transition-all duration-300">
             <path d="M3 8H13M13 8L9 4M13 8L9 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
           </svg>
         </a>

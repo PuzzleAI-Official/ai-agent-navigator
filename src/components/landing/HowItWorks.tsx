@@ -18,7 +18,7 @@ const DescribeVisual = () => (
         transition={{ delay: line.delay, duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
         className="flex items-center gap-3 bg-secondary/60 border border-border/60 px-3.5 py-2.5"
       >
-        <div className="w-4 h-4 border border-accent/30 flex items-center justify-center flex-shrink-0">
+        <div className="w-4 h-4 border border-accent/30 flex items-center justify-center flex-shrink-0" style={{ transform: "rotate(45deg)" }}>
           <motion.div
             className="w-2 h-2 bg-accent"
             initial={{ scale: 0 }}
@@ -91,9 +91,9 @@ const TestVisual = () => {
 const DecideVisual = () => (
   <div className="space-y-2">
     {[
-      { metric: "Performance", value: "94%", icon: "◉" },
+      { metric: "Performance", value: "94%", icon: "◈" },
       { metric: "Speed", value: "0.9s", icon: "◈" },
-      { metric: "Cost", value: "$0.003", icon: "◇" },
+      { metric: "Cost", value: "$0.003", icon: "◈" },
     ].map((m, i) => (
       <motion.div
         key={m.metric}
@@ -141,17 +141,23 @@ const HowItWorks = () => {
   const [hoveredStep, setHoveredStep] = useState<number | null>(null);
 
   return (
-    <section id="how-it-works" className="py-32 relative noise-overlay">
+    <section id="how-it-works" className="py-32 relative">
+      {/* Unique diagonal grid pattern — not dot grid */}
       <div
-        className="absolute inset-0 opacity-[0.2]"
+        className="absolute inset-0 opacity-[0.025]"
         style={{
-          backgroundImage: "radial-gradient(circle at 1px 1px, hsl(var(--foreground) / 0.04) 1px, transparent 0)",
-          backgroundSize: "48px 48px",
+          backgroundImage: `repeating-linear-gradient(
+            -45deg,
+            transparent,
+            transparent 80px,
+            hsl(var(--foreground)) 80px,
+            hsl(var(--foreground)) 81px
+          )`,
         }}
       />
 
-      {/* Decorative vertical accent */}
-      <div className="absolute top-0 left-[8%] w-px h-full bg-gradient-to-b from-transparent via-accent/[0.06] to-transparent pointer-events-none" />
+      {/* Offset vertical accent — asymmetric placement */}
+      <div className="absolute top-0 left-[15%] w-px h-full bg-gradient-to-b from-transparent via-accent/[0.08] to-transparent pointer-events-none" />
 
       <div className="max-w-[1400px] mx-auto px-8 relative">
         <motion.div
@@ -161,18 +167,12 @@ const HowItWorks = () => {
           transition={{ duration: 0.6 }}
           className="mb-24"
         >
-          <div className="flex items-center gap-4 mb-6">
-            <motion.div
-              className="w-12 h-px bg-gradient-to-r from-accent to-accent/20"
-              initial={{ scaleX: 0 }}
-              whileInView={{ scaleX: 1 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.6 }}
-              style={{ transformOrigin: "left" }}
-            />
-            <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+          {/* Section label — stacked instead of inline */}
+          <div className="mb-8">
+            <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block">
               How it works
             </span>
+            <div className="w-8 h-[2px] bg-accent/30 mt-3" style={{ transform: "skewX(-20deg)" }} />
           </div>
           <h2 className="font-display text-[clamp(2.5rem,5vw,4.5rem)] leading-[1] tracking-[-0.02em] max-w-2xl">
             From confusion to
@@ -193,17 +193,19 @@ const HowItWorks = () => {
               onMouseEnter={() => setHoveredStep(i)}
               onMouseLeave={() => setHoveredStep(null)}
             >
-              <div className="absolute top-0 left-0 w-0 h-[2px] bg-gradient-to-r from-accent to-accent/30 group-hover:w-full transition-all duration-700" />
+              {/* Diagonal accent bar on hover — signature interaction */}
+              <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-[30%] transition-all duration-700" style={{ transform: "skewX(-20deg)", transformOrigin: "left" }} />
 
               <div className="grid md:grid-cols-12 gap-8 items-start py-16 md:py-20">
                 <div className="md:col-span-1">
-                  <span className="font-mono text-[11px] text-accent/30">{step.num}</span>
+                  <span className="font-grotesk font-bold text-[13px] text-accent/25">{step.num}</span>
                 </div>
                 <div className="md:col-span-2">
                   <h3 className="font-display text-4xl md:text-5xl tracking-[-0.02em] group-hover:translate-x-2 transition-transform duration-500">
                     {step.title}
                     <motion.span
                       className="inline-block w-1.5 h-1.5 bg-accent ml-2 align-super"
+                      style={{ transform: "rotate(45deg)" }}
                       initial={{ scale: 0 }}
                       animate={{ scale: hoveredStep === i ? 1 : 0 }}
                       transition={{ duration: 0.2 }}

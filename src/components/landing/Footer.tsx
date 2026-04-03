@@ -1,19 +1,22 @@
 const Footer = () => {
   return (
-    <footer className="border-t border-border py-10 bg-secondary/30">
-      <div className="container flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
-        <div className="flex items-center gap-2.5">
-          <div className="h-6 w-6 rounded-md bg-gradient-brand flex items-center justify-center">
-            <span className="text-primary-foreground font-heading font-bold text-[10px]">P</span>
-          </div>
-          <span className="font-heading font-medium text-foreground">PuzzleAI</span>
+    <footer className="border-t border-border py-12">
+      <div className="max-w-[1400px] mx-auto px-8 flex flex-col md:flex-row items-center justify-between gap-6">
+        <span className="font-grotesk font-semibold text-lg text-foreground">PuzzleAI</span>
+
+        <div className="flex gap-10">
+          {["Twitter", "LinkedIn", "Contact"].map((item) => (
+            <a
+              key={item}
+              href="#"
+              className="font-mono text-[11px] uppercase tracking-[0.15em] text-muted-foreground hover:text-foreground transition-colors"
+            >
+              {item}
+            </a>
+          ))}
         </div>
-        <div className="flex gap-6 font-mono text-xs">
-          <a href="#" className="hover:text-foreground transition-colors">Twitter</a>
-          <a href="#" className="hover:text-foreground transition-colors">LinkedIn</a>
-          <a href="#" className="hover:text-foreground transition-colors">Contact</a>
-        </div>
-        <span className="font-mono text-xs">© 2026 PuzzleAI</span>
+
+        <span className="font-mono text-[11px] text-muted-foreground">© 2026 PuzzleAI Inc.</span>
       </div>
     </footer>
   );

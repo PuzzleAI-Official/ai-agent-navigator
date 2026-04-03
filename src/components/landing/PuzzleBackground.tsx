@@ -48,7 +48,7 @@ const PuzzleBackground = () => {
   });
 
   return (
-    <div ref={containerRef} className="absolute inset-0 z-10 overflow-hidden pointer-events-none">
+    <div ref={containerRef} className="absolute inset-0 z-10 pointer-events-none">
       <div className="sticky top-0 h-screen flex items-center justify-center">
         {pieces.map((piece, i) => (
           <PuzzlePiece key={i} piece={piece} index={i} progress={scrollYProgress} />

@@ -1,7 +1,7 @@
 import Navbar from "@/components/landing/Navbar";
 import Hero from "@/components/landing/Hero";
 import Marquee from "@/components/landing/Marquee";
-import HowItWorks from "@/components/landing/HowItWorks";
+
 import ProductDemo from "@/components/landing/ProductDemo";
 import Testimonials from "@/components/landing/Testimonials";
 import WhySection from "@/components/landing/WhySection";

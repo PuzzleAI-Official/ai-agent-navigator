@@ -1,15 +1,13 @@
-import { motion } from "framer-motion";
-
 const Footer = () => {
   return (
     <footer className="border-t border-border">
       <div className="max-w-[1400px] mx-auto px-8 py-16">
         <div className="grid md:grid-cols-12 gap-12 mb-16">
           <div className="md:col-span-4">
-            <div className="flex items-center gap-0 mb-4">
-              <span className="font-grotesk font-bold text-[18px] tracking-[-0.02em] text-foreground">puzzle</span>
-              <span className="font-grotesk font-bold text-[18px] tracking-[-0.02em] text-accent">ai</span>
-              <span className="font-grotesk font-bold text-[18px] text-accent leading-none ml-[-1px] mb-auto mt-[1px]">.</span>
+            <div className="flex items-baseline gap-0 mb-4">
+              <span className="font-grotesk font-bold text-[18px] tracking-[-0.03em] text-foreground">puzzle</span>
+              <span className="font-grotesk font-bold text-[18px] tracking-[-0.03em] text-accent">ai</span>
+              <span className="font-grotesk font-bold text-[18px] text-accent">.</span>
             </div>
             <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
               The first agent-to-agent hiring platform. Find the right AI for your work.
@@ -26,7 +24,7 @@ const Footer = () => {
               <ul className="space-y-2.5">
                 {col.links.map((link) => (
                   <li key={link}>
-                    <a href="#" className="text-sm text-foreground/60 hover:text-foreground transition-colors duration-200">
+                    <a href="#" className="text-sm text-foreground/60 hover:text-accent transition-colors duration-200">
                       {link}
                     </a>
                   </li>
@@ -42,7 +40,7 @@ const Footer = () => {
           </span>
           <div className="flex gap-6">
             {["Privacy", "Terms", "Security"].map((item) => (
-              <a key={item} href="#" className="font-mono text-[10px] text-muted-foreground hover:text-foreground transition-colors tracking-wider">
+              <a key={item} href="#" className="font-mono text-[10px] text-muted-foreground hover:text-accent transition-colors tracking-wider">
                 {item}
               </a>
             ))}

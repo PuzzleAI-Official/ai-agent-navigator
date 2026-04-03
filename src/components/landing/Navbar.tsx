@@ -20,14 +20,14 @@ const Navbar = () => {
       }`}
     >
       <div className="max-w-[1400px] mx-auto flex h-20 items-center justify-between px-8">
-        <a href="#" className="group flex items-center gap-0">
-          <span className="font-grotesk font-bold text-[20px] tracking-[-0.02em] text-foreground">
+        <a href="#" className="group flex items-baseline gap-0">
+          <span className="font-grotesk font-bold text-[20px] tracking-[-0.03em] text-foreground">
             puzzle
           </span>
-          <span className="font-grotesk font-bold text-[20px] tracking-[-0.02em] text-accent">
+          <span className="font-grotesk font-bold text-[20px] tracking-[-0.03em] text-accent">
             ai
           </span>
-          <span className="font-grotesk font-bold text-[20px] text-accent leading-none ml-[-1px] mb-auto mt-[2px]">
+          <span className="font-grotesk font-bold text-[20px] text-accent">
             .
           </span>
         </a>

@@ -2,7 +2,7 @@ import { motion } from "framer-motion";
 
 const WhySection = () => {
   return (
-    <section id="about" className="py-32 relative">
+    <section id="about" className="py-32 relative noise-overlay">
       <div className="absolute inset-0 bg-gradient-to-b from-background via-card/30 to-background" />
       <div
         className="absolute inset-0 opacity-[0.2]"
@@ -11,6 +11,12 @@ const WhySection = () => {
           backgroundSize: "48px 48px",
         }}
       />
+
+      {/* Decorative corner marks */}
+      <div className="absolute top-16 right-16 opacity-[0.06] hidden md:block">
+        <div className="w-8 h-px bg-foreground" />
+        <div className="w-px h-8 bg-foreground -mt-4 ml-[15px]" />
+      </div>
 
       <div className="max-w-[1400px] mx-auto px-8 relative">
         <motion.div
@@ -22,7 +28,7 @@ const WhySection = () => {
         >
           <div className="flex items-center gap-4 mb-6">
             <motion.div
-              className="w-8 h-px bg-accent"
+              className="w-12 h-px bg-gradient-to-r from-accent to-accent/20"
               initial={{ scaleX: 0 }}
               whileInView={{ scaleX: 1 }}
               viewport={{ once: true }}
@@ -41,7 +47,6 @@ const WhySection = () => {
         </motion.div>
 
         <div className="grid md:grid-cols-12 gap-4">
-          {/* Large feature card */}
           <motion.div
             initial={{ opacity: 0, y: 30 }}
             whileInView={{ opacity: 1, y: 0 }}
@@ -51,14 +56,14 @@ const WhySection = () => {
           >
             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700"
               style={{
-                backgroundImage: "radial-gradient(circle at 1px 1px, hsl(var(--accent) / 0.08) 1px, transparent 0)",
+                backgroundImage: "radial-gradient(circle at 1px 1px, hsl(var(--accent) / 0.06) 1px, transparent 0)",
                 backgroundSize: "20px 20px",
               }}
             />
-            <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
+            <div className="absolute top-0 left-0 w-0 h-[2px] bg-gradient-to-r from-accent to-accent/30 group-hover:w-full transition-all duration-700" />
 
             <div className="relative z-10">
-              <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/50 block mb-6">
+              <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/40 block mb-6">
                 Real testing
               </span>
               <h3 className="font-display text-3xl md:text-5xl leading-[1.05] mb-4 group-hover:translate-x-1 transition-transform duration-500">
@@ -76,7 +81,7 @@ const WhySection = () => {
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true }}
                 transition={{ delay: 0.4 }}
-                className="mt-10 inline-flex items-center gap-4 border border-accent/20 px-5 py-3 bg-accent/[0.04]"
+                className="mt-10 inline-flex items-center gap-4 border border-accent/15 px-5 py-3 bg-accent/[0.03]"
               >
                 <span className="font-display text-3xl text-accent italic">50k+</span>
                 <span className="font-mono text-[10px] text-muted-foreground uppercase tracking-wider leading-tight">
@@ -86,7 +91,6 @@ const WhySection = () => {
             </div>
           </motion.div>
 
-          {/* Right column */}
           <div className="md:col-span-4 flex flex-col gap-4">
             <motion.div
               initial={{ opacity: 0, y: 30 }}
@@ -95,9 +99,9 @@ const WhySection = () => {
               transition={{ duration: 0.6, delay: 0.1 }}
               className="flex-1 border border-border p-8 flex flex-col justify-between group cursor-default hover:border-accent/30 transition-all duration-500 bg-background/50 backdrop-blur-sm relative overflow-hidden"
             >
-              <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
+              <div className="absolute top-0 left-0 w-0 h-[2px] bg-gradient-to-r from-accent to-accent/30 group-hover:w-full transition-all duration-700" />
               <div>
-                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/50 block mb-4">Speed</span>
+                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/40 block mb-4">Speed</span>
                 <h3 className="font-display text-2xl md:text-3xl leading-tight mb-3 group-hover:translate-x-1 transition-transform duration-500">
                   Results in under<br /><span className="italic">five minutes.</span>
                 </h3>
@@ -114,9 +118,9 @@ const WhySection = () => {
               transition={{ duration: 0.6, delay: 0.2 }}
               className="flex-1 border border-border p-8 flex flex-col justify-between group cursor-default hover:border-accent/30 transition-all duration-500 bg-background/50 backdrop-blur-sm relative overflow-hidden"
             >
-              <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
+              <div className="absolute top-0 left-0 w-0 h-[2px] bg-gradient-to-r from-accent to-accent/30 group-hover:w-full transition-all duration-700" />
               <div>
-                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/50 block mb-4">Transparency</span>
+                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/40 block mb-4">Transparency</span>
                 <h3 className="font-display text-2xl md:text-3xl leading-tight mb-3 group-hover:translate-x-1 transition-transform duration-500">
                   Three metrics.<br /><span className="italic">Zero noise.</span>
                 </h3>
@@ -127,7 +131,6 @@ const WhySection = () => {
             </motion.div>
           </div>
 
-          {/* Bottom feature strip */}
           <motion.div
             initial={{ opacity: 0, y: 30 }}
             whileInView={{ opacity: 1, y: 0 }}
@@ -135,7 +138,7 @@ const WhySection = () => {
             transition={{ duration: 0.6, delay: 0.3 }}
             className="md:col-span-12 border border-border p-8 md:p-10 bg-background/50 backdrop-blur-sm relative overflow-hidden group"
           >
-            <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-1000" />
+            <div className="absolute top-0 left-0 w-0 h-[2px] bg-gradient-to-r from-accent to-accent/30 group-hover:w-full transition-all duration-1000" />
             <div className="grid md:grid-cols-3 gap-8 md:gap-16">
               {[
                 {
@@ -155,7 +158,7 @@ const WhySection = () => {
                 },
               ].map((item, i) => (
                 <div key={i} className="flex gap-4">
-                  <span className="text-accent/40 text-lg flex-shrink-0 mt-0.5">{item.icon}</span>
+                  <span className="text-accent/30 text-lg flex-shrink-0 mt-0.5">{item.icon}</span>
                   <div>
                     <h4 className="font-grotesk font-semibold text-sm mb-2">{item.title}</h4>
                     <p className="text-muted-foreground text-sm leading-relaxed">{item.desc}</p>

@@ -1,12 +1,11 @@
-import { motion, useMotionValue, useTransform, useSpring, useAnimationFrame } from "framer-motion";
+import { motion, useAnimationFrame } from "framer-motion";
 import { useEffect, useRef, useState, useCallback } from "react";
 
-/* ─── Network Constellation — cursor-interactive ─── */
-const NetworkConstellation = ({ mouseX, mouseY }: { mouseX: number; mouseY: number }) => {
+/* ─── Flowing Field Visualization — generative topographic art ─── */
+const FlowField = ({ mouseX, mouseY }: { mouseX: number; mouseY: number }) => {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const frame = useRef(0);
-  const nodesRef = useRef<Array<{ x: number; y: number; vx: number; vy: number; r: number; baseX: number; baseY: number }>>([]);
-  const initialized = useRef(false);
+  const particles = useRef<Array<{ x: number; y: number; life: number; maxLife: number; speed: number; hue: number }>>([]);
 
   useAnimationFrame(() => {
     const canvas = canvasRef.current;
@@ -20,113 +19,117 @@ const NetworkConstellation = ({ mouseX, mouseY }: { mouseX: number; mouseY: numb
     canvas.width = w * dpr;
     canvas.height = h * dpr;
     ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, w, h);
 
-    frame.current += 0.008;
+    frame.current += 0.003;
     const t = frame.current;
 
-    // Initialize nodes once
-    if (!initialized.current || nodesRef.current.length === 0) {
-      nodesRef.current = Array.from({ length: 60 }, () => ({
+    // Fade previous frame — creates trailing effect
+    ctx.fillStyle = "hsl(40, 33%, 97%)";
+    ctx.globalAlpha = 0.04;
+    ctx.fillRect(0, 0, w, h);
+    ctx.globalAlpha = 1;
+
+    // Spawn particles
+    while (particles.current.length < 300) {
+      particles.current.push({
         x: Math.random() * w,
         y: Math.random() * h,
-        vx: (Math.random() - 0.5) * 0.3,
-        vy: (Math.random() - 0.5) * 0.3,
-        r: 1 + Math.random() * 2.5,
-        baseX: Math.random() * w,
-        baseY: Math.random() * h,
-      }));
-      initialized.current = true;
+        life: 0,
+        maxLife: 200 + Math.random() * 400,
+        speed: 0.3 + Math.random() * 0.8,
+        hue: Math.random() > 0.85 ? 225 : 230, // mostly ink, some accent
+      });
     }
 
-    const nodes = nodesRef.current;
     const mx = mouseX * w;
     const my = mouseY * h;
 
-    // Update & draw nodes
-    nodes.forEach((node, i) => {
-      // Gentle drift
-      node.x = node.baseX + Math.sin(t + i * 0.5) * 30 + Math.cos(t * 0.7 + i * 0.3) * 20;
-      node.y = node.baseY + Math.cos(t + i * 0.4) * 25 + Math.sin(t * 0.6 + i * 0.5) * 15;
+    // Flow field function — creates organic topographic patterns
+    const getAngle = (x: number, y: number) => {
+      const scale = 0.003;
+      const nx = x * scale;
+      const ny = y * scale;
+      // Layered sine waves create organic flow
+      return (
+        Math.sin(nx * 1.2 + t * 2) * Math.cos(ny * 0.8 + t * 1.5) +
+        Math.sin(nx * 0.5 + ny * 0.7 + t) * 0.8 +
+        Math.cos(nx * 2.1 - ny * 0.9 + t * 0.7) * 0.4
+      ) * Math.PI;
+    };
 
-      // Mouse repulsion
-      const dx = node.x - mx;
-      const dy = node.y - my;
+    // Update and draw particles
+    particles.current.forEach((p, i) => {
+      const angle = getAngle(p.x, p.y);
+
+      // Mouse influence — gentle attraction creating swirls
+      const dx = mx - p.x;
+      const dy = my - p.y;
       const dist = Math.sqrt(dx * dx + dy * dy);
-      if (dist < 150 && dist > 0) {
-        const force = (150 - dist) / 150;
-        node.x += (dx / dist) * force * 20;
-        node.y += (dy / dist) * force * 20;
+      let mouseInfluence = 0;
+      if (dist < 200 && dist > 0) {
+        mouseInfluence = (200 - dist) / 200;
       }
 
-      // Keep in bounds
-      node.x = Math.max(0, Math.min(w, node.x));
-      node.y = Math.max(0, Math.min(h, node.y));
-    });
+      const finalAngle = angle + (mouseInfluence * Math.atan2(dy, dx) * 0.3);
 
-    // Draw connections
-    for (let i = 0; i < nodes.length; i++) {
-      for (let j = i + 1; j < nodes.length; j++) {
-        const dx = nodes[i].x - nodes[j].x;
-        const dy = nodes[i].y - nodes[j].y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        if (dist < 120) {
-          const alpha = (1 - dist / 120) * 0.08;
-          ctx.beginPath();
-          ctx.moveTo(nodes[i].x, nodes[i].y);
-          ctx.lineTo(nodes[j].x, nodes[j].y);
-          ctx.strokeStyle = `rgba(30, 30, 30, ${alpha})`;
-          ctx.lineWidth = 0.5;
-          ctx.stroke();
-        }
-      }
-    }
+      p.x += Math.cos(finalAngle) * p.speed;
+      p.y += Math.sin(finalAngle) * p.speed;
+      p.life++;
 
-    // Draw nodes
-    nodes.forEach((node, i) => {
-      // Outer glow for larger nodes
-      if (node.r > 2) {
-        const gradient = ctx.createRadialGradient(node.x, node.y, 0, node.x, node.y, node.r * 6);
-        gradient.addColorStop(0, `rgba(210, 100, 60, 0.06)`);
-        gradient.addColorStop(1, `rgba(210, 100, 60, 0)`);
-        ctx.beginPath();
-        ctx.arc(node.x, node.y, node.r * 6, 0, Math.PI * 2);
-        ctx.fillStyle = gradient;
-        ctx.fill();
-      }
+      // Lifecycle alpha — fade in and out
+      const lifeRatio = p.life / p.maxLife;
+      const alpha = lifeRatio < 0.1
+        ? lifeRatio / 0.1
+        : lifeRatio > 0.9
+          ? (1 - lifeRatio) / 0.1
+          : 1;
 
-      // Core
+      const finalAlpha = alpha * (p.hue === 225 ? 0.12 : 0.04);
+
       ctx.beginPath();
-      ctx.arc(node.x, node.y, node.r, 0, Math.PI * 2);
-      const isAccent = i % 7 === 0;
-      ctx.fillStyle = isAccent
-        ? `rgba(210, 100, 60, ${0.4 + Math.sin(t + i) * 0.15})`
-        : `rgba(30, 30, 30, ${0.08 + node.r * 0.03})`;
+      ctx.arc(p.x, p.y, p.hue === 225 ? 1.5 : 0.8, 0, Math.PI * 2);
+      ctx.fillStyle = `hsla(${p.hue}, ${p.hue === 225 ? '45%' : '20%'}, ${p.hue === 225 ? '42%' : '30%'}, ${finalAlpha})`;
       ctx.fill();
+
+      // Reset dead or out-of-bounds particles
+      if (p.life >= p.maxLife || p.x < -10 || p.x > w + 10 || p.y < -10 || p.y > h + 10) {
+        particles.current[i] = {
+          x: Math.random() * w,
+          y: Math.random() * h,
+          life: 0,
+          maxLife: 200 + Math.random() * 400,
+          speed: 0.3 + Math.random() * 0.8,
+          hue: Math.random() > 0.85 ? 225 : 230,
+        };
+      }
     });
 
-    // Mouse cursor glow
-    if (mx > 0 && my > 0) {
-      const gradient = ctx.createRadialGradient(mx, my, 0, mx, my, 80);
-      gradient.addColorStop(0, "rgba(210, 100, 60, 0.04)");
-      gradient.addColorStop(1, "rgba(210, 100, 60, 0)");
+    // Draw topographic contour rings
+    ctx.globalAlpha = 0.025;
+    for (let ring = 0; ring < 5; ring++) {
+      const cx = w * (0.3 + ring * 0.12);
+      const cy = h * (0.35 + Math.sin(t + ring) * 0.08);
+      const r = 80 + ring * 60 + Math.sin(t * 0.5 + ring) * 20;
+
       ctx.beginPath();
-      ctx.arc(mx, my, 80, 0, Math.PI * 2);
+      ctx.ellipse(cx, cy, r, r * 0.6, ring * 0.3 + t * 0.1, 0, Math.PI * 2);
+      ctx.strokeStyle = `hsl(225, 45%, 42%)`;
+      ctx.lineWidth = 0.5;
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+
+    // Cursor glow halo
+    if (mx > 0 && my > 0) {
+      const gradient = ctx.createRadialGradient(mx, my, 0, mx, my, 120);
+      gradient.addColorStop(0, "hsla(225, 45%, 42%, 0.04)");
+      gradient.addColorStop(0.5, "hsla(225, 45%, 42%, 0.015)");
+      gradient.addColorStop(1, "transparent");
+      ctx.beginPath();
+      ctx.arc(mx, my, 120, 0, Math.PI * 2);
       ctx.fillStyle = gradient;
       ctx.fill();
     }
-
-    // Decorative arcs
-    ctx.beginPath();
-    ctx.ellipse(w * 0.5, h * 0.5, w * 0.35, h * 0.25, -0.1, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(30, 30, 30, 0.02)";
-    ctx.lineWidth = 0.5;
-    ctx.stroke();
-
-    ctx.beginPath();
-    ctx.ellipse(w * 0.5, h * 0.5, w * 0.22, h * 0.15, 0.2, 0, Math.PI * 2);
-    ctx.strokeStyle = "rgba(30, 30, 30, 0.025)";
-    ctx.stroke();
   });
 
   return (
@@ -135,7 +138,7 @@ const NetworkConstellation = ({ mouseX, mouseY }: { mouseX: number; mouseY: numb
       className="absolute inset-0 w-full h-full"
       initial={{ opacity: 0 }}
       animate={{ opacity: 1 }}
-      transition={{ duration: 2, delay: 0.3 }}
+      transition={{ duration: 2.5, delay: 0.3 }}
     />
   );
 };
@@ -188,19 +191,39 @@ const Hero = () => {
     <section
       ref={containerRef}
       onMouseMove={handleMouseMove}
-      className="relative min-h-screen overflow-hidden cursor-crosshair"
+      className="relative min-h-screen overflow-hidden cursor-crosshair noise-overlay"
     >
-      {/* Full-bleed interactive constellation */}
-      <NetworkConstellation mouseX={mousePos.x} mouseY={mousePos.y} />
+      {/* Flow field visualization */}
+      <FlowField mouseX={mousePos.x} mouseY={mousePos.y} />
 
-      {/* Gradient washes */}
-      <div className="absolute top-0 left-0 w-[50%] h-[60%] bg-[radial-gradient(ellipse_at_20%_30%,hsl(15_80%_55%/0.04),transparent_60%)]" />
-      <div className="absolute bottom-0 right-0 w-[40%] h-[40%] bg-[radial-gradient(ellipse_at_80%_80%,hsl(36_40%_80%/0.08),transparent_60%)]" />
+      {/* Depth washes */}
+      <div className="absolute top-0 left-0 w-[60%] h-[70%] bg-[radial-gradient(ellipse_at_20%_30%,hsl(225_45%_42%/0.04),transparent_60%)] pointer-events-none" />
+      <div className="absolute bottom-0 right-0 w-[50%] h-[50%] bg-[radial-gradient(ellipse_at_80%_80%,hsl(30_30%_55%/0.04),transparent_60%)] pointer-events-none" />
+      <div className="absolute top-[20%] right-[10%] w-[30%] h-[30%] bg-[radial-gradient(ellipse_at_center,hsl(225_45%_42%/0.02),transparent_50%)] pointer-events-none" />
+
+      {/* Decorative measurement marks — editorial detail */}
+      <div className="absolute top-8 left-8 flex flex-col gap-1 opacity-[0.12]">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} className="flex items-center gap-2">
+            <div className={`h-px ${i === 0 || i === 4 ? 'w-6' : 'w-3'} bg-foreground`} />
+            {(i === 0 || i === 4) && (
+              <span className="font-mono text-[7px] text-foreground">{i === 0 ? '00' : '04'}</span>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {/* Right vertical accent line */}
+      <motion.div
+        className="absolute top-0 right-[12%] w-px h-full bg-gradient-to-b from-transparent via-accent/[0.06] to-transparent pointer-events-none"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 1.5, duration: 2 }}
+      />
 
       {/* Content overlay */}
       <div className="relative z-10 min-h-screen flex flex-col justify-end pb-16 md:pb-24">
         <div className="max-w-[1400px] mx-auto w-full px-8">
-          {/* Large type block — positioned over the constellation */}
           <div className="mb-auto pt-40 md:pt-48">
             <motion.div
               initial={{ opacity: 0 }}
@@ -209,13 +232,13 @@ const Hero = () => {
               className="flex items-center gap-4 mb-8"
             >
               <motion.div
-                className="w-12 h-px bg-accent"
+                className="w-16 h-px bg-gradient-to-r from-accent to-accent/20"
                 initial={{ scaleX: 0 }}
                 animate={{ scaleX: 1 }}
-                transition={{ delay: 0.5, duration: 0.8 }}
+                transition={{ delay: 0.5, duration: 1 }}
                 style={{ transformOrigin: "left" }}
               />
-              <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+              <span className="font-mono text-[11px] uppercase tracking-[0.25em] text-muted-foreground">
                 The AI hiring platform
               </span>
             </motion.div>
@@ -251,19 +274,18 @@ const Hero = () => {
             >
               <a
                 href="#start"
-                className="group relative inline-flex items-center gap-3 bg-foreground text-background px-7 py-3.5 font-mono text-[12px] uppercase tracking-[0.12em] overflow-hidden transition-all duration-300 hover:shadow-[0_8px_30px_-8px_hsl(var(--foreground)/0.3)]"
+                className="group relative inline-flex items-center gap-3 bg-foreground text-background px-7 py-3.5 font-mono text-[12px] uppercase tracking-[0.12em] overflow-hidden transition-all duration-300 hover:shadow-[0_12px_40px_-12px_hsl(225_45%_42%/0.4)] shimmer-hover"
               >
                 <span className="relative z-10">Try PuzzleAI</span>
                 <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="relative z-10 transition-transform duration-300 group-hover:translate-x-1">
                   <path d="M3 8H13M13 8L9 4M13 8L9 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                 </svg>
-                <div className="absolute inset-0 bg-gradient-to-r from-transparent via-background/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700" />
               </a>
               <a
                 href="#how-it-works"
                 className="group font-mono text-[12px] uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground transition-colors flex items-center gap-2"
               >
-                <span className="border-b border-muted-foreground/30 pb-0.5 group-hover:border-foreground/50 transition-colors">See how it works</span>
+                <span className="border-b border-muted-foreground/30 pb-0.5 group-hover:border-accent/50 transition-colors">See how it works</span>
                 <motion.span
                   animate={{ y: [0, 3, 0] }}
                   transition={{ repeat: Infinity, duration: 1.5 }}
@@ -273,7 +295,7 @@ const Hero = () => {
             </motion.div>
           </div>
 
-          {/* Bottom strip — three metrics with animated counters */}
+          {/* Bottom metrics strip */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -287,7 +309,7 @@ const Hero = () => {
                 { num: "03", label: "Cost", desc: "actual token pricing" },
               ].map((m) => (
                 <div key={m.label} className="group cursor-default">
-                  <span className="font-mono text-[8px] text-accent/50 block mb-0.5">{m.num}</span>
+                  <span className="font-mono text-[8px] text-accent/40 block mb-0.5">{m.num}</span>
                   <span className="font-grotesk font-semibold text-xs tracking-tight group-hover:text-accent transition-colors duration-300">{m.label}</span>
                   <span className="hidden md:block font-mono text-[9px] text-muted-foreground/40 mt-0.5">{m.desc}</span>
                 </div>

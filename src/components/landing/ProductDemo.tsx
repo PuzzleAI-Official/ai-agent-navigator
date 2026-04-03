@@ -84,12 +84,18 @@ const ProductDemo = () => {
         <div
           className="absolute inset-0"
           style={{
-            backgroundImage: "radial-gradient(circle at 1px 1px, hsl(36 33% 97% / 0.03) 1px, transparent 0)",
+            backgroundImage: "radial-gradient(circle at 1px 1px, hsl(40 33% 97% / 0.03) 1px, transparent 0)",
             backgroundSize: "40px 40px",
           }}
         />
-        <div className="absolute top-0 right-0 w-[50%] h-[50%] bg-[radial-gradient(ellipse_at_80%_20%,hsl(15_80%_55%/0.05),transparent_60%)]" />
-        <div className="absolute bottom-0 left-0 w-[40%] h-[40%] bg-[radial-gradient(ellipse_at_20%_80%,hsl(15_80%_55%/0.03),transparent_60%)]" />
+        <div className="absolute top-0 right-0 w-[50%] h-[50%] bg-[radial-gradient(ellipse_at_80%_20%,hsl(225_45%_42%/0.08),transparent_60%)]" />
+        <div className="absolute bottom-0 left-0 w-[40%] h-[40%] bg-[radial-gradient(ellipse_at_20%_80%,hsl(225_45%_42%/0.04),transparent_60%)]" />
+
+        {/* Decorative cross markers */}
+        <div className="absolute top-8 right-8 opacity-[0.08]">
+          <div className="w-6 h-px bg-background" />
+          <div className="w-px h-6 bg-background -mt-3 ml-[11px]" />
+        </div>
 
         <div className="max-w-[1400px] mx-auto px-8 py-32 relative">
           <div className="grid md:grid-cols-12 gap-16">
@@ -102,7 +108,7 @@ const ProductDemo = () => {
             >
               <div className="flex items-center gap-4 mb-6">
                 <motion.div
-                  className="w-8 h-px bg-accent/40"
+                  className="w-12 h-px bg-accent/40"
                   initial={{ scaleX: 0 }}
                   whileInView={{ scaleX: 1 }}
                   viewport={{ once: true }}

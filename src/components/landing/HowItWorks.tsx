@@ -3,7 +3,6 @@ import { useState } from "react";
 
 /* ─── Step visuals ─── */
 
-// 01 Describe — animated chat/prompt bubbles
 const DescribeVisual = () => (
   <div className="space-y-2.5">
     {[
@@ -19,7 +18,7 @@ const DescribeVisual = () => (
         transition={{ delay: line.delay, duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
         className="flex items-center gap-3 bg-secondary/60 border border-border/60 px-3.5 py-2.5"
       >
-        <div className="w-4 h-4 border border-accent/40 flex items-center justify-center flex-shrink-0">
+        <div className="w-4 h-4 border border-accent/30 flex items-center justify-center flex-shrink-0">
           <motion.div
             className="w-2 h-2 bg-accent"
             initial={{ scale: 0 }}
@@ -38,13 +37,12 @@ const DescribeVisual = () => (
       transition={{ delay: 1.6 }}
       className="flex items-center gap-2 pl-1 pt-1"
     >
-      <span className="w-1 h-3 bg-accent/60 animate-pulse" />
+      <span className="w-1 h-3 bg-accent/50 animate-pulse" />
       <span className="font-mono text-[9px] text-muted-foreground/40">analyzing requirements...</span>
     </motion.div>
   </div>
 );
 
-// 02 Test — animated progress bars racing
 const TestVisual = () => {
   const providers = [
     { name: "Claude 3.5", progress: 94, delay: 0.6, duration: 1.8 },
@@ -75,9 +73,9 @@ const TestVisual = () => {
               transition={{ delay: p.delay + p.duration }}
             >{p.progress}%</motion.span>
           </div>
-          <div className="h-[4px] bg-muted/60 overflow-hidden">
+          <div className="h-[3px] bg-muted/60 overflow-hidden">
             <motion.div
-              className="h-full bg-gradient-to-r from-accent/70 to-accent"
+              className="h-full bg-gradient-to-r from-accent/60 to-accent"
               initial={{ width: 0 }}
               whileInView={{ width: `${p.progress}%` }}
               viewport={{ once: true }}
@@ -90,7 +88,6 @@ const TestVisual = () => {
   );
 };
 
-// 03 Decide — verdict cards
 const DecideVisual = () => (
   <div className="space-y-2">
     {[
@@ -104,10 +101,10 @@ const DecideVisual = () => (
         whileInView={{ opacity: 1, y: 0 }}
         viewport={{ once: true }}
         transition={{ delay: 0.8 + i * 0.15 }}
-        className="flex items-center justify-between border border-border/60 px-3.5 py-2.5 bg-secondary/30 hover:bg-secondary/60 transition-colors duration-300"
+        className="flex items-center justify-between border border-border/60 px-3.5 py-2.5 bg-secondary/30 hover:bg-accent/[0.04] transition-colors duration-300"
       >
         <div className="flex items-center gap-2.5">
-          <span className="text-accent/50 text-xs">{m.icon}</span>
+          <span className="text-accent/40 text-xs">{m.icon}</span>
           <span className="font-mono text-[10px] uppercase tracking-wider text-foreground/50">{m.metric}</span>
         </div>
         <span className="font-display text-base italic">{m.value}</span>
@@ -144,15 +141,17 @@ const HowItWorks = () => {
   const [hoveredStep, setHoveredStep] = useState<number | null>(null);
 
   return (
-    <section id="how-it-works" className="py-32 relative">
-      {/* Subtle background texture */}
+    <section id="how-it-works" className="py-32 relative noise-overlay">
       <div
-        className="absolute inset-0 opacity-[0.25]"
+        className="absolute inset-0 opacity-[0.2]"
         style={{
           backgroundImage: "radial-gradient(circle at 1px 1px, hsl(var(--foreground) / 0.04) 1px, transparent 0)",
           backgroundSize: "48px 48px",
         }}
       />
+
+      {/* Decorative vertical accent */}
+      <div className="absolute top-0 left-[8%] w-px h-full bg-gradient-to-b from-transparent via-accent/[0.06] to-transparent pointer-events-none" />
 
       <div className="max-w-[1400px] mx-auto px-8 relative">
         <motion.div
@@ -164,7 +163,7 @@ const HowItWorks = () => {
         >
           <div className="flex items-center gap-4 mb-6">
             <motion.div
-              className="w-8 h-px bg-accent"
+              className="w-12 h-px bg-gradient-to-r from-accent to-accent/20"
               initial={{ scaleX: 0 }}
               whileInView={{ scaleX: 1 }}
               viewport={{ once: true }}
@@ -178,7 +177,7 @@ const HowItWorks = () => {
           <h2 className="font-display text-[clamp(2.5rem,5vw,4.5rem)] leading-[1] tracking-[-0.02em] max-w-2xl">
             From confusion to
             <br />
-            <span className="italic">clarity</span> in minutes.
+            <span className="italic text-gradient">clarity</span> in minutes.
           </h2>
         </motion.div>
 
@@ -194,12 +193,11 @@ const HowItWorks = () => {
               onMouseEnter={() => setHoveredStep(i)}
               onMouseLeave={() => setHoveredStep(null)}
             >
-              {/* Hover accent bar */}
-              <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
+              <div className="absolute top-0 left-0 w-0 h-[2px] bg-gradient-to-r from-accent to-accent/30 group-hover:w-full transition-all duration-700" />
 
               <div className="grid md:grid-cols-12 gap-8 items-start py-16 md:py-20">
                 <div className="md:col-span-1">
-                  <span className="font-mono text-[11px] text-accent/40">{step.num}</span>
+                  <span className="font-mono text-[11px] text-accent/30">{step.num}</span>
                 </div>
                 <div className="md:col-span-2">
                   <h3 className="font-display text-4xl md:text-5xl tracking-[-0.02em] group-hover:translate-x-2 transition-transform duration-500">

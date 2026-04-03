@@ -6,45 +6,48 @@
 
 @layer base {
   :root {
-    --background: 36 33% 97%;
-    --foreground: 240 10% 8%;
+    --background: 40 33% 97%;
+    --foreground: 230 25% 12%;
 
-    --card: 36 25% 95%;
-    --card-foreground: 240 10% 8%;
+    --card: 40 20% 94%;
+    --card-foreground: 230 25% 12%;
 
-    --popover: 36 33% 97%;
-    --popover-foreground: 240 10% 8%;
+    --popover: 40 33% 97%;
+    --popover-foreground: 230 25% 12%;
 
-    --primary: 240 10% 8%;
-    --primary-foreground: 36 33% 97%;
+    --primary: 230 25% 12%;
+    --primary-foreground: 40 33% 97%;
 
-    --secondary: 36 15% 92%;
-    --secondary-foreground: 240 10% 8%;
+    --secondary: 40 12% 91%;
+    --secondary-foreground: 230 25% 12%;
 
-    --muted: 36 10% 90%;
-    --muted-foreground: 240 5% 45%;
+    --muted: 40 8% 88%;
+    --muted-foreground: 230 10% 45%;
 
-    /* Warm coral-copper accent — sophisticated, not green */
-    --accent: 15 80% 55%;
+    /* Deep ink-indigo — like fountain pen on cream paper */
+    --accent: 225 45% 42%;
     --accent-foreground: 0 0% 100%;
+
+    /* Warm secondary accent — muted bronze for depth */
+    --accent-warm: 30 30% 55%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 36 12% 88%;
-    --input: 36 12% 88%;
-    --ring: 240 10% 8%;
+    --border: 40 10% 86%;
+    --input: 40 10% 86%;
+    --ring: 230 25% 12%;
 
     --radius: 0rem;
 
-    --sidebar-background: 36 33% 97%;
-    --sidebar-foreground: 240 10% 8%;
-    --sidebar-primary: 240 10% 8%;
-    --sidebar-primary-foreground: 36 33% 97%;
-    --sidebar-accent: 36 15% 92%;
-    --sidebar-accent-foreground: 240 10% 8%;
-    --sidebar-border: 36 12% 88%;
-    --sidebar-ring: 240 10% 8%;
+    --sidebar-background: 40 33% 97%;
+    --sidebar-foreground: 230 25% 12%;
+    --sidebar-primary: 230 25% 12%;
+    --sidebar-primary-foreground: 40 33% 97%;
+    --sidebar-accent: 40 12% 91%;
+    --sidebar-accent-foreground: 230 25% 12%;
+    --sidebar-border: 40 10% 86%;
+    --sidebar-ring: 230 25% 12%;
   }
 }
 
@@ -63,8 +66,8 @@
   }
 
   ::selection {
-    background: hsl(15 80% 55% / 0.15);
-    color: hsl(240 10% 8%);
+    background: hsl(225 45% 42% / 0.15);
+    color: hsl(230 25% 12%);
   }
 }
 
@@ -124,10 +127,49 @@
   100% { transform: scale(2); opacity: 0; }
 }
 
-/* Gradient text */
+/* Gradient text — ink to accent */
 .text-gradient {
   background: linear-gradient(135deg, hsl(var(--foreground)), hsl(var(--accent)));
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
+}
+
+/* Noise texture overlay */
+.noise-overlay {
+  position: relative;
+}
+.noise-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  opacity: 0.03;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 256px 256px;
+  pointer-events: none;
+  z-index: 1;
+}
+
+/* Shimmer effect for buttons */
+@keyframes shimmer {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(100%); }
+}
+
+.shimmer-hover:hover::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, hsl(0 0% 100% / 0.08), transparent);
+  animation: shimmer 0.6s ease-out;
+}
+
+/* Topographic line pattern */
+.topo-lines {
+  background-image: 
+    repeating-conic-gradient(
+      hsl(var(--foreground) / 0.02) 0% 25%,
+      transparent 0% 50%
+    );
+  background-size: 60px 60px;
 }

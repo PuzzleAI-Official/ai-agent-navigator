@@ -7,43 +7,36 @@ import puzzlePiece4 from "@/assets/puzzle-piece-4.png";
 
 interface PieceConfig {
   src: string;
-  // Starting position (scattered, zoomed in)
   startX: number;
   startY: number;
   startScale: number;
   startRotate: number;
-  // Final assembled position
   endX: number;
   endY: number;
   endScale: number;
   endRotate: number;
-  zIndex: number;
 }
 
 const pieces: PieceConfig[] = [
   {
     src: puzzlePiece1,
-    startX: 0, startY: 0, startScale: 3.5, startRotate: 0,
-    endX: -12, endY: -10, endScale: 0.7, endRotate: -5,
-    zIndex: 4,
+    startX: 0, startY: -20, startScale: 2.8, startRotate: 0,
+    endX: -90, endY: -70, endScale: 0.55, endRotate: -5,
   },
   {
     src: puzzlePiece2,
-    startX: 120, startY: -200, startScale: 2.8, startRotate: 15,
-    endX: 14, endY: -8, endScale: 0.65, endRotate: 3,
-    zIndex: 3,
+    startX: 300, startY: -350, startScale: 0, startRotate: 15,
+    endX: 90, endY: -65, endScale: 0.5, endRotate: 3,
   },
   {
     src: puzzlePiece3,
-    startX: -150, startY: 180, startScale: 2.5, startRotate: -20,
-    endX: -10, endY: 12, endScale: 0.6, endRotate: -2,
-    zIndex: 2,
+    startX: -350, startY: 300, startScale: 0, startRotate: -20,
+    endX: -85, endY: 70, endScale: 0.48, endRotate: -2,
   },
   {
     src: puzzlePiece4,
-    startX: 180, startY: 150, startScale: 2.2, startRotate: 30,
-    endX: 16, endY: 14, endScale: 0.65, endRotate: 8,
-    zIndex: 1,
+    startX: 350, startY: 300, startScale: 0, startRotate: 30,
+    endX: 95, endY: 75, endScale: 0.5, endRotate: 8,
   },
 ];
 
@@ -51,14 +44,14 @@ const PuzzleBackground = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const { scrollYProgress } = useScroll({
     target: containerRef,
-    offset: ["start start", "end start"],
+    offset: ["start start", "end end"],
   });
 
   return (
-    <div ref={containerRef} className="absolute inset-0 overflow-hidden pointer-events-none">
+    <div ref={containerRef} className="absolute inset-0 z-10 pointer-events-none">
       <div className="sticky top-0 h-screen flex items-center justify-center">
         {pieces.map((piece, i) => (
-          <PuzzlePiece key={i} piece={piece} progress={scrollYProgress} />
+          <PuzzlePiece key={i} piece={piece} index={i} progress={scrollYProgress} />
         ))}
       </div>
     </div>
@@ -67,16 +60,30 @@ const PuzzleBackground = () => {
 
 const PuzzlePiece = ({
   piece,
+  index,
   progress,
 }: {
   piece: PieceConfig;
+  index: number;
   progress: ReturnType<typeof useScroll>["scrollYProgress"];
 }) => {
-  const x = useTransform(progress, [0, 0.6, 1], [piece.startX, piece.startX * 0.3, piece.endX]);
-  const y = useTransform(progress, [0, 0.6, 1], [piece.startY, piece.startY * 0.3, piece.endY]);
-  const scale = useTransform(progress, [0, 0.5, 1], [piece.startScale, piece.startScale * 0.6, piece.endScale]);
-  const rotate = useTransform(progress, [0, 0.7, 1], [piece.startRotate, piece.startRotate * 0.3, piece.endRotate]);
-  const opacity = useTransform(progress, [0, 0.05, 0.8, 1], [0.6, 0.85, 0.9, 1]);
+  // First piece: visible from start, zoomed in, then shrinks
+  // Other pieces: fade in as scroll progresses
+  const isCenter = index === 0;
+  
+  const x = useTransform(progress, [0, 0.4, 0.8], [piece.startX, piece.startX * 0.4, piece.endX]);
+  const y = useTransform(progress, [0, 0.4, 0.8], [piece.startY, piece.startY * 0.4, piece.endY]);
+  const scale = useTransform(
+    progress,
+    isCenter ? [0, 0.3, 0.8] : [0.15, 0.4, 0.8],
+    isCenter ? [piece.startScale, piece.startScale * 0.6, piece.endScale] : [piece.startScale, piece.endScale * 0.5, piece.endScale]
+  );
+  const rotate = useTransform(progress, [0, 0.5, 0.8], [piece.startRotate, piece.startRotate * 0.3, piece.endRotate]);
+  const opacity = useTransform(
+    progress,
+    isCenter ? [0, 0.02, 0.7, 0.85] : [0.1, 0.25, 0.6, 0.85],
+    isCenter ? [0.35, 0.5, 0.8, 1] : [0, 0.4, 0.85, 1]
+  );
 
   return (
     <motion.img
@@ -84,14 +91,13 @@ const PuzzlePiece = ({
       alt=""
       width={512}
       height={512}
-      className="absolute w-[45vw] md:w-[30vw] lg:w-[22vw] max-w-[320px] h-auto"
+      className="absolute w-[50vw] md:w-[32vw] lg:w-[24vw] max-w-[350px] h-auto"
       style={{
         x,
         y,
         scale,
         rotate,
         opacity,
-        zIndex: piece.zIndex,
         filter: "drop-shadow(0 20px 60px rgba(80, 55, 30, 0.15)) drop-shadow(0 8px 20px rgba(60, 45, 30, 0.1))",
       }}
     />

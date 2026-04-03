@@ -1,13 +1,63 @@
 import { motion } from "framer-motion";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import heroMetal from "@/assets/hero-metal.png";
+
+const PLACEHOLDER_EXAMPLES = [
+  "I need an AI to summarize legal documents",
+  "I need an AI to generate marketing copy",
+  "I need an AI to review my code",
+];
+
+const useTypingPlaceholder = (examples: string[], typingSpeed = 60, deletingSpeed = 35, pauseDuration = 2000) => {
+  const [placeholder, setPlaceholder] = useState("");
+  const [exampleIndex, setExampleIndex] = useState(0);
+  const [isTyping, setIsTyping] = useState(true);
+  const [charIndex, setCharIndex] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
+
+  useEffect(() => {
+    const current = examples[exampleIndex];
+    if (isPaused) {
+      const timeout = setTimeout(() => {
+        setIsPaused(false);
+        setIsTyping(false);
+      }, pauseDuration);
+      return () => clearTimeout(timeout);
+    }
+    if (isTyping) {
+      if (charIndex < current.length) {
+        const timeout = setTimeout(() => {
+          setPlaceholder(current.slice(0, charIndex + 1));
+          setCharIndex(charIndex + 1);
+        }, typingSpeed);
+        return () => clearTimeout(timeout);
+      } else {
+        setIsPaused(true);
+      }
+    } else {
+      if (charIndex > 0) {
+        const timeout = setTimeout(() => {
+          setPlaceholder(current.slice(0, charIndex - 1));
+          setCharIndex(charIndex - 1);
+        }, deletingSpeed);
+        return () => clearTimeout(timeout);
+      } else {
+        setExampleIndex((exampleIndex + 1) % examples.length);
+        setIsTyping(true);
+      }
+    }
+  }, [charIndex, isTyping, isPaused, exampleIndex, examples, typingSpeed, deletingSpeed, pauseDuration]);
+
+  return placeholder;
+};
 
 const Hero = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 });
   const [chatInput, setChatInput] = useState("");
   const navigate = useNavigate();
+  const animatedPlaceholder = useTypingPlaceholder(PLACEHOLDER_EXAMPLES);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!containerRef.current) return;
@@ -80,7 +130,7 @@ const Hero = () => {
                     handleChatSubmit();
                   }
                 }}
-                placeholder="e.g. I need an AI to summarize customer support tickets and route them..."
+                placeholder={animatedPlaceholder + "│"}
                 rows={3}
                 className="w-full bg-transparent px-6 py-5 text-[14px] text-foreground placeholder:text-muted-foreground/50 outline-none resize-none font-sans leading-relaxed"
               />
@@ -107,11 +157,7 @@ const Hero = () => {
               transition={{ delay: 1.2, duration: 0.6 }}
               className="mt-4 flex flex-wrap gap-2 justify-center"
             >
-              {[
-                "Summarize legal documents",
-                "Generate marketing copy",
-                "Code review assistant",
-              ].map((prompt) => (
+              {PLACEHOLDER_EXAMPLES.map((prompt) => (
                 <button
                   key={prompt}
                   onClick={() => {

@@ -7,9 +7,9 @@ const useCases = [
     desc: "Extract, summarize, and structure data from contracts, invoices, and reports.",
     icon: "◈",
     providers: [
-      { name: "Anthropic", logo: "https://cdn.brandfetch.io/anthropic.com/w/512/h/512/logo" },
-      { name: "OpenAI", logo: "https://cdn.brandfetch.io/openai.com/w/512/h/512/logo" },
-      { name: "Google", logo: "https://cdn.brandfetch.io/google.com/w/512/h/512/logo" },
+      { name: "Anthropic", logo: "https://logo.clearbit.com/anthropic.com" },
+      { name: "OpenAI", logo: "https://logo.clearbit.com/openai.com" },
+      { name: "Google", logo: "https://logo.clearbit.com/google.com" },
     ],
   },
   {
@@ -17,9 +17,9 @@ const useCases = [
     desc: "AI agents that handle customer inquiries, support tickets, and lead qualification.",
     icon: "◇",
     providers: [
-      { name: "Intercom", logo: "https://cdn.brandfetch.io/intercom.com/w/512/h/512/logo" },
-      { name: "Zendesk", logo: "https://cdn.brandfetch.io/zendesk.com/w/512/h/512/logo" },
-      { name: "Ada", logo: "https://cdn.brandfetch.io/ada.cx/w/512/h/512/logo" },
+      { name: "Intercom", logo: "https://logo.clearbit.com/intercom.com" },
+      { name: "Zendesk", logo: "https://logo.clearbit.com/zendesk.com" },
+      { name: "Ada", logo: "https://logo.clearbit.com/ada.cx" },
     ],
   },
   {
@@ -27,9 +27,9 @@ const useCases = [
     desc: "Automate outreach, follow-ups, and personalized messaging at scale.",
     icon: "▹",
     providers: [
-      { name: "Apollo", logo: "https://cdn.brandfetch.io/apollo.io/w/512/h/512/logo" },
-      { name: "Outreach", logo: "https://cdn.brandfetch.io/outreach.io/w/512/h/512/logo" },
-      { name: "Salesloft", logo: "https://cdn.brandfetch.io/salesloft.com/w/512/h/512/logo" },
+      { name: "Apollo", logo: "https://logo.clearbit.com/apollo.io" },
+      { name: "Outreach", logo: "https://logo.clearbit.com/outreach.io" },
+      { name: "Salesloft", logo: "https://logo.clearbit.com/salesloft.com" },
     ],
   },
   {
@@ -37,9 +37,9 @@ const useCases = [
     desc: "Real-time AI voice assistants for calls, IVR, and conversational workflows.",
     icon: "◎",
     providers: [
-      { name: "Vapi", logo: "https://cdn.brandfetch.io/vapi.ai/w/512/h/512/logo" },
-      { name: "Bland AI", logo: "https://cdn.brandfetch.io/bland.ai/w/512/h/512/logo" },
-      { name: "Retell", logo: "https://cdn.brandfetch.io/retellai.com/w/512/h/512/logo" },
+      { name: "Vapi", logo: "https://logo.clearbit.com/vapi.ai" },
+      { name: "Twilio", logo: "https://logo.clearbit.com/twilio.com" },
+      { name: "Vonage", logo: "https://logo.clearbit.com/vonage.com" },
     ],
   },
   {
@@ -47,9 +47,9 @@ const useCases = [
     desc: "Deploy intelligent chatbots across web, Slack, and messaging platforms.",
     icon: "⬡",
     providers: [
-      { name: "Botpress", logo: "https://cdn.brandfetch.io/botpress.com/w/512/h/512/logo" },
-      { name: "Voiceflow", logo: "https://cdn.brandfetch.io/voiceflow.com/w/512/h/512/logo" },
-      { name: "Rasa", logo: "https://cdn.brandfetch.io/rasa.com/w/512/h/512/logo" },
+      { name: "Botpress", logo: "https://logo.clearbit.com/botpress.com" },
+      { name: "Voiceflow", logo: "https://logo.clearbit.com/voiceflow.com" },
+      { name: "Rasa", logo: "https://logo.clearbit.com/rasa.com" },
     ],
   },
   {
@@ -57,31 +57,47 @@ const useCases = [
     desc: "AI-powered code writing, review, and refactoring for engineering teams.",
     icon: "⟐",
     providers: [
-      { name: "Cursor", logo: "https://cdn.brandfetch.io/cursor.com/w/512/h/512/logo" },
-      { name: "GitHub", logo: "https://cdn.brandfetch.io/github.com/w/512/h/512/logo" },
-      { name: "Codeium", logo: "https://cdn.brandfetch.io/codeium.com/w/512/h/512/logo" },
+      { name: "Cursor", logo: "https://logo.clearbit.com/cursor.com" },
+      { name: "GitHub", logo: "https://logo.clearbit.com/github.com" },
+      { name: "Codeium", logo: "https://logo.clearbit.com/codeium.com" },
     ],
   },
 ];
 
 const ProviderLogos = ({ providers }: { providers: typeof useCases[0]["providers"] }) => (
-  <div className="absolute -top-1 -right-1 pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-600">
+  <div className="absolute top-0 right-0 w-[55%] h-full pointer-events-none">
     {providers.map((p, i) => (
-      <img
+      <motion.img
         key={p.name}
         src={p.logo}
         alt={p.name}
-        className="absolute object-contain transition-all duration-700 opacity-0 group-hover:opacity-[0.12] grayscale"
+        initial={{ opacity: 0, scale: 0.7, y: 10 }}
+        className="absolute object-contain grayscale"
         style={{
-          width: `${40 - i * 6}px`,
-          height: `${40 - i * 6}px`,
-          top: `${i * 28 + 12}px`,
-          right: `${i * 20 + 16}px`,
-          transitionDelay: `${i * 100}ms`,
-          transform: `rotate(${-3 + i * 4}deg)`,
+          width: `${36 - i * 4}px`,
+          height: `${36 - i * 4}px`,
+          top: `${16 + i * 30}px`,
+          right: `${12 + i * 24}px`,
+          opacity: 0,
         }}
         onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
       />
+    ))}
+    {/* Fallback: always show text names on hover */}
+    {providers.map((p, i) => (
+      <span
+        key={`text-${p.name}`}
+        className="absolute font-grotesk font-black uppercase tracking-[-0.02em] text-foreground/0 group-hover:text-foreground/[0.06] transition-all duration-700 select-none whitespace-nowrap"
+        style={{
+          fontSize: `${26 - i * 5}px`,
+          top: `${14 + i * 30}px`,
+          right: `${10 + i * 18}px`,
+          transform: `rotate(${-3 + i * 3}deg)`,
+          transitionDelay: `${i * 80}ms`,
+        }}
+      >
+        {p.name}
+      </span>
     ))}
   </div>
 );

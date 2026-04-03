@@ -1,98 +1,91 @@
-import { motion, useScroll, useTransform } from "framer-motion";
-import { useRef } from "react";
+import { motion } from "framer-motion";
+import { useNavigate } from "react-router-dom";
 
-const testimonials = [
+const useCases = [
   {
-    quote: "We spent three months evaluating AI solutions for our support team. PuzzleAI gave us the same answer in four minutes — and it was better.",
-    name: "Sarah Chen",
-    role: "VP Engineering",
-    company: "Lattice",
-    metric: "4 min",
-    metricLabel: "vs 3 months",
+    title: "Document Parsing",
+    desc: "Extract, summarize, and structure data from contracts, invoices, and reports.",
+    icon: "◈",
   },
   {
-    quote: "The testing methodology is what sold us. It's not opinions or benchmarks — it's our actual data, our actual edge cases.",
-    name: "Marcus Webb",
-    role: "CTO",
-    company: "Ramp",
-    metric: "$340k",
-    metricLabel: "saved annually",
+    title: "Inbound Agents",
+    desc: "AI agents that handle customer inquiries, support tickets, and lead qualification.",
+    icon: "◇",
   },
   {
-    quote: "We were about to sign a $200k contract with the wrong provider. PuzzleAI showed us a solution that was 40% faster and half the cost.",
-    name: "Anya Patel",
-    role: "Head of AI",
-    company: "Notion",
-    metric: "40%",
-    metricLabel: "faster solution",
+    title: "Outbound Agents",
+    desc: "Automate outreach, follow-ups, and personalized messaging at scale.",
+    icon: "▹",
+  },
+  {
+    title: "Voice & Phone Agents",
+    desc: "Real-time AI voice assistants for calls, IVR, and conversational workflows.",
+    icon: "◎",
+  },
+  {
+    title: "Chatbot Agents",
+    desc: "Deploy intelligent chatbots across web, Slack, and messaging platforms.",
+    icon: "⬡",
+  },
+  {
+    title: "Code Generation",
+    desc: "AI-powered code writing, review, and refactoring for engineering teams.",
+    icon: "⟐",
   },
 ];
 
 const Testimonials = () => {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const { scrollYProgress } = useScroll({
-    target: containerRef,
-    offset: ["start end", "end start"],
-  });
-  const x = useTransform(scrollYProgress, [0, 1], ["5%", "-15%"]);
+  const navigate = useNavigate();
 
   return (
-    <section ref={containerRef} id="companies" className="py-32 overflow-hidden relative">
+    <section id="companies" className="py-32 relative">
       <div className="absolute inset-0 bg-gradient-to-b from-background via-card/20 to-background" />
 
-      <div className="max-w-[1400px] mx-auto px-8 mb-16 relative">
+      <div className="max-w-[1400px] mx-auto px-8 relative">
         <motion.div
-          initial={{ opacity: 0, y: 30 }}
+          initial={{ opacity: 0, y: 20 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
-          transition={{ duration: 0.6 }}
+          transition={{ duration: 0.5 }}
+          className="mb-12"
         >
-          <div className="mb-8">
-            <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block">
-              Companies
-            </span>
-            <div className="w-8 h-[2px] bg-accent/30 mt-3" style={{ transform: "skewX(-20deg)" }} />
-          </div>
-          <h2 className="font-display text-[clamp(2.5rem,5vw,4.5rem)] leading-[1] tracking-[-0.02em] max-w-3xl">
-            Trusted by teams who
-            <br />
-            <span className="italic text-gradient">refuse to guess.</span>
+          <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block">
+            Trending
+          </span>
+          <div className="w-8 h-[2px] bg-accent/30 mt-3 mb-6" style={{ transform: "skewX(-20deg)" }} />
+          <h2 className="font-display text-[clamp(2rem,4vw,3.5rem)] leading-[1.05] tracking-[-0.02em]">
+            Discover Use Cases
           </h2>
         </motion.div>
-      </div>
 
-      <motion.div style={{ x }} className="flex gap-6 px-8 relative">
-        {testimonials.map((t, i) => (
-          <motion.div
-            key={t.name}
-            initial={{ opacity: 0, y: 40 }}
-            whileInView={{ opacity: 1, y: 0 }}
-            viewport={{ once: true }}
-            transition={{ duration: 0.6, delay: i * 0.15 }}
-            className="flex-shrink-0 w-[480px] border border-border p-10 group hover:border-accent/30 transition-all duration-500 cursor-default bg-background/60 backdrop-blur-sm relative overflow-hidden"
-          >
-            {/* Diagonal hover accent */}
-            <div className="absolute bottom-0 left-0 w-0 h-[2px] bg-accent/40 group-hover:w-[35%] transition-all duration-700" style={{ transform: "skewX(-20deg)" }} />
-
-            <div className="mb-8">
-              <span className="font-display text-5xl md:text-6xl tracking-tight text-accent italic">{t.metric}</span>
-              <span className="font-grotesk text-[10px] uppercase tracking-[0.15em] text-muted-foreground ml-3">{t.metricLabel}</span>
-            </div>
-
-            <blockquote className="text-foreground/70 leading-relaxed mb-8 text-[15px]">
-              "{t.quote}"
-            </blockquote>
-
-            <div className="flex items-center justify-between pt-6 border-t border-border">
-              <div>
-                <div className="font-grotesk font-medium text-sm">{t.name}</div>
-                <div className="font-grotesk text-[10px] text-muted-foreground tracking-wider">{t.role}</div>
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-4">
+          {useCases.map((item, i) => (
+            <motion.div
+              key={item.title}
+              initial={{ opacity: 0, y: 24 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.4, delay: i * 0.07 }}
+              onClick={() => navigate("/playground")}
+              className="group border border-border p-7 cursor-pointer hover:border-accent/30 transition-all duration-500 bg-background/50 backdrop-blur-sm relative overflow-hidden"
+            >
+              <div className="absolute bottom-0 left-0 w-0 h-[2px] bg-accent/40 group-hover:w-[40%] transition-all duration-700" style={{ transform: "skewX(-20deg)" }} />
+              <div className="flex items-start gap-3 mb-3">
+                <span className="text-accent/40 text-sm mt-0.5">{item.icon}</span>
+                <h3 className="font-grotesk font-semibold text-[15px] group-hover:translate-x-1 transition-transform duration-500">
+                  {item.title}
+                </h3>
               </div>
-              <span className="font-grotesk font-semibold text-foreground/30 text-sm group-hover:text-accent/60 transition-colors">{t.company}</span>
-            </div>
-          </motion.div>
-        ))}
-      </motion.div>
+              <p className="text-muted-foreground text-sm leading-relaxed pl-[1.6rem]">
+                {item.desc}
+              </p>
+              <span className="absolute top-6 right-6 font-grotesk text-[10px] text-accent/0 group-hover:text-accent/40 transition-colors duration-500 uppercase tracking-wider">
+                Try →
+              </span>
+            </motion.div>
+          ))}
+        </div>
+      </div>
     </section>
   );
 };

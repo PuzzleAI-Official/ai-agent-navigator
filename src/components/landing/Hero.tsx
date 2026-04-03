@@ -189,13 +189,10 @@ const Hero = () => {
         </div>
       </div>
 
-      {/* SECTION 2: Extended "The AI hiring platform" with popping tools */}
+      {/* SECTION 2: Extended "The AI hiring platform" with ticker */}
       <div ref={section2Ref} className="relative z-20 min-h-[160vh]" style={{ marginTop: "80vh" }}>
-        {/* Popping tool labels background */}
-        <TickerBackground />
-
-        <div className="min-h-screen flex flex-col justify-end pb-12 md:pb-16 relative">
-          <div className="max-w-[1400px] mx-auto w-full px-8">
+        <div className="min-h-screen flex flex-col justify-end pb-16 md:pb-24 relative">
+          <div className="max-w-[1400px] mx-auto w-full px-8 relative z-10">
             <motion.div
               initial={{ opacity: 0 }}
               whileInView={{ opacity: 1 }}
@@ -242,6 +239,17 @@ const Hero = () => {
               for your specific workflow and project — until now.
             </motion.p>
           </div>
+
+          {/* Ticker rows — positioned below the text */}
+          <motion.div
+            initial={{ opacity: 0 }}
+            whileInView={{ opacity: 1 }}
+            viewport={{ once: true }}
+            transition={{ duration: 1, delay: 0.5 }}
+            className="mt-16 md:mt-24"
+          >
+            <TickerBackground />
+          </motion.div>
         </div>
 
         {/* Transition bridge toward Live Evaluation */}

@@ -1,5 +1,5 @@
 import { motion, useScroll, useTransform } from "framer-motion";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import PuzzleBackground from "./PuzzleBackground";
 
@@ -52,47 +52,82 @@ const useTypingPlaceholder = (examples: string[], typingSpeed = 60, deletingSpee
   return placeholder;
 };
 
-/* Scrolling ticker rows of AI tool names — clean, editorial feel */
-const TICKER_ROWS = [
-  ["GPT-4o", "Claude 3.5", "Gemini Pro", "Mistral", "Llama 3", "Cohere", "DeepSeek", "Perplexity", "Jasper", "Writer"],
-  ["HuggingFace", "Stability AI", "ElevenLabs", "Synthesia", "Bland AI", "Vapi", "Retell AI", "Ada", "Intercom AI", "Drift"],
-  ["Salesforce AI", "Notion AI", "Cursor", "Codeium", "Tabnine", "LangChain", "CrewAI", "AutoGPT", "Relevance AI", "Replicate"],
-  ["Anthropic", "Midjourney", "Fixie", "BabyAGI", "Groq", "Together AI", "Fireworks", "Modal", "RunPod", "Cerebras"],
+/* Floating tool/service labels that pop in and drift */
+const TOOL_LABELS = [
+  "GPT-4o", "Claude", "Gemini", "Mistral", "Llama 3", "Cohere",
+  "Perplexity", "DeepSeek", "Jasper", "Writer", "Anthropic", "Replicate",
+  "HuggingFace", "Stability AI", "Midjourney", "ElevenLabs", "Synthesia",
+  "Bland AI", "Vapi", "Retell AI", "Ada", "Intercom AI", "Drift",
+  "Salesforce AI", "Notion AI", "Cursor", "Codeium", "Tabnine",
+  "LangChain", "CrewAI", "AutoGPT", "BabyAGI", "Fixie", "Relevance AI",
 ];
 
-const TickerBackground = () => {
+const TOOL_COLORS = [
+  "hsl(215 45% 55%)", "hsl(260 35% 60%)", "hsl(330 40% 55%)",
+  "hsl(190 50% 45%)", "hsl(25 60% 55%)", "hsl(160 40% 45%)",
+];
+
+interface FloatingLabel {
+  id: number;
+  label: string;
+  x: number;
+  y: number;
+  color: string;
+  delay: number;
+  duration: number;
+  side: "left" | "right";
+}
+
+const PopUpLabels = () => {
+  const labels = useMemo<FloatingLabel[]>(() => {
+    const result: FloatingLabel[] = [];
+    const shuffled = [...TOOL_LABELS].sort(() => Math.random() - 0.5);
+    for (let i = 0; i < 24; i++) {
+      const side = i % 2 === 0 ? "right" : "left";
+      result.push({
+        id: i,
+        label: shuffled[i % shuffled.length],
+        x: side === "right" ? 60 + Math.random() * 35 : 5 + Math.random() * 30,
+        y: 10 + Math.random() * 80,
+        color: TOOL_COLORS[i % TOOL_COLORS.length],
+        delay: Math.random() * 6,
+        duration: 3 + Math.random() * 3,
+        side,
+      });
+    }
+    return result;
+  }, []);
+
   return (
-    <div className="overflow-hidden pointer-events-none flex flex-col gap-5 opacity-[0.12]">
-      {TICKER_ROWS.map((row, rowIndex) => {
-        const direction = rowIndex % 2 === 0 ? "left" : "right";
-        const speed = 40 + rowIndex * 8;
-        const items = [...row, ...row, ...row]; // Triple for seamless loop
-        
-        return (
-          <div key={rowIndex} className="relative whitespace-nowrap">
-            <motion.div
-              className="inline-flex gap-8"
-              animate={{
-                x: direction === "left" ? ["0%", "-33.33%"] : ["-33.33%", "0%"],
-              }}
-              transition={{
-                duration: speed,
-                repeat: Infinity,
-                ease: "linear",
-              }}
-            >
-              {items.map((name, i) => (
-                <span
-                  key={`${name}-${i}`}
-                  className="font-grotesk font-medium text-[13px] md:text-[15px] tracking-[0.05em] uppercase text-foreground"
-                >
-                  {name}
-                </span>
-              ))}
-            </motion.div>
-          </div>
-        );
-      })}
+    <div className="absolute inset-0 overflow-hidden pointer-events-none">
+      {labels.map((item) => (
+        <motion.div
+          key={item.id}
+          className="absolute font-mono text-[10px] md:text-[11px] tracking-wider px-3 py-1.5 border whitespace-nowrap"
+          style={{
+            left: `${item.x}%`,
+            top: `${item.y}%`,
+            color: item.color,
+            borderColor: `${item.color}`,
+            backgroundColor: `hsl(36 33% 97%)`,
+            opacity: 0,
+          }}
+          animate={{
+            opacity: [0, 0.5, 0.5, 0],
+            y: [20, 0, -8, -20],
+            scale: [0.85, 1, 1, 0.9],
+          }}
+          transition={{
+            duration: item.duration,
+            delay: item.delay,
+            repeat: Infinity,
+            repeatDelay: 2 + Math.random() * 4,
+            ease: "easeInOut",
+          }}
+        >
+          {item.label}
+        </motion.div>
+      ))}
     </div>
   );
 };
@@ -189,10 +224,13 @@ const Hero = () => {
         </div>
       </div>
 
-      {/* SECTION 2: Extended "The AI hiring platform" with ticker */}
+      {/* SECTION 2: Extended "The AI hiring platform" with popping tools */}
       <div ref={section2Ref} className="relative z-20 min-h-[160vh]" style={{ marginTop: "80vh" }}>
-        <div className="min-h-screen flex flex-col justify-end pb-16 md:pb-24 relative">
-          <div className="max-w-[1400px] mx-auto w-full px-8 relative z-10">
+        {/* Popping tool labels background */}
+        <PopUpLabels />
+
+        <div className="min-h-screen flex flex-col justify-end pb-12 md:pb-16 relative">
+          <div className="max-w-[1400px] mx-auto w-full px-8">
             <motion.div
               initial={{ opacity: 0 }}
               whileInView={{ opacity: 1 }}
@@ -239,17 +277,6 @@ const Hero = () => {
               for your specific workflow and project — until now.
             </motion.p>
           </div>
-
-          {/* Ticker rows — positioned below the text */}
-          <motion.div
-            initial={{ opacity: 0 }}
-            whileInView={{ opacity: 1 }}
-            viewport={{ once: true }}
-            transition={{ duration: 1, delay: 0.5 }}
-            className="mt-16 md:mt-24"
-          >
-            <TickerBackground />
-          </motion.div>
         </div>
 
         {/* Transition bridge toward Live Evaluation */}

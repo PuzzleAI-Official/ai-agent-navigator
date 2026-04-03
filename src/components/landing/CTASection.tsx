@@ -12,7 +12,6 @@ const CTASection = () => {
 
   return (
     <section ref={sectionRef} id="start" className="py-20 md:py-40 relative overflow-hidden">
-      {/* Background accents */}
       <div className="absolute inset-0 pointer-events-none">
         <motion.div
           className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-accent/[0.03] rounded-full blur-[150px]"
@@ -29,7 +28,6 @@ const CTASection = () => {
 
       <motion.div style={{ scale, opacity }} className="max-w-[1400px] mx-auto px-8">
         <div className="border border-border p-12 md:p-20 relative bg-background/50 backdrop-blur-sm">
-          {/* Corner accent marks */}
           <div className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-accent" />
           <div className="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-accent" />
           <div className="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-accent" />
@@ -57,7 +55,7 @@ const CTASection = () => {
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
                 <a
                   href="#"
-                  className="group relative inline-flex items-center gap-3 bg-foreground text-background px-10 py-5 font-mono text-[13px] uppercase tracking-[0.12em] overflow-hidden transition-all duration-300"
+                  className="group relative inline-flex items-center gap-3 bg-foreground text-background px-10 py-5 font-mono text-[13px] uppercase tracking-[0.12em] overflow-hidden transition-all duration-300 hover:shadow-[0_8px_30px_-8px_hsl(var(--foreground)/0.3)]"
                 >
                   <span className="relative z-10">Get started — it's free</span>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="relative z-10 transition-transform duration-300 group-hover:translate-x-1">
@@ -65,10 +63,7 @@ const CTASection = () => {
                   </svg>
                   <div className="absolute inset-0 bg-gradient-to-r from-transparent via-background/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700" />
                 </a>
-                <a
-                  href="#"
-                  className="font-mono text-[13px] uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground transition-colors px-6 py-5"
-                >
+                <a href="#" className="font-mono text-[13px] uppercase tracking-[0.12em] text-muted-foreground hover:text-foreground transition-colors px-6 py-5">
                   Book a demo →
                 </a>
               </div>

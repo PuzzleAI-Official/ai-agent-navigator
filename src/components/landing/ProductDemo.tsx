@@ -81,17 +81,15 @@ const ProductDemo = () => {
   return (
     <section className="py-0">
       <div className="bg-foreground text-background relative overflow-hidden">
-        {/* Background texture for dark section */}
         <div
-          className="absolute inset-0 opacity-100"
+          className="absolute inset-0"
           style={{
             backgroundImage: "radial-gradient(circle at 1px 1px, hsl(36 33% 97% / 0.03) 1px, transparent 0)",
             backgroundSize: "40px 40px",
           }}
         />
-        {/* Accent glow */}
-        <div className="absolute top-0 right-0 w-[50%] h-[50%] bg-[radial-gradient(ellipse_at_80%_20%,hsl(160_60%_42%/0.06),transparent_60%)]" />
-        <div className="absolute bottom-0 left-0 w-[40%] h-[40%] bg-[radial-gradient(ellipse_at_20%_80%,hsl(160_60%_42%/0.04),transparent_60%)]" />
+        <div className="absolute top-0 right-0 w-[50%] h-[50%] bg-[radial-gradient(ellipse_at_80%_20%,hsl(15_80%_55%/0.05),transparent_60%)]" />
+        <div className="absolute bottom-0 left-0 w-[40%] h-[40%] bg-[radial-gradient(ellipse_at_20%_80%,hsl(15_80%_55%/0.03),transparent_60%)]" />
 
         <div className="max-w-[1400px] mx-auto px-8 py-32 relative">
           <div className="grid md:grid-cols-12 gap-16">

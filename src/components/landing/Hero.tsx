@@ -15,8 +15,8 @@ const Hero = () => {
     });
   }, []);
 
-  const offsetX = (mousePos.x - 0.5) * 25;
-  const offsetY = (mousePos.y - 0.5) * 18;
+  const offsetX = (mousePos.x - 0.5) * 30;
+  const offsetY = (mousePos.y - 0.5) * 22;
 
   // Typing effect
   const fullText = "Describe your workflow. We test every AI solution against your real use cases and deliver three verdicts: performance, speed, cost.";
@@ -45,103 +45,123 @@ const Hero = () => {
       onMouseMove={handleMouseMove}
       className="relative min-h-screen overflow-hidden"
     >
-      {/* ── Warm gradient background ── */}
+      {/* ── Layered warm gradient background ── */}
       <div className="absolute inset-0" style={{
-        background: "linear-gradient(165deg, hsl(38 45% 93%) 0%, hsl(40 33% 97%) 35%, hsl(42 30% 96%) 60%, hsl(38 35% 94%) 100%)"
+        background: "linear-gradient(170deg, hsl(36 50% 91%) 0%, hsl(38 40% 94%) 30%, hsl(40 33% 97%) 55%, hsl(38 30% 95%) 100%)"
       }} />
-      <div className="absolute top-0 left-[15%] w-[70%] h-[70%] bg-[radial-gradient(ellipse_at_50%_30%,hsl(35_50%_88%/0.5),transparent_65%)] pointer-events-none" />
-      <div className="absolute top-[5%] left-[25%] w-[50%] h-[50%] bg-[radial-gradient(ellipse_at_50%_40%,hsl(270_25%_90%/0.15),transparent_55%)] pointer-events-none" />
-      <div className="absolute bottom-0 left-0 w-full h-[30%] bg-gradient-to-t from-background to-transparent pointer-events-none" />
+      
+      {/* Warm golden glow centered behind sculpture */}
+      <div className="absolute top-[-5%] left-[10%] w-[80%] h-[75%] bg-[radial-gradient(ellipse_at_50%_40%,hsl(33_55%_85%/0.55),transparent_65%)] pointer-events-none" />
+      
+      {/* Subtle cool undertone for depth */}
+      <div className="absolute top-[5%] left-[20%] w-[60%] h-[55%] bg-[radial-gradient(ellipse_at_50%_35%,hsl(260_20%_90%/0.18),transparent_55%)] pointer-events-none" />
+      
+      {/* Bottom fade to base */}
+      <div className="absolute bottom-0 left-0 w-full h-[35%] bg-gradient-to-t from-background to-transparent pointer-events-none" />
 
-      {/* ── Content: vertical stack ── */}
-      <div className="relative z-10 min-h-screen flex flex-col pt-24">
+      {/* ── Sculpture zone — overlapping into text for natural merge ── */}
+      <div className="absolute top-0 left-0 w-full h-[75vh] md:h-[70vh] flex justify-center items-center pointer-events-none">
+        {/* Multi-layered glow halos */}
+        <motion.div
+          initial={{ opacity: 0, scale: 0.4 }}
+          animate={{ opacity: 1, scale: 1 }}
+          transition={{ delay: 0.2, duration: 3, ease: [0.16, 1, 0.3, 1] }}
+          className="absolute w-[90vw] h-[60vw] max-w-[1100px] max-h-[700px]"
+          style={{
+            background: "radial-gradient(ellipse, hsl(33 55% 83% / 0.35) 0%, hsl(33 45% 88% / 0.15) 35%, hsl(260 20% 90% / 0.06) 55%, transparent 75%)",
+            transform: `translate(${offsetX * 0.15}px, ${offsetY * 0.15}px)`,
+          }}
+        />
+
+        {/* Inner bright core glow */}
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          transition={{ delay: 0.8, duration: 2 }}
+          className="absolute w-[40vw] h-[30vw] max-w-[550px] max-h-[400px]"
+          style={{
+            background: "radial-gradient(ellipse, hsl(35 60% 90% / 0.3) 0%, transparent 65%)",
+            transform: `translate(${offsetX * 0.2}px, ${offsetY * 0.2}px)`,
+          }}
+        />
+
+        {/* The sculpture — BIGGER, overlapping into the text zone */}
+        <motion.img
+          src={heroMetal}
+          alt=""
+          width={1920}
+          height={1080}
+          initial={{ opacity: 0, scale: 0.75, y: 50 }}
+          animate={{ opacity: 1, scale: 1, y: 0 }}
+          transition={{ duration: 2.2, delay: 0.15, ease: [0.16, 1, 0.3, 1] }}
+          className="relative z-10 w-[90vw] md:w-[60vw] lg:w-[52vw] max-w-[850px] h-auto"
+          style={{
+            transform: `translate(${offsetX}px, ${offsetY}px)`,
+            transition: "transform 0.12s ease-out",
+            filter: "drop-shadow(0 50px 100px rgba(80, 55, 30, 0.18)) drop-shadow(0 20px 40px rgba(60, 45, 30, 0.12)) drop-shadow(0 5px 15px rgba(40, 30, 20, 0.06))",
+          }}
+        />
+
+        {/* Floating luminous particles */}
+        {[...Array(10)].map((_, i) => {
+          const angle = (i / 10) * Math.PI * 2;
+          const radius = 180 + (i % 4) * 55;
+          const size = i % 4 === 0 ? 3.5 : i % 2 === 0 ? 2 : 1;
+          return (
+            <motion.div
+              key={i}
+              className="absolute rounded-full"
+              style={{
+                width: size,
+                height: size,
+                left: `calc(50% + ${Math.cos(angle) * radius}px)`,
+                top: `calc(48% + ${Math.sin(angle) * radius}px)`,
+                background: i % 4 === 0 
+                  ? "hsl(35, 55%, 60%)" 
+                  : i % 3 === 0 
+                    ? "hsl(225, 40%, 68%)" 
+                    : "hsl(280, 25%, 75%)",
+              }}
+              animate={{
+                y: [0, -18 - i * 2, 0],
+                opacity: [0.08, 0.35, 0.08],
+                scale: [1, 2, 1],
+              }}
+              transition={{
+                duration: 3.5 + i * 0.35,
+                repeat: Infinity,
+                delay: i * 0.25,
+                ease: "easeInOut",
+              }}
+            />
+          );
+        })}
+      </div>
+
+      {/* ── Content layer ── */}
+      <div className="relative z-20 min-h-screen flex flex-col justify-end pb-12 md:pb-16">
         <div className="max-w-[1400px] mx-auto w-full px-8">
           
-          {/* Eyebrow */}
+          {/* Eyebrow — top-left, above everything */}
           <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            transition={{ delay: 0.3, duration: 0.8 }}
-            className="flex items-center gap-4 mb-6"
+            transition={{ delay: 0.4, duration: 0.8 }}
+            className="absolute top-24 left-8 flex items-center gap-4"
           >
             <motion.div
               className="w-12 h-px bg-gradient-to-r from-accent to-accent/10"
               initial={{ scaleX: 0 }}
               animate={{ scaleX: 1 }}
-              transition={{ delay: 0.5, duration: 1 }}
+              transition={{ delay: 0.6, duration: 1 }}
               style={{ transformOrigin: "left" }}
             />
             <span className="font-mono text-[11px] uppercase tracking-[0.3em] text-muted-foreground">
               The AI hiring platform
             </span>
           </motion.div>
-        </div>
 
-        {/* ── Sculpture — centered, dramatic, ON TOP of headline ── */}
-        <div className="flex justify-center items-center py-4 md:py-6 relative">
-          {/* Glow behind sculpture */}
-          <motion.div
-            initial={{ opacity: 0, scale: 0.5 }}
-            animate={{ opacity: 1, scale: 1 }}
-            transition={{ delay: 0.3, duration: 2.5, ease: [0.16, 1, 0.3, 1] }}
-            className="absolute w-[70vw] h-[50vw] max-w-[900px] max-h-[600px]"
-            style={{
-              background: "radial-gradient(ellipse, hsl(35 50% 85% / 0.25) 0%, hsl(270 25% 88% / 0.1) 40%, transparent 70%)",
-              transform: `translate(${offsetX * 0.3}px, ${offsetY * 0.3}px)`,
-            }}
-          />
-
-          {/* The sculpture */}
-          <motion.img
-            src={heroMetal}
-            alt=""
-            width={1920}
-            height={1080}
-            initial={{ opacity: 0, scale: 0.8, y: 40 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            transition={{ duration: 2, delay: 0.2, ease: [0.16, 1, 0.3, 1] }}
-            className="relative z-10 w-[75vw] md:w-[50vw] lg:w-[42vw] max-w-[700px] h-auto"
-            style={{
-              transform: `translate(${offsetX}px, ${offsetY}px)`,
-              transition: "transform 0.15s ease-out",
-              filter: "drop-shadow(0 40px 80px rgba(80, 60, 40, 0.15)) drop-shadow(0 15px 30px rgba(60, 50, 40, 0.1))",
-            }}
-          />
-
-          {/* Floating particles */}
-          {[...Array(8)].map((_, i) => {
-            const angle = (i / 8) * Math.PI * 2;
-            const radius = 150 + (i % 3) * 60;
-            const size = i % 3 === 0 ? 3 : 1.5;
-            return (
-              <motion.div
-                key={i}
-                className="absolute rounded-full"
-                style={{
-                  width: size,
-                  height: size,
-                  left: `calc(50% + ${Math.cos(angle) * radius}px)`,
-                  top: `calc(50% + ${Math.sin(angle) * radius}px)`,
-                  background: i % 3 === 0 ? "hsl(35, 45%, 65%)" : "hsl(225, 35%, 70%)",
-                }}
-                animate={{
-                  y: [0, -15 - i * 2, 0],
-                  opacity: [0.1, 0.4, 0.1],
-                  scale: [1, 1.8, 1],
-                }}
-                transition={{
-                  duration: 3 + i * 0.4,
-                  repeat: Infinity,
-                  delay: i * 0.3,
-                  ease: "easeInOut",
-                }}
-              />
-            );
-          })}
-        </div>
-
-        {/* ── Full-width headline BELOW the sculpture ── */}
-        <div className="max-w-[1400px] mx-auto w-full px-8 mt-2">
+          {/* Headline — full width, sits below/overlapping the sculpture */}
           <motion.h1
             initial={{ opacity: 0, y: 40 }}
             animate={{ opacity: 1, y: 0 }}
@@ -155,7 +175,7 @@ const Hero = () => {
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.7, delay: 1.1 }}
-            className="mt-6 text-[15px] md:text-[16px] text-muted-foreground max-w-[580px] leading-[1.75]"
+            className="mt-6 text-[15px] md:text-[16px] text-muted-foreground max-w-[560px] leading-[1.75]"
           >
             {displayed}
             {started && displayed.length < fullText.length && (

@@ -51,7 +51,7 @@ const Navbar = () => {
         </div>
 
         <a
-          href="#start"
+          href="/playground"
           className="group text-[13px] font-grotesk font-semibold tracking-[-0.01em] text-foreground border border-foreground px-5 py-2.5 hover:bg-foreground hover:text-background transition-all duration-300 flex items-center gap-2 relative overflow-hidden"
         >
           <span className="relative z-10">Get started</span>

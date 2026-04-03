@@ -24,12 +24,12 @@
     --muted: 40 8% 88%;
     --muted-foreground: 230 10% 45%;
 
-    /* Deep ink-indigo — like fountain pen on cream paper */
-    --accent: 225 45% 42%;
+    /* Slate blue-grey — restrained, sophisticated, Rams-like */
+    --accent: 215 20% 50%;
     --accent-foreground: 0 0% 100%;
 
-    /* Warm secondary accent — muted bronze for depth */
-    --accent-warm: 30 30% 55%;
+    /* Cool secondary — slightly deeper slate for depth */
+    --accent-warm: 210 15% 40%;
 
     --destructive: 0 84% 60%;
     --destructive-foreground: 0 0% 100%;
@@ -66,7 +66,7 @@
   }
 
   ::selection {
-    background: hsl(225 45% 42% / 0.15);
+    background: hsl(215 20% 50% / 0.15);
     color: hsl(230 25% 12%);
   }
 }

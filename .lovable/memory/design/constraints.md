@@ -13,6 +13,6 @@ type: constraint
 - NO particles/constellations/flow fields — user rejected as lacking taste
 - Hero layout: visual on TOP, full-width headline BELOW (not side-by-side)
 - Hero visual: liquid metal sculpture as centerpiece with mouse parallax
-- Accent color: deep ink-indigo (225 45% 42%)
+- Accent color: slate blue-grey (215 20% 50%) — restrained, sophisticated, Dieter Rams minimalism
 - Maintain editorial sharpness and magazine-level whitespace
 - Every section needs visual texture (dot grids, gradient washes, hover accent lines)

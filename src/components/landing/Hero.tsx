@@ -1,10 +1,13 @@
 import { motion } from "framer-motion";
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useCallback, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import heroMetal from "@/assets/hero-metal.png";
 
 const Hero = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 });
+  const [chatInput, setChatInput] = useState("");
+  const navigate = useNavigate();
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!containerRef.current) return;
@@ -18,164 +21,208 @@ const Hero = () => {
   const offsetX = (mousePos.x - 0.5) * 30;
   const offsetY = (mousePos.y - 0.5) * 22;
 
-  // Typing effect
-  const fullText = "Describe your workflow. We test every AI solution against your real use cases and deliver three verdicts: performance, speed, cost.";
-  const [displayed, setDisplayed] = useState("");
-  const [started, setStarted] = useState(false);
-
-  useEffect(() => {
-    const timeout = setTimeout(() => setStarted(true), 2200);
-    return () => clearTimeout(timeout);
-  }, []);
-
-  useEffect(() => {
-    if (!started) return;
-    let i = 0;
-    const interval = setInterval(() => {
-      setDisplayed(fullText.slice(0, i + 1));
-      i++;
-      if (i >= fullText.length) clearInterval(interval);
-    }, 18);
-    return () => clearInterval(interval);
-  }, [started]);
+  const handleChatSubmit = () => {
+    if (!chatInput.trim()) return;
+    navigate("/playground", { state: { initialMessage: chatInput } });
+  };
 
   return (
-    <section
-      ref={containerRef}
-      onMouseMove={handleMouseMove}
-      className="relative min-h-screen overflow-hidden"
-    >
-      {/* Warm gradient background */}
-      <div className="absolute inset-0" style={{
-        background: "linear-gradient(170deg, hsl(36 50% 91%) 0%, hsl(38 40% 94%) 30%, hsl(40 33% 97%) 55%, hsl(38 30% 95%) 100%)"
-      }} />
-      
-      {/* Warm golden glow */}
-      <div className="absolute top-[-5%] left-[10%] w-[80%] h-[75%] bg-[radial-gradient(ellipse_at_50%_40%,hsl(33_55%_85%/0.55),transparent_65%)] pointer-events-none" />
-      <div className="absolute top-[5%] left-[20%] w-[60%] h-[55%] bg-[radial-gradient(ellipse_at_50%_35%,hsl(260_20%_90%/0.18),transparent_55%)] pointer-events-none" />
-      <div className="absolute bottom-0 left-0 w-full h-[35%] bg-gradient-to-t from-background to-transparent pointer-events-none" />
-
-      {/* Diagonal line texture — PuzzleAI signature in hero */}
-      <div
-        className="absolute inset-0 opacity-[0.015] pointer-events-none"
-        style={{
-          backgroundImage: `repeating-linear-gradient(
-            -45deg,
-            transparent,
-            transparent 120px,
-            hsl(var(--foreground)) 120px,
-            hsl(var(--foreground)) 121px
-          )`,
-        }}
-      />
-
-      {/* Sculpture zone */}
-      <div className="absolute top-0 left-0 w-full h-[75vh] md:h-[70vh] flex justify-center items-center pointer-events-none">
-        <motion.div
-          initial={{ opacity: 0, scale: 0.4 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ delay: 0.2, duration: 3, ease: [0.16, 1, 0.3, 1] }}
-          className="absolute w-[90vw] h-[60vw] max-w-[1100px] max-h-[700px]"
+    <>
+      {/* SECTION 1: Initial view — chat prompt */}
+      <section
+        ref={containerRef}
+        onMouseMove={handleMouseMove}
+        className="relative min-h-screen overflow-hidden flex flex-col items-center justify-center"
+      >
+        {/* Background */}
+        <div className="absolute inset-0" style={{
+          background: "linear-gradient(170deg, hsl(36 50% 91%) 0%, hsl(38 40% 94%) 30%, hsl(40 33% 97%) 55%, hsl(38 30% 95%) 100%)"
+        }} />
+        <div className="absolute top-[-5%] left-[10%] w-[80%] h-[75%] bg-[radial-gradient(ellipse_at_50%_40%,hsl(33_55%_85%/0.55),transparent_65%)] pointer-events-none" />
+        <div className="absolute top-[5%] left-[20%] w-[60%] h-[55%] bg-[radial-gradient(ellipse_at_50%_35%,hsl(260_20%_90%/0.18),transparent_55%)] pointer-events-none" />
+        <div className="absolute bottom-0 left-0 w-full h-[35%] bg-gradient-to-t from-background to-transparent pointer-events-none" />
+        <div
+          className="absolute inset-0 opacity-[0.015] pointer-events-none"
           style={{
-            background: "radial-gradient(ellipse, hsl(33 55% 83% / 0.35) 0%, hsl(33 45% 88% / 0.15) 35%, hsl(260 20% 90% / 0.06) 55%, transparent 75%)",
-            transform: `translate(${offsetX * 0.15}px, ${offsetY * 0.15}px)`,
+            backgroundImage: `repeating-linear-gradient(-45deg, transparent, transparent 120px, hsl(var(--foreground)) 120px, hsl(var(--foreground)) 121px)`,
           }}
         />
 
-        <motion.div
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          transition={{ delay: 0.8, duration: 2 }}
-          className="absolute w-[40vw] h-[30vw] max-w-[550px] max-h-[400px]"
-          style={{
-            background: "radial-gradient(ellipse, hsl(35 60% 90% / 0.3) 0%, transparent 65%)",
-            transform: `translate(${offsetX * 0.2}px, ${offsetY * 0.2}px)`,
-          }}
-        />
-
-        <motion.img
-          src={heroMetal}
-          alt=""
-          width={1920}
-          height={1080}
-          initial={{ opacity: 0, scale: 0.75, y: 50 }}
-          animate={{ opacity: 1, scale: 1, y: 0 }}
-          transition={{ duration: 2.2, delay: 0.15, ease: [0.16, 1, 0.3, 1] }}
-          className="relative z-10 w-[90vw] md:w-[60vw] lg:w-[52vw] max-w-[850px] h-auto"
-          style={{
-            transform: `translate(${offsetX}px, ${offsetY}px)`,
-            transition: "transform 0.12s ease-out",
-            filter: "drop-shadow(0 50px 100px rgba(80, 55, 30, 0.18)) drop-shadow(0 20px 40px rgba(60, 45, 30, 0.12)) drop-shadow(0 5px 15px rgba(40, 30, 20, 0.06))",
-          }}
-        />
-      </div>
-
-      {/* Content layer */}
-      <div className="relative z-20 min-h-screen flex flex-col justify-end pb-12 md:pb-16">
-        <div className="max-w-[1400px] mx-auto w-full px-8">
-          
-          {/* Eyebrow */}
+        {/* Centered chat prompt */}
+        <div className="relative z-20 w-full max-w-[720px] px-8 flex flex-col items-center">
           <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            transition={{ delay: 0.4, duration: 0.8 }}
-            className="absolute top-24 left-8 flex items-center gap-4"
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 1, delay: 0.3, ease: [0.16, 1, 0.3, 1] }}
+            className="text-center mb-10"
           >
-            <div className="w-8 h-[2px] bg-accent/30" style={{ transform: "skewX(-20deg)" }} />
-            <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-muted-foreground">
-              The AI hiring platform
-            </span>
+            <h1 className="font-display text-[clamp(2.2rem,5vw,4.5rem)] leading-[1] tracking-[-0.03em] text-foreground mb-4">
+              What do you need <span className="italic text-gradient">AI</span> for?
+            </h1>
+            <p className="text-[14px] md:text-[15px] text-muted-foreground leading-relaxed max-w-md mx-auto">
+              Describe your workflow and we'll find, test, and compare the best AI solutions for you.
+            </p>
           </motion.div>
 
-          {/* Headline */}
-          <motion.h1
-            initial={{ opacity: 0, y: 40 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 1.2, delay: 0.6, ease: [0.16, 1, 0.3, 1] }}
-            className="font-display text-[clamp(2.8rem,6.5vw,6.5rem)] leading-[0.9] tracking-[-0.03em] text-foreground"
-          >
-            We help you find the <span className="italic text-gradient">right</span> AI.
-          </motion.h1>
-
-          <motion.p
-            initial={{ opacity: 0, y: 20 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.7, delay: 1.1 }}
-            className="mt-6 text-[15px] md:text-[16px] text-muted-foreground max-w-[560px] leading-[1.75]"
-          >
-            {displayed}
-            {started && displayed.length < fullText.length && (
-              <span className="animate-pulse text-accent ml-0.5">|</span>
-            )}
-          </motion.p>
-
-          {/* CTAs */}
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.6, delay: 1.4 }}
-            className="mt-10 flex flex-col sm:flex-row items-start sm:items-center gap-5"
+            transition={{ duration: 0.8, delay: 0.7 }}
+            className="w-full"
           >
-            <a
-              href="/playground"
-              className="group relative inline-flex items-center gap-3 bg-foreground text-background px-8 py-4 font-grotesk font-semibold text-[12px] uppercase tracking-[0.1em] overflow-hidden transition-all duration-500 hover:shadow-[0_20px_60px_-15px_hsl(215_20%_50%/0.3)]"
+            <div className="relative bg-background/70 backdrop-blur-md border border-border shadow-[0_8px_40px_-12px_hsl(215_20%_50%/0.12)] transition-all duration-300 focus-within:shadow-[0_12px_50px_-10px_hsl(215_20%_50%/0.2)] focus-within:border-accent/30">
+              <textarea
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    handleChatSubmit();
+                  }
+                }}
+                placeholder="e.g. I need an AI to summarize customer support tickets and route them..."
+                rows={3}
+                className="w-full bg-transparent px-6 py-5 text-[14px] text-foreground placeholder:text-muted-foreground/50 outline-none resize-none font-sans leading-relaxed"
+              />
+              <div className="flex items-center justify-between px-5 pb-4">
+                <span className="text-[11px] font-grotesk text-muted-foreground/40 tracking-wide">
+                  Press Enter to start
+                </span>
+                <button
+                  onClick={handleChatSubmit}
+                  className="group flex items-center gap-2 bg-foreground text-background px-5 py-2 font-grotesk font-semibold text-[11px] uppercase tracking-[0.08em] hover:shadow-[0_8px_24px_-8px_hsl(215_20%_50%/0.3)] transition-all duration-300"
+                >
+                  <span>Start</span>
+                  <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="transition-transform duration-300 group-hover:translate-x-1">
+                    <path d="M3 8H13M13 8L9 4M13 8L9 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                </button>
+              </div>
+            </div>
+
+            {/* Quick prompts */}
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ delay: 1.2, duration: 0.6 }}
+              className="mt-4 flex flex-wrap gap-2 justify-center"
             >
-              <span className="relative z-10">Try PuzzleAI</span>
-              <svg width="14" height="14" viewBox="0 0 16 16" fill="none" className="relative z-10 transition-transform duration-300 group-hover:translate-x-1.5">
-                <path d="M3 8H13M13 8L9 4M13 8L9 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              <div className="absolute inset-0 bg-accent/30 translate-y-full group-hover:translate-y-0 transition-transform duration-500" />
-            </a>
-            <a
-              href="#how-it-works"
-              className="group font-grotesk font-medium text-[12px] uppercase tracking-[0.1em] text-muted-foreground hover:text-foreground transition-colors duration-300 flex items-center gap-2"
-            >
-              <span className="border-b border-muted-foreground/30 pb-0.5 group-hover:border-accent transition-colors duration-300">Learn more</span>
-            </a>
+              {[
+                "Summarize legal documents",
+                "Generate marketing copy",
+                "Code review assistant",
+              ].map((prompt) => (
+                <button
+                  key={prompt}
+                  onClick={() => {
+                    setChatInput(prompt);
+                    navigate("/playground", { state: { initialMessage: prompt } });
+                  }}
+                  className="px-4 py-2 text-[11px] font-grotesk font-medium text-muted-foreground border border-border/60 hover:border-accent/40 hover:text-foreground bg-background/40 backdrop-blur-sm transition-all duration-300"
+                >
+                  {prompt}
+                </button>
+              ))}
+            </motion.div>
           </motion.div>
         </div>
-      </div>
-    </section>
+      </section>
+
+      {/* SECTION 2: Scroll-reveal — headline + sculpture */}
+      <section
+        className="relative min-h-screen overflow-hidden"
+      >
+        {/* Background continuity */}
+        <div className="absolute inset-0 bg-background" />
+        <div
+          className="absolute inset-0 opacity-[0.015] pointer-events-none"
+          style={{
+            backgroundImage: `repeating-linear-gradient(-45deg, transparent, transparent 120px, hsl(var(--foreground)) 120px, hsl(var(--foreground)) 121px)`,
+          }}
+        />
+
+        {/* Sculpture */}
+        <div className="absolute top-0 left-0 w-full h-[70vh] flex justify-center items-center pointer-events-none">
+          <motion.div
+            initial={{ opacity: 0, scale: 0.4 }}
+            whileInView={{ opacity: 1, scale: 1 }}
+            viewport={{ once: true, margin: "-100px" }}
+            transition={{ duration: 2.5, ease: [0.16, 1, 0.3, 1] }}
+            className="absolute w-[90vw] h-[60vw] max-w-[1100px] max-h-[700px]"
+            style={{
+              background: "radial-gradient(ellipse, hsl(33 55% 83% / 0.35) 0%, hsl(33 45% 88% / 0.15) 35%, hsl(260 20% 90% / 0.06) 55%, transparent 75%)",
+            }}
+          />
+          <motion.img
+            src={heroMetal}
+            alt=""
+            width={1920}
+            height={1080}
+            initial={{ opacity: 0, scale: 0.8, y: 60 }}
+            whileInView={{ opacity: 1, scale: 1, y: 0 }}
+            viewport={{ once: true, margin: "-50px" }}
+            transition={{ duration: 2, ease: [0.16, 1, 0.3, 1] }}
+            className="relative z-10 w-[90vw] md:w-[60vw] lg:w-[52vw] max-w-[850px] h-auto"
+            style={{
+              filter: "drop-shadow(0 50px 100px rgba(80, 55, 30, 0.18)) drop-shadow(0 20px 40px rgba(60, 45, 30, 0.12)) drop-shadow(0 5px 15px rgba(40, 30, 20, 0.06))",
+            }}
+          />
+        </div>
+
+        {/* Headline content */}
+        <div className="relative z-20 min-h-screen flex flex-col justify-end pb-12 md:pb-16">
+          <div className="max-w-[1400px] mx-auto w-full px-8">
+            <motion.div
+              initial={{ opacity: 0 }}
+              whileInView={{ opacity: 1 }}
+              viewport={{ once: true, margin: "-100px" }}
+              transition={{ duration: 0.8 }}
+              className="flex items-center gap-4 mb-8"
+            >
+              <div className="w-8 h-[2px] bg-accent/30" style={{ transform: "skewX(-20deg)" }} />
+              <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-muted-foreground">
+                The AI hiring platform
+              </span>
+            </motion.div>
+
+            <motion.h2
+              initial={{ opacity: 0, y: 40 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-80px" }}
+              transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1] }}
+              className="font-display text-[clamp(2.8rem,6.5vw,6.5rem)] leading-[0.9] tracking-[-0.03em] text-foreground"
+            >
+              We help you find the <span className="italic text-gradient">right</span> AI.
+            </motion.h2>
+
+            <motion.p
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-50px" }}
+              transition={{ duration: 0.7, delay: 0.2 }}
+              className="mt-6 text-[15px] md:text-[16px] text-muted-foreground max-w-[560px] leading-[1.75]"
+            >
+              Describe your workflow. We test every AI solution against your real use cases and deliver three verdicts: performance, speed, cost.
+            </motion.p>
+
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.6, delay: 0.4 }}
+              className="mt-10"
+            >
+              <a
+                href="#how-it-works"
+                className="group font-grotesk font-medium text-[12px] uppercase tracking-[0.1em] text-muted-foreground hover:text-foreground transition-colors duration-300 flex items-center gap-2"
+              >
+                <span className="border-b border-muted-foreground/30 pb-0.5 group-hover:border-accent transition-colors duration-300">Learn more</span>
+              </a>
+            </motion.div>
+          </div>
+        </div>
+      </section>
+    </>
   );
 };
 

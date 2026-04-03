@@ -69,20 +69,20 @@ const Hero = () => {
           }}
         />
 
-        {/* THE CRYSTAL — big, beautiful, central */}
+        {/* Floating silk — large, dramatic, central */}
         <motion.img
           src={heroSilk}
           alt=""
           width={1920}
           height={1080}
-          initial={{ opacity: 0, scale: 0.7, y: 60 }}
+          initial={{ opacity: 0, scale: 0.85, y: 30 }}
           animate={{ opacity: 1, scale: 1, y: 0 }}
-          transition={{ duration: 2, delay: 0.2, ease: [0.16, 1, 0.3, 1] }}
-          className="relative z-10 w-[85vw] md:w-[55vw] lg:w-[48vw] max-w-[750px] h-auto mt-16 md:mt-0"
+          transition={{ duration: 2.5, delay: 0.2, ease: [0.16, 1, 0.3, 1] }}
+          className="relative z-10 w-[120vw] md:w-[80vw] lg:w-[70vw] max-w-[1100px] h-auto"
           style={{
             transform: `translate(${offsetX}px, ${offsetY}px)`,
             transition: "transform 0.15s ease-out",
-            filter: "drop-shadow(0 30px 80px rgba(120, 90, 170, 0.12)) drop-shadow(0 10px 30px rgba(100, 80, 140, 0.08))",
+            filter: "drop-shadow(0 40px 100px rgba(140, 100, 180, 0.15)) drop-shadow(0 15px 40px rgba(120, 90, 160, 0.1))",
           }}
         />
 

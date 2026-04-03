@@ -29,115 +29,115 @@ interface PieceConfig {
   sizeClass: string;
 }
 
-// Pieces fly in → scatter along lemniscate → converge into assembled puzzle
+// Pieces fly in → scatter → converge into ∞ (infinity/lemniscate) shape
 const pieces: PieceConfig[] = [
-  // CENTER
+  // CENTER crossing of ∞
   {
     src: images[0],
     startX: 0, startY: 0, startScale: 3.2, startRotate: 0,
     spinAmount: 360,
     midX: 0, midY: 0, midScale: 0.38, midRotate: 0,
-    endX: 0, endY: 0, endScale: 0.35, endRotate: 0,
+    endX: 0, endY: 0, endScale: 0.32, endRotate: 0,
     enterAt: 0,
     sizeClass: "w-[50vw] md:w-[28vw] lg:w-[20vw] max-w-[280px]",
   },
-  // RIGHT TOP
+  // RIGHT LOOP — tip
   {
     src: images[1],
     startX: 800, startY: -400, startScale: 0.1, startRotate: -90,
     spinAmount: -540,
     midX: 160, midY: -40, midScale: 0.32, midRotate: 15,
-    endX: 72, endY: -58, endScale: 0.34, endRotate: 0,
+    endX: 210, endY: 0, endScale: 0.30, endRotate: 8,
     enterAt: 0.08,
     sizeClass: "w-[40vw] md:w-[24vw] lg:w-[17vw] max-w-[240px]",
   },
-  // LEFT TOP
+  // RIGHT LOOP — top
   {
     src: images[2],
     startX: -800, startY: -300, startScale: 0.1, startRotate: 120,
     spinAmount: 480,
     midX: -155, midY: -35, midScale: 0.30, midRotate: -20,
-    endX: -72, endY: -58, endScale: 0.34, endRotate: 0,
+    endX: 135, endY: -55, endScale: 0.28, endRotate: -15,
     enterAt: 0.1,
     sizeClass: "w-[38vw] md:w-[22vw] lg:w-[16vw] max-w-[220px]",
   },
-  // RIGHT BOTTOM
+  // RIGHT LOOP — bottom
   {
     src: images[3],
     startX: 600, startY: 500, startScale: 0.1, startRotate: 200,
     spinAmount: -420,
     midX: 120, midY: 55, midScale: 0.28, midRotate: 40,
-    endX: 72, endY: 58, endScale: 0.34, endRotate: 0,
+    endX: 135, endY: 55, endScale: 0.28, endRotate: 15,
     enterAt: 0.12,
     sizeClass: "w-[36vw] md:w-[20vw] lg:w-[15vw] max-w-[210px]",
   },
-  // LEFT BOTTOM
+  // LEFT LOOP — tip
   {
     src: images[4],
     startX: -700, startY: 400, startScale: 0.1, startRotate: -150,
     spinAmount: 600,
     midX: -130, midY: 50, midScale: 0.26, midRotate: -35,
-    endX: -72, endY: 58, endScale: 0.34, endRotate: 0,
+    endX: -210, endY: 0, endScale: 0.30, endRotate: -8,
     enterAt: 0.14,
     sizeClass: "w-[34vw] md:w-[19vw] lg:w-[14vw] max-w-[200px]",
   },
-  // FAR RIGHT
+  // LEFT LOOP — top
   {
     src: images[0],
     startX: 1000, startY: 0, startScale: 0.05, startRotate: 45,
     spinAmount: -720,
     midX: 260, midY: 10, midScale: 0.22, midRotate: 60,
-    endX: 140, endY: 0, endScale: 0.32, endRotate: 0,
+    endX: -135, endY: -55, endScale: 0.28, endRotate: 15,
     enterAt: 0.18,
     sizeClass: "w-[30vw] md:w-[17vw] lg:w-[12vw] max-w-[170px]",
   },
-  // FAR LEFT
+  // LEFT LOOP — bottom
   {
     src: images[1],
     startX: -900, startY: 100, startScale: 0.05, startRotate: -60,
     spinAmount: 540,
     midX: -250, midY: 15, midScale: 0.20, midRotate: -55,
-    endX: -140, endY: 0, endScale: 0.32, endRotate: 0,
+    endX: -135, endY: 55, endScale: 0.28, endRotate: -15,
     enterAt: 0.2,
     sizeClass: "w-[28vw] md:w-[16vw] lg:w-[11vw] max-w-[160px]",
   },
-  // TOP ACCENT
+  // CENTER-RIGHT bridge (upper)
   {
     src: images[3],
     startX: 200, startY: -600, startScale: 0.05, startRotate: 180,
     spinAmount: -900,
     midX: 60, midY: -90, midScale: 0.18, midRotate: 25,
-    endX: 0, endY: -115, endScale: 0.30, endRotate: 0,
+    endX: 55, endY: -28, endScale: 0.24, endRotate: -5,
     enterAt: 0.22,
     sizeClass: "w-[24vw] md:w-[14vw] lg:w-[10vw] max-w-[140px]",
   },
-  // BOTTOM ACCENT
+  // CENTER-LEFT bridge (upper)
   {
     src: images[4],
     startX: -300, startY: 600, startScale: 0.05, startRotate: -200,
     spinAmount: 720,
     midX: -50, midY: 85, midScale: 0.17, midRotate: -30,
-    endX: 0, endY: 115, endScale: 0.30, endRotate: 0,
+    endX: -55, endY: -28, endScale: 0.24, endRotate: 5,
     enterAt: 0.24,
     sizeClass: "w-[22vw] md:w-[13vw] lg:w-[9vw] max-w-[130px]",
   },
-  // OUTER RIGHT TIP
+  // CENTER-RIGHT bridge (lower)
   {
     src: images[2],
     startX: 1200, startY: -200, startScale: 0.05, startRotate: 90,
     spinAmount: -480,
     midX: 320, midY: -20, midScale: 0.15, midRotate: 75,
-    endX: 140, endY: -58, endScale: 0.30, endRotate: 0,
+    endX: 55, endY: 28, endScale: 0.24, endRotate: 5,
     enterAt: 0.26,
     sizeClass: "w-[20vw] md:w-[12vw] lg:w-[8vw] max-w-[120px]",
   },
-  // OUTER LEFT TIP
+  // CENTER-LEFT bridge (lower)
   {
     src: images[0],
     startX: -1100, startY: -150, startScale: 0.05, startRotate: -120,
     spinAmount: 600,
     midX: -310, midY: -25, midScale: 0.14, midRotate: -70,
-    endX: -140, endY: -58, endScale: 0.30, endRotate: 0,
+    endX: -55, endY: 28, endScale: 0.24, endRotate: -5,
     enterAt: 0.28,
     sizeClass: "w-[18vw] md:w-[11vw] lg:w-[8vw] max-w-[110px]",
   },

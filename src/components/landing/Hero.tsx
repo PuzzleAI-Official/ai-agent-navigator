@@ -1,58 +1,6 @@
 import { motion, useMotionValue, useTransform, useSpring } from "framer-motion";
 import { useEffect, useRef, useState } from "react";
-
-/* ─── Organic flowing lines — like topographic contours ─── */
-const FlowField = () => {
-  return (
-    <div className="absolute inset-0 overflow-hidden pointer-events-none">
-      <svg
-        viewBox="0 0 1400 900"
-        className="absolute inset-0 w-full h-full"
-        fill="none"
-        preserveAspectRatio="xMidYMid slice"
-      >
-        {/* Flowing contour lines */}
-        {[...Array(12)].map((_, i) => {
-          const y = 100 + i * 65;
-          const opacity = i < 3 ? 0.03 + i * 0.01 : i > 9 ? 0.06 - (i - 9) * 0.015 : 0.05;
-          return (
-            <motion.path
-              key={i}
-              d={`M-50 ${y} C300 ${y - 30 + Math.sin(i) * 40} 600 ${y + 20 + Math.cos(i) * 50} 900 ${y - 10 + Math.sin(i * 0.7) * 30} S1200 ${y + 15 + Math.cos(i * 1.3) * 25} 1450 ${y}`}
-              stroke="hsl(160 60% 42%)"
-              strokeWidth="1"
-              opacity={opacity}
-              initial={{ pathLength: 0, opacity: 0 }}
-              animate={{ pathLength: 1, opacity }}
-              transition={{ duration: 2.5, delay: i * 0.12, ease: "easeOut" }}
-            />
-          );
-        })}
-        
-        {/* Accent intersection dots */}
-        {[
-          { cx: 340, cy: 280 }, { cx: 720, cy: 420 }, { cx: 1050, cy: 340 },
-          { cx: 200, cy: 500 }, { cx: 890, cy: 220 },
-        ].map((dot, i) => (
-          <motion.circle
-            key={i}
-            cx={dot.cx}
-            cy={dot.cy}
-            r="2"
-            fill="hsl(160 60% 42%)"
-            initial={{ opacity: 0, scale: 0 }}
-            animate={{ opacity: 0.3, scale: 1 }}
-            transition={{ delay: 2 + i * 0.2, duration: 0.5 }}
-          />
-        ))}
-      </svg>
-
-      {/* Soft radial glow */}
-      <div className="absolute top-0 right-0 w-[70%] h-[80%] bg-[radial-gradient(ellipse_at_70%_30%,hsl(160_60%_42%/0.06),transparent_70%)]" />
-      <div className="absolute bottom-0 left-0 w-[50%] h-[60%] bg-[radial-gradient(ellipse_at_20%_80%,hsl(36_33%_90%/0.5),transparent_70%)]" />
-    </div>
-  );
-};
+import heroBg from "@/assets/hero-bg.jpg";
 
 /* ─── Typing effect ─── */
 const TypingText = ({ text, delay = 0 }: { text: string; delay?: number }) => {
@@ -93,6 +41,8 @@ const Hero = () => {
   const springY = useSpring(mouseY, { stiffness: 40, damping: 25 });
   const cardRotateX = useTransform(springY, [-0.5, 0.5], [3, -3]);
   const cardRotateY = useTransform(springX, [-0.5, 0.5], [-3, 3]);
+  const bgX = useTransform(springX, [-0.5, 0.5], [10, -10]);
+  const bgY = useTransform(springY, [-0.5, 0.5], [10, -10]);
 
   const handleMouseMove = (e: React.MouseEvent) => {
     if (!containerRef.current) return;
@@ -107,20 +57,71 @@ const Hero = () => {
       onMouseMove={handleMouseMove}
       className="relative min-h-screen flex items-end pb-20 md:pb-32 overflow-hidden"
     >
-      <FlowField />
+      {/* Parallax background image */}
+      <motion.div
+        style={{ x: bgX, y: bgY }}
+        className="absolute inset-[-20px]"
+      >
+        <img
+          src={heroBg}
+          alt=""
+          width={1920}
+          height={1080}
+          className="w-full h-full object-cover opacity-40"
+        />
+      </motion.div>
+
+      {/* Dot grid overlay */}
+      <div
+        className="absolute inset-0 opacity-[0.35]"
+        style={{
+          backgroundImage: "radial-gradient(circle at 1px 1px, hsl(var(--foreground) / 0.07) 1px, transparent 0)",
+          backgroundSize: "32px 32px",
+        }}
+      />
+
+      {/* Gradient overlays for depth */}
+      <div className="absolute inset-0 bg-gradient-to-b from-background/40 via-transparent to-background/90" />
+      <div className="absolute inset-0 bg-gradient-to-r from-background/60 via-transparent to-transparent" />
+
+      {/* Decorative measurement lines */}
+      <motion.div
+        className="absolute top-[15%] right-[18%] w-px h-[300px] bg-gradient-to-b from-transparent via-accent/15 to-transparent"
+        initial={{ scaleY: 0 }}
+        animate={{ scaleY: 1 }}
+        transition={{ duration: 2, delay: 0.8 }}
+        style={{ transformOrigin: "top" }}
+      />
+      <motion.div
+        className="absolute top-[55%] left-[10%] w-[200px] h-px bg-gradient-to-r from-transparent via-accent/15 to-transparent"
+        initial={{ scaleX: 0 }}
+        animate={{ scaleX: 1 }}
+        transition={{ duration: 1.5, delay: 1.2 }}
+        style={{ transformOrigin: "left" }}
+      />
+
+      {/* Small floating coordinate labels */}
+      <motion.div
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        transition={{ delay: 2.5, duration: 1 }}
+        className="absolute top-[14%] right-[17%] font-mono text-[8px] text-accent/25 tracking-[0.3em]"
+      >
+        42.7°N
+      </motion.div>
 
       {/* Floating 3D evaluation card */}
       <motion.div
         style={{ rotateX: cardRotateX, rotateY: cardRotateY, perspective: 1200 }}
-        className="absolute top-32 right-8 md:right-20 lg:right-32 w-[260px] md:w-[320px] hidden md:block"
+        className="absolute top-28 right-8 md:right-16 lg:right-28 w-[260px] md:w-[300px] hidden lg:block"
       >
         <motion.div
           initial={{ opacity: 0, y: 80, rotateZ: 2 }}
           animate={{ opacity: 1, y: 0, rotateZ: 0 }}
-          transition={{ duration: 1.2, delay: 1, ease: [0.23, 1, 0.32, 1] }}
-          className="border border-border/60 bg-background/70 backdrop-blur-xl p-7 shadow-[0_60px_120px_-30px_hsl(160_60%_42%/0.12)]"
+          transition={{ duration: 1.2, delay: 0.8, ease: [0.23, 1, 0.32, 1] }}
+          className="border border-border bg-background/80 backdrop-blur-xl p-6 shadow-[0_60px_120px_-30px_hsl(160_60%_42%/0.1),0_20px_40px_-10px_hsl(0_0%_0%/0.05)]"
         >
-          <div className="flex items-center justify-between mb-6">
+          <div className="flex items-center justify-between mb-5">
             <div className="font-mono text-[8px] uppercase tracking-[0.25em] text-muted-foreground">
               Eval #4,291
             </div>
@@ -130,7 +131,7 @@ const Hero = () => {
             </div>
           </div>
           
-          <div className="space-y-4 mb-5">
+          <div className="space-y-3.5 mb-5">
             {[
               { name: "Claude 3.5", score: 94 },
               { name: "GPT-4o", score: 89 },
@@ -153,14 +154,14 @@ const Hero = () => {
             ))}
           </div>
 
-          <div className="pt-4 border-t border-border/60 grid grid-cols-3 gap-3">
+          <div className="pt-4 border-t border-border grid grid-cols-3 gap-3">
             {[
               { label: "Perf", val: "94%" },
               { label: "Speed", val: "0.9s" },
               { label: "Cost", val: "$0.005" },
             ].map((m) => (
               <div key={m.label} className="text-center">
-                <div className="font-display text-lg">{m.val}</div>
+                <div className="font-display text-base">{m.val}</div>
                 <div className="font-mono text-[7px] uppercase tracking-[0.2em] text-muted-foreground">{m.label}</div>
               </div>
             ))}
@@ -198,7 +199,7 @@ const Hero = () => {
           Find the{" "}
           <span className="relative inline-block">
             <span className="italic">right</span>
-            <motion.svg
+            <svg
               viewBox="0 0 120 50"
               className="absolute -inset-x-3 -inset-y-2 w-[calc(100%+24px)] h-[calc(100%+16px)]"
               fill="none"
@@ -210,7 +211,7 @@ const Hero = () => {
                 className="draw-circle"
                 transform="rotate(-2 60 25)"
               />
-            </motion.svg>
+            </svg>
           </span>{" "}
           AI
           <br />
@@ -238,12 +239,14 @@ const Hero = () => {
         >
           <a
             href="#start"
-            className="group inline-flex items-center gap-3 bg-foreground text-background px-8 py-4 font-mono text-[13px] uppercase tracking-[0.12em] hover:gap-5 transition-all duration-300"
+            className="group relative inline-flex items-center gap-3 bg-foreground text-background px-8 py-4 font-mono text-[13px] uppercase tracking-[0.12em] overflow-hidden transition-all duration-300"
           >
-            Try PuzzleAI
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="transition-transform duration-300 group-hover:translate-x-1">
+            <span className="relative z-10">Try PuzzleAI</span>
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="relative z-10 transition-transform duration-300 group-hover:translate-x-1">
               <path d="M3 8H13M13 8L9 4M13 8L9 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
+            {/* Hover shimmer */}
+            <div className="absolute inset-0 bg-gradient-to-r from-transparent via-background/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700" />
           </a>
           <a
             href="#how-it-works"
@@ -267,7 +270,7 @@ const Hero = () => {
           ].map((m, i) => (
             <div key={m.value} className="group cursor-default">
               <div className="flex items-center gap-3 mb-1">
-                <span className="font-mono text-[10px] text-muted-foreground/50">0{i + 1}</span>
+                <span className="font-mono text-[10px] text-accent/40">0{i + 1}</span>
                 <span className="font-grotesk font-semibold text-sm tracking-tight">{m.value}</span>
               </div>
               <p className="font-mono text-[10px] text-muted-foreground/60 tracking-wide group-hover:text-muted-foreground transition-colors">{m.desc}</p>

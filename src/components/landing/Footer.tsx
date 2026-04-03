@@ -1,9 +1,9 @@
 const Footer = () => {
   return (
-    <footer className="border-t border-border py-10">
+    <footer className="border-t border-border py-10 bg-secondary/30">
       <div className="container flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-muted-foreground">
-        <div className="flex items-center gap-2">
-          <div className="h-5 w-5 rounded bg-primary flex items-center justify-center">
+        <div className="flex items-center gap-2.5">
+          <div className="h-6 w-6 rounded-md bg-gradient-brand flex items-center justify-center">
             <span className="text-primary-foreground font-heading font-bold text-[10px]">P</span>
           </div>
           <span className="font-heading font-medium text-foreground">PuzzleAI</span>

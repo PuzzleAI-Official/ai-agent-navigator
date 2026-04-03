@@ -233,8 +233,6 @@ const Hero = () => {
 
       {/* SECTION 2: Extended "The AI hiring platform" with popping tools */}
       <div ref={section2Ref} className="relative z-20 min-h-[160vh]" style={{ marginTop: "80vh" }}>
-        {/* Popping tool labels background */}
-        <PopUpLabels />
 
         <div className="min-h-screen flex flex-col justify-end pb-12 md:pb-16 relative">
           <div className="max-w-[1400px] mx-auto w-full px-8">

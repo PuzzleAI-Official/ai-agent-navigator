@@ -1,13 +1,63 @@
 import { motion } from "framer-motion";
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import heroMetal from "@/assets/hero-metal.png";
+
+const PLACEHOLDER_EXAMPLES = [
+  "I need an AI to summarize legal documents",
+  "I need an AI to generate marketing copy",
+  "I need an AI to review my code",
+];
+
+const useTypingPlaceholder = (examples: string[], typingSpeed = 60, deletingSpeed = 35, pauseDuration = 2000) => {
+  const [placeholder, setPlaceholder] = useState("");
+  const [exampleIndex, setExampleIndex] = useState(0);
+  const [isTyping, setIsTyping] = useState(true);
+  const [charIndex, setCharIndex] = useState(0);
+  const [isPaused, setIsPaused] = useState(false);
+
+  useEffect(() => {
+    const current = examples[exampleIndex];
+    if (isPaused) {
+      const timeout = setTimeout(() => {
+        setIsPaused(false);
+        setIsTyping(false);
+      }, pauseDuration);
+      return () => clearTimeout(timeout);
+    }
+    if (isTyping) {
+      if (charIndex < current.length) {
+        const timeout = setTimeout(() => {
+          setPlaceholder(current.slice(0, charIndex + 1));
+          setCharIndex(charIndex + 1);
+        }, typingSpeed);
+        return () => clearTimeout(timeout);
+      } else {
+        setIsPaused(true);
+      }
+    } else {
+      if (charIndex > 0) {
+        const timeout = setTimeout(() => {
+          setPlaceholder(current.slice(0, charIndex - 1));
+          setCharIndex(charIndex - 1);
+        }, deletingSpeed);
+        return () => clearTimeout(timeout);
+      } else {
+        setExampleIndex((exampleIndex + 1) % examples.length);
+        setIsTyping(true);
+      }
+    }
+  }, [charIndex, isTyping, isPaused, exampleIndex, examples, typingSpeed, deletingSpeed, pauseDuration]);
+
+  return placeholder;
+};
 
 const Hero = () => {
   const containerRef = useRef<HTMLDivElement>(null);
   const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 });
   const [chatInput, setChatInput] = useState("");
   const navigate = useNavigate();
+  const animatedPlaceholder = useTypingPlaceholder(PLACEHOLDER_EXAMPLES);
 
   const handleMouseMove = useCallback((e: React.MouseEvent) => {
     if (!containerRef.current) return;

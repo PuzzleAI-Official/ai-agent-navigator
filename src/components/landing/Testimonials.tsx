@@ -37,17 +37,30 @@ const Testimonials = () => {
   const x = useTransform(scrollYProgress, [0, 1], ["5%", "-15%"]);
 
   return (
-    <section ref={containerRef} className="py-32 overflow-hidden">
-      <div className="max-w-[1400px] mx-auto px-8 mb-16">
+    <section ref={containerRef} className="py-32 overflow-hidden relative">
+      {/* Subtle gradient transition */}
+      <div className="absolute inset-0 bg-gradient-to-b from-background via-card/20 to-background" />
+
+      <div className="max-w-[1400px] mx-auto px-8 mb-16 relative">
         <motion.div
           initial={{ opacity: 0, y: 30 }}
           whileInView={{ opacity: 1, y: 0 }}
           viewport={{ once: true }}
           transition={{ duration: 0.6 }}
         >
-          <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground block mb-6">
-            Companies
-          </span>
+          <div className="flex items-center gap-4 mb-6">
+            <motion.div
+              className="w-8 h-px bg-accent"
+              initial={{ scaleX: 0 }}
+              whileInView={{ scaleX: 1 }}
+              viewport={{ once: true }}
+              transition={{ duration: 0.6 }}
+              style={{ transformOrigin: "left" }}
+            />
+            <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground">
+              Companies
+            </span>
+          </div>
           <h2 className="font-display text-[clamp(2.5rem,5vw,4.5rem)] leading-[1] tracking-[-0.02em] max-w-3xl">
             Trusted by teams who
             <br />
@@ -56,8 +69,7 @@ const Testimonials = () => {
         </motion.div>
       </div>
 
-      {/* Horizontal scroll testimonials */}
-      <motion.div style={{ x }} className="flex gap-6 px-8">
+      <motion.div style={{ x }} className="flex gap-6 px-8 relative">
         {testimonials.map((t, i) => (
           <motion.div
             key={t.name}
@@ -65,15 +77,17 @@ const Testimonials = () => {
             whileInView={{ opacity: 1, y: 0 }}
             viewport={{ once: true }}
             transition={{ duration: 0.6, delay: i * 0.15 }}
-            className="flex-shrink-0 w-[480px] border border-border p-10 group hover:bg-secondary/30 transition-colors duration-500 cursor-default"
+            className="flex-shrink-0 w-[480px] border border-border p-10 group hover:border-accent/30 transition-all duration-500 cursor-default bg-background/60 backdrop-blur-sm relative overflow-hidden"
           >
-            {/* Large metric */}
+            {/* Hover accent line */}
+            <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
+
             <div className="mb-8">
-              <span className="font-display text-5xl md:text-6xl tracking-tight text-accent">{t.metric}</span>
+              <span className="font-display text-5xl md:text-6xl tracking-tight text-accent italic">{t.metric}</span>
               <span className="font-mono text-[10px] uppercase tracking-[0.15em] text-muted-foreground ml-3">{t.metricLabel}</span>
             </div>
 
-            <blockquote className="text-foreground/80 leading-relaxed mb-8 text-[15px]">
+            <blockquote className="text-foreground/70 leading-relaxed mb-8 text-[15px]">
               "{t.quote}"
             </blockquote>
 
@@ -82,7 +96,7 @@ const Testimonials = () => {
                 <div className="font-grotesk font-medium text-sm">{t.name}</div>
                 <div className="font-mono text-[10px] text-muted-foreground tracking-wider">{t.role}</div>
               </div>
-              <span className="font-grotesk font-semibold text-foreground/40 text-sm group-hover:text-foreground/60 transition-colors">{t.company}</span>
+              <span className="font-grotesk font-semibold text-foreground/30 text-sm group-hover:text-foreground/50 transition-colors">{t.company}</span>
             </div>
           </motion.div>
         ))}

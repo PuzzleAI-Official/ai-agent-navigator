@@ -7,31 +7,33 @@ const CTASection = () => {
     target: sectionRef,
     offset: ["start end", "end start"],
   });
-  const scale = useTransform(scrollYProgress, [0, 0.5], [0.9, 1]);
+  const scale = useTransform(scrollYProgress, [0, 0.5], [0.92, 1]);
   const opacity = useTransform(scrollYProgress, [0, 0.3], [0, 1]);
 
   return (
     <section ref={sectionRef} id="start" className="py-20 md:py-40 relative overflow-hidden">
-      {/* Background accent elements */}
+      {/* Background accents */}
       <div className="absolute inset-0 pointer-events-none">
         <motion.div
-          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[600px] h-[600px] bg-accent/[0.04] rounded-full blur-[120px]"
+          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[800px] h-[800px] bg-accent/[0.03] rounded-full blur-[150px]"
           style={{ scale }}
         />
-        {/* Grid lines */}
-        <div className="absolute inset-0 opacity-[0.03]" style={{
-          backgroundImage: "linear-gradient(hsl(var(--foreground)) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--foreground)) 1px, transparent 1px)",
-          backgroundSize: "80px 80px",
-        }} />
+        <div
+          className="absolute inset-0 opacity-[0.2]"
+          style={{
+            backgroundImage: "radial-gradient(circle at 1px 1px, hsl(var(--foreground) / 0.04) 1px, transparent 0)",
+            backgroundSize: "48px 48px",
+          }}
+        />
       </div>
 
       <motion.div style={{ scale, opacity }} className="max-w-[1400px] mx-auto px-8">
-        <div className="border border-border p-12 md:p-20 relative">
-          {/* Corner marks */}
-          <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-accent" />
-          <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-accent" />
-          <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-accent" />
-          <div className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-accent" />
+        <div className="border border-border p-12 md:p-20 relative bg-background/50 backdrop-blur-sm">
+          {/* Corner accent marks */}
+          <div className="absolute top-0 left-0 w-6 h-6 border-t-2 border-l-2 border-accent" />
+          <div className="absolute top-0 right-0 w-6 h-6 border-t-2 border-r-2 border-accent" />
+          <div className="absolute bottom-0 left-0 w-6 h-6 border-b-2 border-l-2 border-accent" />
+          <div className="absolute bottom-0 right-0 w-6 h-6 border-b-2 border-r-2 border-accent" />
 
           <div className="text-center">
             <motion.div
@@ -40,7 +42,7 @@ const CTASection = () => {
               viewport={{ once: true, margin: "-100px" }}
               transition={{ duration: 0.8 }}
             >
-              <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-muted-foreground block mb-8">
+              <span className="font-mono text-[11px] uppercase tracking-[0.2em] text-accent/50 block mb-8">
                 Ready?
               </span>
               <h2 className="font-display text-[clamp(3rem,7vw,7rem)] leading-[0.9] tracking-[-0.03em] mb-6">
@@ -55,12 +57,13 @@ const CTASection = () => {
               <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
                 <a
                   href="#"
-                  className="group inline-flex items-center gap-3 bg-foreground text-background px-10 py-5 font-mono text-[13px] uppercase tracking-[0.12em] hover:gap-5 transition-all duration-300"
+                  className="group relative inline-flex items-center gap-3 bg-foreground text-background px-10 py-5 font-mono text-[13px] uppercase tracking-[0.12em] overflow-hidden transition-all duration-300"
                 >
-                  Get started — it's free
-                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="transition-transform duration-300 group-hover:translate-x-1">
+                  <span className="relative z-10">Get started — it's free</span>
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="relative z-10 transition-transform duration-300 group-hover:translate-x-1">
                     <path d="M3 8H13M13 8L9 4M13 8L9 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
+                  <div className="absolute inset-0 bg-gradient-to-r from-transparent via-background/10 to-transparent -translate-x-full group-hover:translate-x-full transition-transform duration-700" />
                 </a>
                 <a
                   href="#"

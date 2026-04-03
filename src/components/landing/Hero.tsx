@@ -121,7 +121,7 @@ const Hero = () => {
       {/* ── Content Layer ── */}
       <div className="relative z-20 min-h-screen flex flex-col justify-between pb-12 md:pb-20">
         <div className="max-w-[1400px] mx-auto w-full px-8 flex-1 flex items-end md:items-center">
-          <div className="w-full pt-[65vh] md:pt-0">
+          <div className="w-full pt-[65vh] md:pt-24">
             {/* Eyebrow */}
             <motion.div
               initial={{ opacity: 0 }}

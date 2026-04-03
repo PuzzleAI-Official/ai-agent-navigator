@@ -4,7 +4,7 @@ import Marquee from "@/components/landing/Marquee";
 
 import ProductDemo from "@/components/landing/ProductDemo";
 import Testimonials from "@/components/landing/Testimonials";
-import WhySection from "@/components/landing/WhySection";
+
 import CTASection from "@/components/landing/CTASection";
 import Footer from "@/components/landing/Footer";
 

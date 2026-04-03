@@ -29,6 +29,8 @@ const MOCK_CANDIDATES: Candidate[] = [
 ];
 
 const Playground = () => {
+  const location = useLocation();
+  const initialMessage = (location.state as any)?.initialMessage || "";
   const [stage, setStage] = useState<Stage>("describe");
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -42,6 +44,7 @@ const Playground = () => {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [testProgress, setTestProgress] = useState(0);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [hasAutoSent, setHasAutoSent] = useState(false);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });

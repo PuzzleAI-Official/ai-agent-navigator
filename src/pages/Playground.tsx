@@ -105,6 +105,32 @@ const Playground = () => {
     return () => clearInterval(interval);
   }, [stage]);
 
+  // Auto-send initial message from homepage
+  useEffect(() => {
+    if (initialMessage && !hasAutoSent && stage === "describe") {
+      setHasAutoSent(true);
+      setInput(initialMessage);
+      // Trigger send after a brief delay
+      setTimeout(() => {
+        const userMsg: Message = { id: Date.now(), role: "user", content: initialMessage };
+        setMessages((m) => [...m, userMsg]);
+        setInput("");
+        setTimeout(() => {
+          setCandidates(MOCK_CANDIDATES);
+          setMessages((m) => [
+            ...m,
+            {
+              id: Date.now(),
+              role: "assistant",
+              content: `Great. I've identified ${MOCK_CANDIDATES.length} candidate AI solutions that match your workflow. You can review them in the right panel and add any specific tools manually.\n\nWhen ready, upload a test sample or describe your test criteria so we can benchmark them.`,
+            },
+          ]);
+          setStage("upload");
+        }, 1200);
+      }, 500);
+    }
+  }, [initialMessage, hasAutoSent, stage]);
+
   const handleSend = () => {
     if (!input.trim()) return;
     const userMsg: Message = { id: Date.now(), role: "user", content: input };

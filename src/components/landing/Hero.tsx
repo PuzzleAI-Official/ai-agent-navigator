@@ -106,8 +106,8 @@ const Hero = () => {
             transition={{ duration: 1, delay: 0.3, ease: [0.16, 1, 0.3, 1] }}
             className="text-center mb-10"
           >
-            <h1 className="font-display text-[clamp(2.2rem,5vw,4.5rem)] leading-[1] tracking-[-0.03em] text-foreground mb-4 font-serif">
-              Find Your Last Puzzle
+            <h1 className="font-display leading-[1] tracking-[-0.03em] text-foreground mb-4 font-serif font-normal text-4xl">
+              FIND YOUR LAST PUZZLE
             </h1>
             <p className="text-[14px] md:text-[15px] text-muted-foreground leading-relaxed max-w-md mx-auto">
               {"\n"}
@@ -132,7 +132,7 @@ const Hero = () => {
                 }}
                 placeholder={animatedPlaceholder + "│"}
                 rows={3}
-                className="w-full bg-transparent px-6 py-5 text-[14px] text-[hsl(220_15%_90%)] placeholder:text-[hsl(220_10%_50%)] outline-none resize-none font-sans leading-relaxed"
+                className="w-full bg-transparent px-6 py-5 text-[14px] text-[hsl(220_15%_90%)] placeholder:text-[hsl(220_10%_50%)] outline-none resize-none font-sans leading-relaxed rounded-none"
               />
               <div className="flex items-center justify-between px-5 pb-4">
                 <span className="text-[11px] font-grotesk text-[hsl(220_10%_40%)] tracking-wide">

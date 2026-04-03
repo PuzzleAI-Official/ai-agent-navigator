@@ -91,7 +91,7 @@ const Hero = () => {
             transition={{ duration: 1, delay: 0.3, ease: [0.16, 1, 0.3, 1] }}
             className="text-center mb-10"
           >
-            <h1 className="font-display leading-[1] tracking-[-0.03em] text-foreground mb-4 font-serif font-normal text-4xl">
+            <h1 className="font-display leading-[1] tracking-[-0.03em] text-foreground mb-4 font-serif font-normal text-5xl">
               FIND YOUR LAST PUZZLE
             </h1>
           </motion.div>

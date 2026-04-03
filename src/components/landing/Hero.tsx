@@ -132,7 +132,7 @@ const Hero = () => {
                 }}
                 placeholder={animatedPlaceholder + "│"}
                 rows={3}
-                className="w-full bg-transparent px-6 py-5 text-[14px] text-[hsl(220_15%_90%)] placeholder:text-[hsl(220_10%_50%)] outline-none resize-none font-sans leading-relaxed"
+                className="w-full bg-transparent px-6 py-5 text-[14px] text-[hsl(220_15%_90%)] placeholder:text-[hsl(220_10%_50%)] outline-none resize-none font-sans leading-relaxed rounded-none"
               />
               <div className="flex items-center justify-between px-5 pb-4">
                 <span className="text-[11px] font-grotesk text-[hsl(220_10%_40%)] tracking-wide">

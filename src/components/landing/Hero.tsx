@@ -1,6 +1,6 @@
 import { motion } from "framer-motion";
 import { useEffect, useRef, useState, useCallback } from "react";
-import heroCrystal from "@/assets/hero-crystal.png";
+import heroSilk from "@/assets/hero-silk.png";
 
 const Hero = () => {
   const containerRef = useRef<HTMLDivElement>(null);

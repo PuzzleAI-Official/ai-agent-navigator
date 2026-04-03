@@ -1,5 +1,6 @@
 import Navbar from "@/components/landing/Navbar";
 import HowItWorks from "@/components/landing/HowItWorks";
+import WhySection from "@/components/landing/WhySection";
 import Footer from "@/components/landing/Footer";
 
 const Feature = () => {
@@ -8,6 +9,7 @@ const Feature = () => {
       <Navbar />
       <div className="pt-20">
         <HowItWorks />
+        <WhySection />
       </div>
       <Footer />
     </div>

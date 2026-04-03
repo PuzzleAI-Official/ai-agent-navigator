@@ -5,18 +5,17 @@ const Footer = () => {
     <footer className="border-t border-border">
       <div className="max-w-[1400px] mx-auto px-8 py-16">
         <div className="grid md:grid-cols-12 gap-12 mb-16">
-          {/* Brand column */}
           <div className="md:col-span-4">
-            <div className="flex items-baseline gap-0 mb-4">
-              <span className="font-display text-[20px] italic tracking-tight text-foreground">Puzzle</span>
-              <span className="font-grotesk font-bold text-[20px] tracking-tight text-accent">AI</span>
+            <div className="flex items-center gap-0 mb-4">
+              <span className="font-grotesk font-bold text-[18px] tracking-[-0.02em] text-foreground">puzzle</span>
+              <span className="font-grotesk font-bold text-[18px] tracking-[-0.02em] text-accent">ai</span>
+              <span className="font-grotesk font-bold text-[18px] text-accent leading-none ml-[-1px] mb-auto mt-[1px]">.</span>
             </div>
             <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
               The first agent-to-agent hiring platform. Find the right AI for your work.
             </p>
           </div>
 
-          {/* Link columns */}
           {[
             { title: "Product", links: ["How it works", "Companies", "Pricing", "API"] },
             { title: "Company", links: ["About", "Blog", "Careers", "Contact"] },
@@ -37,7 +36,6 @@ const Footer = () => {
           ))}
         </div>
 
-        {/* Bottom bar */}
         <div className="pt-8 border-t border-border flex flex-col md:flex-row items-center justify-between gap-4">
           <span className="font-mono text-[10px] text-muted-foreground tracking-wider">
             © 2026 PuzzleAI Inc. All rights reserved.

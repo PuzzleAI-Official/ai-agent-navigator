@@ -96,18 +96,10 @@ const Testimonials = () => {
 
               <div className="absolute bottom-0 left-0 w-0 h-[2px] group-hover:w-[40%] transition-all duration-700" style={{ transform: "skewX(-20deg)", backgroundColor: item.color, opacity: 0.5 }} />
 
-              <div className="flex items-start gap-3 mb-3 relative z-10">
-                <div
-                  className="w-8 h-8 flex items-center justify-center flex-shrink-0"
-                  style={{ backgroundColor: item.bgColor }}
-                >
-                  <item.Icon size={16} style={{ color: item.color }} />
-                </div>
-                <h3 className="font-grotesk font-semibold text-[15px] group-hover:translate-x-1 transition-transform duration-500 mt-1">
-                  {item.title}
-                </h3>
-              </div>
-              <p className="text-muted-foreground text-sm leading-relaxed pl-[2.75rem] relative z-10">
+              <h3 className="font-grotesk font-semibold text-[15px] group-hover:translate-x-1 transition-transform duration-500 mb-3 relative z-10">
+                {item.title}
+              </h3>
+              <p className="text-muted-foreground text-sm leading-relaxed relative z-10">
                 {item.desc}
               </p>
               <span className="absolute top-6 right-6 font-grotesk text-[10px] text-accent/0 group-hover:text-accent/40 transition-colors duration-500 uppercase tracking-wider z-10">

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@300;400;500&family=Inter:wght@300;400;500;600&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -6,48 +6,50 @@
 
 @layer base {
   :root {
-    --background: 220 14% 4%;
-    --foreground: 40 20% 92%;
+    --background: 220 20% 98%;
+    --foreground: 230 25% 10%;
 
-    --card: 220 12% 7%;
-    --card-foreground: 40 20% 92%;
+    --card: 0 0% 100%;
+    --card-foreground: 230 25% 10%;
 
-    --popover: 220 12% 7%;
-    --popover-foreground: 40 20% 92%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 230 25% 10%;
 
-    --primary: 38 92% 50%;
-    --primary-foreground: 220 14% 4%;
+    --primary: 245 58% 51%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 220 10% 12%;
-    --secondary-foreground: 40 20% 92%;
+    --secondary: 230 20% 95%;
+    --secondary-foreground: 230 25% 10%;
 
-    --muted: 220 10% 15%;
-    --muted-foreground: 220 10% 55%;
+    --muted: 230 15% 93%;
+    --muted-foreground: 230 10% 45%;
 
-    --accent: 38 92% 50%;
-    --accent-foreground: 220 14% 4%;
+    --accent: 245 40% 96%;
+    --accent-foreground: 245 58% 51%;
 
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
+    --destructive: 0 84% 60%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 220 10% 16%;
-    --input: 220 10% 16%;
-    --ring: 38 92% 50%;
+    --border: 230 15% 90%;
+    --input: 230 15% 90%;
+    --ring: 245 58% 51%;
 
     --radius: 0.75rem;
 
-    --sidebar-background: 220 12% 6%;
-    --sidebar-foreground: 40 20% 92%;
-    --sidebar-primary: 38 92% 50%;
-    --sidebar-primary-foreground: 220 14% 4%;
-    --sidebar-accent: 220 10% 12%;
-    --sidebar-accent-foreground: 40 20% 92%;
-    --sidebar-border: 220 10% 16%;
-    --sidebar-ring: 38 92% 50%;
+    --sidebar-background: 0 0% 98%;
+    --sidebar-foreground: 230 25% 10%;
+    --sidebar-primary: 245 58% 51%;
+    --sidebar-primary-foreground: 0 0% 100%;
+    --sidebar-accent: 230 20% 95%;
+    --sidebar-accent-foreground: 230 25% 10%;
+    --sidebar-border: 230 15% 90%;
+    --sidebar-ring: 245 58% 51%;
 
-    --gradient-amber: linear-gradient(135deg, hsl(38 92% 50%), hsl(28 92% 55%));
-    --gradient-surface: linear-gradient(180deg, hsl(220 12% 7%), hsl(220 14% 4%));
-    --shadow-glow: 0 0 60px -15px hsl(38 92% 50% / 0.15);
+    /* Custom tokens */
+    --glow-color: 245 58% 51%;
+    --surface-elevated: 0 0% 100%;
+    --gradient-start: 245 58% 51%;
+    --gradient-end: 200 80% 55%;
   }
 }
 
@@ -68,14 +70,59 @@
 @layer utilities {
   .text-gradient {
     @apply bg-clip-text text-transparent;
-    background-image: linear-gradient(135deg, hsl(38 92% 50%), hsl(28 80% 60%), hsl(45 90% 65%));
+    background-image: linear-gradient(135deg, hsl(245 58% 51%), hsl(200 80% 55%));
   }
 
-  .border-gradient {
-    border-image: linear-gradient(135deg, hsl(38 92% 50% / 0.3), transparent) 1;
+  .bg-gradient-brand {
+    background-image: linear-gradient(135deg, hsl(245 58% 51%), hsl(200 80% 55%));
   }
 
-  .glow-amber {
-    box-shadow: 0 0 80px -20px hsl(38 92% 50% / 0.2);
+  .border-gradient-card {
+    position: relative;
   }
+  .border-gradient-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    padding: 1px;
+    background: linear-gradient(135deg, hsl(245 58% 51% / 0.3), hsl(200 80% 55% / 0.15), transparent);
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  .glow-subtle {
+    box-shadow: 0 0 80px -20px hsl(245 58% 51% / 0.12);
+  }
+
+  .glow-strong {
+    box-shadow: 0 0 120px -30px hsl(245 58% 51% / 0.25);
+  }
+
+  .animated-grid {
+    background-size: 40px 40px;
+    background-image:
+      linear-gradient(to right, hsl(230 15% 90% / 0.5) 1px, transparent 1px),
+      linear-gradient(to bottom, hsl(230 15% 90% / 0.5) 1px, transparent 1px);
+    mask-image: radial-gradient(ellipse 60% 50% at 50% 50%, black 40%, transparent 100%);
+  }
+}
+
+/* Animated beam keyframes */
+@keyframes beam-slide {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(200%); }
+}
+
+@keyframes float {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+}
+
+@keyframes pulse-ring {
+  0% { transform: scale(0.8); opacity: 0.5; }
+  50% { transform: scale(1); opacity: 0.2; }
+  100% { transform: scale(0.8); opacity: 0.5; }
 }

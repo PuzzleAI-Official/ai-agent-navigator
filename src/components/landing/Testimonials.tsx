@@ -11,7 +11,7 @@ const testimonials = [
     metricLabel: "vs 3 months",
   },
   {
-    quote: "The testing methodology is what sold us. It's not opinions or benchmarks — it's our actual data, our actual edge cases. No one else does this.",
+    quote: "The testing methodology is what sold us. It's not opinions or benchmarks — it's our actual data, our actual edge cases.",
     name: "Marcus Webb",
     role: "CTO",
     company: "Ramp",
@@ -38,7 +38,6 @@ const Testimonials = () => {
 
   return (
     <section ref={containerRef} className="py-32 overflow-hidden relative">
-      {/* Subtle gradient transition */}
       <div className="absolute inset-0 bg-gradient-to-b from-background via-card/20 to-background" />
 
       <div className="max-w-[1400px] mx-auto px-8 mb-16 relative">
@@ -79,7 +78,6 @@ const Testimonials = () => {
             transition={{ duration: 0.6, delay: i * 0.15 }}
             className="flex-shrink-0 w-[480px] border border-border p-10 group hover:border-accent/30 transition-all duration-500 cursor-default bg-background/60 backdrop-blur-sm relative overflow-hidden"
           >
-            {/* Hover accent line */}
             <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
 
             <div className="mb-8">

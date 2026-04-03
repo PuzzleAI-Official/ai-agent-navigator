@@ -3,7 +3,6 @@ import { motion } from "framer-motion";
 const WhySection = () => {
   return (
     <section id="about" className="py-32 relative">
-      {/* Background gradient */}
       <div className="absolute inset-0 bg-gradient-to-b from-background via-card/30 to-background" />
       <div
         className="absolute inset-0 opacity-[0.2]"
@@ -50,14 +49,12 @@ const WhySection = () => {
             transition={{ duration: 0.6 }}
             className="md:col-span-8 border border-border p-10 md:p-14 relative group overflow-hidden cursor-default bg-background/50 backdrop-blur-sm"
           >
-            {/* Animated dot pattern on hover */}
             <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-700"
               style={{
-                backgroundImage: "radial-gradient(circle at 1px 1px, hsl(var(--accent) / 0.1) 1px, transparent 0)",
+                backgroundImage: "radial-gradient(circle at 1px 1px, hsl(var(--accent) / 0.08) 1px, transparent 0)",
                 backgroundSize: "20px 20px",
               }}
             />
-            {/* Accent line on hover */}
             <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
 
             <div className="relative z-10">
@@ -100,12 +97,9 @@ const WhySection = () => {
             >
               <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
               <div>
-                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/50 block mb-4">
-                  Speed
-                </span>
+                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/50 block mb-4">Speed</span>
                 <h3 className="font-display text-2xl md:text-3xl leading-tight mb-3 group-hover:translate-x-1 transition-transform duration-500">
-                  Results in under
-                  <br /><span className="italic">five minutes.</span>
+                  Results in under<br /><span className="italic">five minutes.</span>
                 </h3>
               </div>
               <p className="text-muted-foreground text-sm mt-4">
@@ -122,12 +116,9 @@ const WhySection = () => {
             >
               <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
               <div>
-                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/50 block mb-4">
-                  Transparency
-                </span>
+                <span className="font-mono text-[10px] uppercase tracking-[0.2em] text-accent/50 block mb-4">Transparency</span>
                 <h3 className="font-display text-2xl md:text-3xl leading-tight mb-3 group-hover:translate-x-1 transition-transform duration-500">
-                  Three metrics.
-                  <br /><span className="italic">Zero noise.</span>
+                  Three metrics.<br /><span className="italic">Zero noise.</span>
                 </h3>
               </div>
               <p className="text-muted-foreground text-sm mt-4">
@@ -148,35 +139,23 @@ const WhySection = () => {
             <div className="grid md:grid-cols-3 gap-8 md:gap-16">
               {[
                 {
-                  icon: (
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <path d="M12 2L2 7l10 5 10-5-10-5z" /><path d="M2 17l10 5 10-5" /><path d="M2 12l10 5 10-5" />
-                    </svg>
-                  ),
+                  icon: "◈",
                   title: "200+ solutions indexed",
                   desc: "From frontier models to specialized agents. Every major provider, continuously updated.",
                 },
                 {
-                  icon: (
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <rect x="3" y="3" width="18" height="18" /><path d="M3 9h18" /><path d="M9 3v18" />
-                    </svg>
-                  ),
+                  icon: "◉",
                   title: "Synthetic test generation",
                   desc: "We don't just use your data — we synthesize edge cases, adversarial inputs, and scaling scenarios.",
                 },
                 {
-                  icon: (
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5">
-                      <circle cx="12" cy="12" r="10" /><path d="M12 6v6l4 2" />
-                    </svg>
-                  ),
+                  icon: "◇",
                   title: "Real-time evaluation",
                   desc: "Watch tests run live. No waiting for reports — see every result as it happens.",
                 },
               ].map((item, i) => (
                 <div key={i} className="flex gap-4">
-                  <div className="text-accent/50 flex-shrink-0 mt-1">{item.icon}</div>
+                  <span className="text-accent/40 text-lg flex-shrink-0 mt-0.5">{item.icon}</span>
                   <div>
                     <h4 className="font-grotesk font-semibold text-sm mb-2">{item.title}</h4>
                     <p className="text-muted-foreground text-sm leading-relaxed">{item.desc}</p>

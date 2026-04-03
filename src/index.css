@@ -24,7 +24,8 @@
     --muted: 36 10% 90%;
     --muted-foreground: 240 5% 45%;
 
-    --accent: 160 60% 42%;
+    /* Warm coral-copper accent — sophisticated, not green */
+    --accent: 15 80% 55%;
     --accent-foreground: 0 0% 100%;
 
     --destructive: 0 84% 60%;
@@ -57,14 +58,12 @@
     font-family: 'Inter', system-ui, sans-serif;
   }
 
-  /* Smooth scrolling */
   html {
     scroll-behavior: smooth;
   }
 
-  /* Custom selection color */
   ::selection {
-    background: hsl(160 60% 42% / 0.2);
+    background: hsl(15 80% 55% / 0.15);
     color: hsl(240 10% 8%);
   }
 }
@@ -98,44 +97,37 @@
 }
 
 /* Smooth reveal */
-@keyframes reveal-up {
-  0% { opacity: 0; transform: translateY(40px); }
-  100% { opacity: 1; transform: translateY(0); }
-}
-
 @keyframes float-gentle {
-  0%, 100% { transform: translateY(0px) rotate(0deg); }
-  50% { transform: translateY(-12px) rotate(1deg); }
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-8px); }
 }
 
 .animate-float {
   animation: float-gentle 6s ease-in-out infinite;
 }
 
-/* Line drawing animation for circle */
-@keyframes draw-circle {
-  0% { stroke-dashoffset: 200; }
+/* Line drawing animation */
+@keyframes draw-line {
+  0% { stroke-dashoffset: 1000; }
   100% { stroke-dashoffset: 0; }
 }
 
-.draw-circle {
-  stroke-dasharray: 200;
-  stroke-dashoffset: 200;
-  animation: draw-circle 1.5s ease-out 0.8s forwards;
+.draw-line {
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 1000;
+  animation: draw-line 3s ease-out 0.5s forwards;
 }
 
-/* Interactive beam */
-@keyframes beam-sweep {
-  0% { left: -20%; }
-  100% { left: 120%; }
+/* Cursor glow */
+@keyframes pulse-ring {
+  0% { transform: scale(0.8); opacity: 0.5; }
+  100% { transform: scale(2); opacity: 0; }
 }
 
-/* Noise texture overlay */
-@keyframes grain {
-  0%, 100% { transform: translate(0, 0); }
-  10% { transform: translate(-5%, -10%); }
-  30% { transform: translate(3%, -15%); }
-  50% { transform: translate(12%, 9%); }
-  70% { transform: translate(9%, 4%); }
-  90% { transform: translate(-1%, 7%); }
+/* Gradient text */
+.text-gradient {
+  background: linear-gradient(135deg, hsl(var(--foreground)), hsl(var(--accent)));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
 }

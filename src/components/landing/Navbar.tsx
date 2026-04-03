@@ -20,7 +20,6 @@ const Navbar = () => {
       }`}
     >
       <div className="max-w-[1400px] mx-auto flex h-20 items-center justify-between px-8">
-        {/* Wordmark — unified elegant treatment */}
         <a href="#" className="group flex items-center gap-0">
           <span className="font-grotesk font-bold text-[20px] tracking-[-0.02em] text-foreground">
             puzzle

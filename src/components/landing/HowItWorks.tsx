@@ -1,89 +1,142 @@
 import { motion } from "framer-motion";
 import { useState } from "react";
 
+/* ─── Step visuals ─── */
+
+// 01 Describe — animated chat/prompt bubbles
+const DescribeVisual = () => (
+  <div className="space-y-2.5">
+    {[
+      { text: "Summarize contracts under 2 pages", delay: 0.6 },
+      { text: "Extract key dates and parties", delay: 0.9 },
+      { text: "Flag unusual vs standard clauses", delay: 1.2 },
+    ].map((line, i) => (
+      <motion.div
+        key={i}
+        initial={{ opacity: 0, x: -12, scale: 0.95 }}
+        whileInView={{ opacity: 1, x: 0, scale: 1 }}
+        viewport={{ once: true }}
+        transition={{ delay: line.delay, duration: 0.4, ease: [0.23, 1, 0.32, 1] }}
+        className="flex items-center gap-3 bg-secondary/60 border border-border/60 px-3.5 py-2.5"
+      >
+        <div className="w-4 h-4 border border-accent/40 flex items-center justify-center flex-shrink-0">
+          <motion.div
+            className="w-2 h-2 bg-accent"
+            initial={{ scale: 0 }}
+            whileInView={{ scale: 1 }}
+            viewport={{ once: true }}
+            transition={{ delay: line.delay + 0.3 }}
+          />
+        </div>
+        <span className="font-mono text-[10px] text-foreground/60 leading-tight">{line.text}</span>
+      </motion.div>
+    ))}
+    <motion.div
+      initial={{ opacity: 0 }}
+      whileInView={{ opacity: 1 }}
+      viewport={{ once: true }}
+      transition={{ delay: 1.6 }}
+      className="flex items-center gap-2 pl-1 pt-1"
+    >
+      <span className="w-1 h-3 bg-accent/60 animate-pulse" />
+      <span className="font-mono text-[9px] text-muted-foreground/40">analyzing requirements...</span>
+    </motion.div>
+  </div>
+);
+
+// 02 Test — animated progress bars racing
+const TestVisual = () => {
+  const providers = [
+    { name: "Claude 3.5", progress: 94, delay: 0.6, duration: 1.8 },
+    { name: "GPT-4o", progress: 89, delay: 0.8, duration: 2.0 },
+    { name: "Gemini 1.5", progress: 76, delay: 1.0, duration: 2.2 },
+    { name: "Mistral L", progress: 68, delay: 1.2, duration: 2.4 },
+  ];
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center justify-between mb-1">
+        <span className="font-mono text-[8px] uppercase tracking-[0.2em] text-muted-foreground/50">Running 50 test cases</span>
+        <motion.span
+          animate={{ opacity: [0.3, 1, 0.3] }}
+          transition={{ repeat: Infinity, duration: 1.5 }}
+          className="font-mono text-[8px] text-accent"
+        >● live</motion.span>
+      </div>
+      {providers.map((p) => (
+        <div key={p.name}>
+          <div className="flex justify-between mb-1">
+            <span className="font-mono text-[10px] text-foreground/50">{p.name}</span>
+            <motion.span
+              className="font-display text-xs italic text-foreground/70"
+              initial={{ opacity: 0 }}
+              whileInView={{ opacity: 1 }}
+              viewport={{ once: true }}
+              transition={{ delay: p.delay + p.duration }}
+            >{p.progress}%</motion.span>
+          </div>
+          <div className="h-[4px] bg-muted/60 overflow-hidden">
+            <motion.div
+              className="h-full bg-gradient-to-r from-accent/70 to-accent"
+              initial={{ width: 0 }}
+              whileInView={{ width: `${p.progress}%` }}
+              viewport={{ once: true }}
+              transition={{ delay: p.delay, duration: p.duration, ease: "easeOut" }}
+            />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+};
+
+// 03 Decide — verdict cards
+const DecideVisual = () => (
+  <div className="space-y-2">
+    {[
+      { metric: "Performance", value: "94%", icon: "◉" },
+      { metric: "Speed", value: "0.9s", icon: "◈" },
+      { metric: "Cost", value: "$0.003", icon: "◇" },
+    ].map((m, i) => (
+      <motion.div
+        key={m.metric}
+        initial={{ opacity: 0, y: 8 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        viewport={{ once: true }}
+        transition={{ delay: 0.8 + i * 0.15 }}
+        className="flex items-center justify-between border border-border/60 px-3.5 py-2.5 bg-secondary/30 hover:bg-secondary/60 transition-colors duration-300"
+      >
+        <div className="flex items-center gap-2.5">
+          <span className="text-accent/50 text-xs">{m.icon}</span>
+          <span className="font-mono text-[10px] uppercase tracking-wider text-foreground/50">{m.metric}</span>
+        </div>
+        <span className="font-display text-base italic">{m.value}</span>
+      </motion.div>
+    ))}
+  </div>
+);
+
 const steps = [
   {
     num: "01",
     title: "Describe",
     headline: "Tell us what you need AI to do.",
     body: "In plain language, describe your workflow, upload sample data, or paste your current process. Our system extracts testable requirements — no technical setup needed.",
-    visual: (
-      <div className="space-y-3">
-        {["Summarize legal contracts under 2 pages", "Extract key dates and parties", "Flag unusual clauses vs. standard templates"].map((line, i) => (
-          <motion.div
-            key={i}
-            initial={{ opacity: 0, x: -10 }}
-            whileInView={{ opacity: 1, x: 0 }}
-            viewport={{ once: true }}
-            transition={{ delay: 0.8 + i * 0.15 }}
-            className="flex items-start gap-3"
-          >
-            <div className="w-1.5 h-1.5 bg-accent mt-1.5 flex-shrink-0" />
-            <span className="font-mono text-[11px] text-foreground/60 leading-relaxed">{line}</span>
-          </motion.div>
-        ))}
-      </div>
-    ),
+    visual: <DescribeVisual />,
   },
   {
     num: "02",
     title: "Test",
     headline: "We run every candidate against your reality.",
     body: "We match relevant AI solutions from 200+ indexed providers, synthesize comprehensive test data, and run each candidate head-to-head on your actual scenarios.",
-    visual: (
-      <div className="grid grid-cols-4 gap-1.5">
-        {Array.from({ length: 16 }, (_, i) => {
-          const isActive = [0, 2, 5, 7, 8, 10, 13, 15].includes(i);
-          return (
-            <motion.div
-              key={i}
-              initial={{ opacity: 0, scale: 0.5 }}
-              whileInView={{ opacity: 1, scale: 1 }}
-              viewport={{ once: true }}
-              transition={{ delay: 0.8 + i * 0.04 }}
-              className={`aspect-square border ${
-                isActive
-                  ? "border-accent/30 bg-accent/10"
-                  : "border-border bg-secondary/30"
-              } flex items-center justify-center`}
-            >
-              {isActive && <div className="w-1 h-1 bg-accent" />}
-            </motion.div>
-          );
-        })}
-      </div>
-    ),
+    visual: <TestVisual />,
   },
   {
     num: "03",
     title: "Decide",
     headline: "Three numbers. No noise.",
     body: "Performance — how many use cases each solution handles. Speed — real latency. Cost — actual pricing on your workload. You decide.",
-    visual: (
-      <div className="space-y-4">
-        {[
-          { label: "Performance", value: "94%", bar: 94 },
-          { label: "Speed", value: "0.9s", bar: 82 },
-          { label: "Cost", value: "$0.003", bar: 70 },
-        ].map((m, i) => (
-          <div key={m.label}>
-            <div className="flex justify-between mb-1.5">
-              <span className="font-mono text-[10px] text-muted-foreground uppercase tracking-wider">{m.label}</span>
-              <span className="font-display text-sm italic">{m.value}</span>
-            </div>
-            <div className="h-[3px] bg-muted overflow-hidden">
-              <motion.div
-                className="h-full bg-accent"
-                initial={{ width: 0 }}
-                whileInView={{ width: `${m.bar}%` }}
-                viewport={{ once: true }}
-                transition={{ duration: 1, delay: 0.8 + i * 0.2 }}
-              />
-            </div>
-          </div>
-        ))}
-      </div>
-    ),
+    visual: <DecideVisual />,
   },
 ];
 
@@ -137,10 +190,13 @@ const HowItWorks = () => {
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, margin: "-80px" }}
               transition={{ duration: 0.6, delay: i * 0.1 }}
-              className="border-t border-border group cursor-default"
+              className="border-t border-border group cursor-default relative"
               onMouseEnter={() => setHoveredStep(i)}
               onMouseLeave={() => setHoveredStep(null)}
             >
+              {/* Hover accent bar */}
+              <div className="absolute top-0 left-0 w-0 h-[2px] bg-accent group-hover:w-full transition-all duration-700" />
+
               <div className="grid md:grid-cols-12 gap-8 items-start py-16 md:py-20">
                 <div className="md:col-span-1">
                   <span className="font-mono text-[11px] text-accent/40">{step.num}</span>
@@ -149,7 +205,7 @@ const HowItWorks = () => {
                   <h3 className="font-display text-4xl md:text-5xl tracking-[-0.02em] group-hover:translate-x-2 transition-transform duration-500">
                     {step.title}
                     <motion.span
-                      className="inline-block w-2 h-2 bg-accent ml-2 align-super"
+                      className="inline-block w-1.5 h-1.5 bg-accent ml-2 align-super"
                       initial={{ scale: 0 }}
                       animate={{ scale: hoveredStep === i ? 1 : 0 }}
                       transition={{ duration: 0.2 }}
@@ -167,11 +223,11 @@ const HowItWorks = () => {
                 <div className="md:col-span-4">
                   <motion.div
                     animate={{
-                      opacity: hoveredStep === i ? 1 : 0.4,
-                      y: hoveredStep === i ? 0 : 4,
+                      opacity: hoveredStep === i ? 1 : 0.5,
+                      y: hoveredStep === i ? 0 : 6,
                     }}
                     transition={{ duration: 0.4 }}
-                    className="p-6 border border-border bg-card/50 backdrop-blur-sm shadow-sm"
+                    className="p-5 border border-border/60 bg-background/80 backdrop-blur-sm shadow-[0_8px_30px_-12px_hsl(0_0%_0%/0.04)]"
                   >
                     {step.visual}
                   </motion.div>

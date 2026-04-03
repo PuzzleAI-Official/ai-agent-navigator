@@ -56,11 +56,11 @@ const Hero = () => {
             transition={{ duration: 1, delay: 0.3, ease: [0.16, 1, 0.3, 1] }}
             className="text-center mb-10"
           >
-            <h1 className="font-display text-[clamp(2.2rem,5vw,4.5rem)] leading-[1] tracking-[-0.03em] text-foreground mb-4">
-              What do you need <span className="italic text-gradient">AI</span> for?
+            <h1 className="font-display text-[clamp(2.2rem,5vw,4.5rem)] leading-[1] tracking-[-0.03em] text-foreground mb-4 font-serif">
+              Find Your Last Puzzle
             </h1>
             <p className="text-[14px] md:text-[15px] text-muted-foreground leading-relaxed max-w-md mx-auto">
-              Describe your workflow and we'll find, test, and compare the best AI solutions for you.
+              {"\n"}
             </p>
           </motion.div>
 

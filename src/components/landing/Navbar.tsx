@@ -20,14 +20,13 @@ const Navbar = () => {
       }`}
     >
       <div className="max-w-[1400px] mx-auto flex h-20 items-center justify-between px-8">
-        {/* Logo with puzzle mark */}
-        <a href="#" className="flex items-center gap-2.5 group">
-          <div className="w-7 h-7 border-2 border-foreground relative group-hover:border-accent transition-colors duration-300">
-            <div className="absolute top-0 left-0 w-3 h-3 bg-accent" />
-            <div className="absolute bottom-0 right-0 w-3 h-3 bg-foreground/10" />
-          </div>
-          <span className="font-grotesk font-semibold text-lg tracking-tight text-foreground">
-            PuzzleAI
+        {/* Wordmark logo — Puzzle styled within the serif, AI in grotesk */}
+        <a href="#" className="flex items-baseline gap-0 group">
+          <span className="font-display text-[22px] italic tracking-tight text-foreground transition-colors duration-300">
+            Puzzle
+          </span>
+          <span className="font-grotesk font-bold text-[22px] tracking-tight text-accent transition-colors duration-300">
+            AI
           </span>
         </a>
 

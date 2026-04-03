@@ -7,11 +7,9 @@ const Footer = () => {
         <div className="grid md:grid-cols-12 gap-12 mb-16">
           {/* Brand column */}
           <div className="md:col-span-4">
-            <div className="flex items-center gap-2.5 mb-4">
-              <div className="w-6 h-6 border-2 border-foreground relative">
-                <div className="absolute top-0 left-0 w-2.5 h-2.5 bg-accent" />
-              </div>
-              <span className="font-grotesk font-semibold text-lg">PuzzleAI</span>
+            <div className="flex items-baseline gap-0 mb-4">
+              <span className="font-display text-[20px] italic tracking-tight text-foreground">Puzzle</span>
+              <span className="font-grotesk font-bold text-[20px] tracking-tight text-accent">AI</span>
             </div>
             <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
               The first agent-to-agent hiring platform. Find the right AI for your work.

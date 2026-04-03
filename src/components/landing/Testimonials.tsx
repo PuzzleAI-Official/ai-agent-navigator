@@ -6,62 +6,83 @@ const useCases = [
     title: "Document Parsing",
     desc: "Extract, summarize, and structure data from contracts, invoices, and reports.",
     icon: "◈",
-    providers: ["Anthropic", "OpenAI", "Google"],
+    providers: [
+      { name: "Anthropic", logo: "https://cdn.brandfetch.io/anthropic.com/w/512/h/512/logo" },
+      { name: "OpenAI", logo: "https://cdn.brandfetch.io/openai.com/w/512/h/512/logo" },
+      { name: "Google", logo: "https://cdn.brandfetch.io/google.com/w/512/h/512/logo" },
+    ],
   },
   {
     title: "Inbound Agents",
     desc: "AI agents that handle customer inquiries, support tickets, and lead qualification.",
     icon: "◇",
-    providers: ["Intercom", "Zendesk", "Ada"],
+    providers: [
+      { name: "Intercom", logo: "https://cdn.brandfetch.io/intercom.com/w/512/h/512/logo" },
+      { name: "Zendesk", logo: "https://cdn.brandfetch.io/zendesk.com/w/512/h/512/logo" },
+      { name: "Ada", logo: "https://cdn.brandfetch.io/ada.cx/w/512/h/512/logo" },
+    ],
   },
   {
     title: "Outbound Agents",
     desc: "Automate outreach, follow-ups, and personalized messaging at scale.",
     icon: "▹",
-    providers: ["Apollo", "Outreach", "Salesloft"],
+    providers: [
+      { name: "Apollo", logo: "https://cdn.brandfetch.io/apollo.io/w/512/h/512/logo" },
+      { name: "Outreach", logo: "https://cdn.brandfetch.io/outreach.io/w/512/h/512/logo" },
+      { name: "Salesloft", logo: "https://cdn.brandfetch.io/salesloft.com/w/512/h/512/logo" },
+    ],
   },
   {
     title: "Voice & Phone Agents",
     desc: "Real-time AI voice assistants for calls, IVR, and conversational workflows.",
     icon: "◎",
-    providers: ["Vapi", "Bland AI", "Retell"],
+    providers: [
+      { name: "Vapi", logo: "https://cdn.brandfetch.io/vapi.ai/w/512/h/512/logo" },
+      { name: "Bland AI", logo: "https://cdn.brandfetch.io/bland.ai/w/512/h/512/logo" },
+      { name: "Retell", logo: "https://cdn.brandfetch.io/retellai.com/w/512/h/512/logo" },
+    ],
   },
   {
     title: "Chatbot Agents",
     desc: "Deploy intelligent chatbots across web, Slack, and messaging platforms.",
     icon: "⬡",
-    providers: ["Botpress", "Voiceflow", "Rasa"],
+    providers: [
+      { name: "Botpress", logo: "https://cdn.brandfetch.io/botpress.com/w/512/h/512/logo" },
+      { name: "Voiceflow", logo: "https://cdn.brandfetch.io/voiceflow.com/w/512/h/512/logo" },
+      { name: "Rasa", logo: "https://cdn.brandfetch.io/rasa.com/w/512/h/512/logo" },
+    ],
   },
   {
     title: "Code Generation",
     desc: "AI-powered code writing, review, and refactoring for engineering teams.",
     icon: "⟐",
-    providers: ["Cursor", "Copilot", "Codeium"],
+    providers: [
+      { name: "Cursor", logo: "https://cdn.brandfetch.io/cursor.com/w/512/h/512/logo" },
+      { name: "GitHub", logo: "https://cdn.brandfetch.io/github.com/w/512/h/512/logo" },
+      { name: "Codeium", logo: "https://cdn.brandfetch.io/codeium.com/w/512/h/512/logo" },
+    ],
   },
 ];
 
-const ProviderGhost = ({ names }: { names: string[] }) => (
-  <div className="absolute -top-2 -right-2 w-[65%] h-[75%] pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-700 ease-out">
-    {names.map((name, i) => (
-      <div
-        key={name}
-        className="absolute font-grotesk font-black uppercase tracking-[-0.04em] text-foreground/[0.04] group-hover:text-foreground/[0.07] transition-all duration-700 select-none whitespace-nowrap"
+const ProviderLogos = ({ providers }: { providers: typeof useCases[0]["providers"] }) => (
+  <div className="absolute -top-1 -right-1 pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-600">
+    {providers.map((p, i) => (
+      <img
+        key={p.name}
+        src={p.logo}
+        alt={p.name}
+        className="absolute object-contain transition-all duration-700 opacity-0 group-hover:opacity-[0.12] grayscale"
         style={{
-          fontSize: `${28 - i * 6}px`,
-          top: `${i * 32 + 8}px`,
-          right: `${i * 12 + 8}px`,
-          transform: `rotate(-${4 + i * 2}deg) translateY(8px)`,
-          transitionDelay: `${i * 80}ms`,
+          width: `${40 - i * 6}px`,
+          height: `${40 - i * 6}px`,
+          top: `${i * 28 + 12}px`,
+          right: `${i * 20 + 16}px`,
+          transitionDelay: `${i * 100}ms`,
+          transform: `rotate(${-3 + i * 4}deg)`,
         }}
-      >
-        {name}
-      </div>
+        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
+      />
     ))}
-    {/* Radial glow behind providers */}
-    <div
-      className="absolute top-1/2 right-0 -translate-y-1/2 w-32 h-32 rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-700 blur-3xl"
-      style={{ background: "hsl(var(--accent) / 0.06)" }}
-    />
   </div>
 );
 
@@ -100,7 +121,7 @@ const Testimonials = () => {
               onClick={() => navigate("/playground")}
               className="group border border-border p-7 cursor-pointer hover:border-accent/30 transition-all duration-500 bg-background/50 backdrop-blur-sm relative overflow-hidden"
             >
-              <ProviderGhost names={item.providers} />
+              <ProviderLogos providers={item.providers} />
               <div className="absolute bottom-0 left-0 w-0 h-[2px] bg-accent/40 group-hover:w-[40%] transition-all duration-700" style={{ transform: "skewX(-20deg)" }} />
               <div className="flex items-start gap-3 mb-3 relative z-10">
                 <span className="text-accent/40 text-sm mt-0.5">{item.icon}</span>

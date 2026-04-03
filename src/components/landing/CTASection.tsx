@@ -67,7 +67,7 @@ const CTASection = () => {
                 Describe your workflow in plain language. Get performance, speed, and cost
                 verdicts on 200+ AI solutions in under five minutes.
               </p>
-              <div className="flex flex-col sm:flex-row items-center justify-center gap-4">
+              <div className="flex items-center justify-center">
                 <a
                   href="/playground"
                   className="group relative inline-flex items-center gap-3 bg-foreground text-background px-10 py-5 font-grotesk font-semibold text-[13px] uppercase tracking-[0.08em] overflow-hidden transition-all duration-300 hover:shadow-[0_12px_40px_-12px_hsl(215_20%_50%/0.4)] shimmer-hover"
@@ -76,9 +76,6 @@ const CTASection = () => {
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="relative z-10 transition-transform duration-300 group-hover:translate-x-1">
                     <path d="M3 8H13M13 8L9 4M13 8L9 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
-                </a>
-                <a href="#" className="font-grotesk font-medium text-[13px] tracking-[-0.01em] text-muted-foreground hover:text-foreground transition-colors px-6 py-5">
-                  Book a demo →
                 </a>
               </div>
             </motion.div>

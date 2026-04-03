@@ -1,15 +1,34 @@
 import { motion } from "framer-motion";
 import { useNavigate } from "react-router-dom";
 
+import anthropicLogo from "@/assets/providers/anthropic.png";
+import openaiLogo from "@/assets/providers/openai.png";
+import googleLogo from "@/assets/providers/google.png";
+import intercomLogo from "@/assets/providers/intercom.png";
+import zendeskLogo from "@/assets/providers/zendesk.png";
+import adaLogo from "@/assets/providers/ada.png";
+import apolloLogo from "@/assets/providers/apollo.png";
+import outreachLogo from "@/assets/providers/outreach.png";
+import salesloftLogo from "@/assets/providers/salesloft.png";
+import vapiLogo from "@/assets/providers/vapi.png";
+import twilioLogo from "@/assets/providers/twilio.png";
+import vonageLogo from "@/assets/providers/vonage.png";
+import botpressLogo from "@/assets/providers/botpress.png";
+import voiceflowLogo from "@/assets/providers/voiceflow.png";
+import rasaLogo from "@/assets/providers/rasa.png";
+import cursorLogo from "@/assets/providers/cursor.png";
+import githubLogo from "@/assets/providers/github.png";
+import codeiumLogo from "@/assets/providers/codeium.png";
+
 const useCases = [
   {
     title: "Document Parsing",
     desc: "Extract, summarize, and structure data from contracts, invoices, and reports.",
     icon: "◈",
     providers: [
-      { name: "Anthropic", logo: "https://logo.clearbit.com/anthropic.com" },
-      { name: "OpenAI", logo: "https://logo.clearbit.com/openai.com" },
-      { name: "Google", logo: "https://logo.clearbit.com/google.com" },
+      { name: "Anthropic", logo: anthropicLogo },
+      { name: "OpenAI", logo: openaiLogo },
+      { name: "Google", logo: googleLogo },
     ],
   },
   {
@@ -17,9 +36,9 @@ const useCases = [
     desc: "AI agents that handle customer inquiries, support tickets, and lead qualification.",
     icon: "◇",
     providers: [
-      { name: "Intercom", logo: "https://logo.clearbit.com/intercom.com" },
-      { name: "Zendesk", logo: "https://logo.clearbit.com/zendesk.com" },
-      { name: "Ada", logo: "https://logo.clearbit.com/ada.cx" },
+      { name: "Intercom", logo: intercomLogo },
+      { name: "Zendesk", logo: zendeskLogo },
+      { name: "Ada", logo: adaLogo },
     ],
   },
   {
@@ -27,9 +46,9 @@ const useCases = [
     desc: "Automate outreach, follow-ups, and personalized messaging at scale.",
     icon: "▹",
     providers: [
-      { name: "Apollo", logo: "https://logo.clearbit.com/apollo.io" },
-      { name: "Outreach", logo: "https://logo.clearbit.com/outreach.io" },
-      { name: "Salesloft", logo: "https://logo.clearbit.com/salesloft.com" },
+      { name: "Apollo", logo: apolloLogo },
+      { name: "Outreach", logo: outreachLogo },
+      { name: "Salesloft", logo: salesloftLogo },
     ],
   },
   {
@@ -37,9 +56,9 @@ const useCases = [
     desc: "Real-time AI voice assistants for calls, IVR, and conversational workflows.",
     icon: "◎",
     providers: [
-      { name: "Vapi", logo: "https://logo.clearbit.com/vapi.ai" },
-      { name: "Twilio", logo: "https://logo.clearbit.com/twilio.com" },
-      { name: "Vonage", logo: "https://logo.clearbit.com/vonage.com" },
+      { name: "Vapi", logo: vapiLogo },
+      { name: "Twilio", logo: twilioLogo },
+      { name: "Vonage", logo: vonageLogo },
     ],
   },
   {
@@ -47,9 +66,9 @@ const useCases = [
     desc: "Deploy intelligent chatbots across web, Slack, and messaging platforms.",
     icon: "⬡",
     providers: [
-      { name: "Botpress", logo: "https://logo.clearbit.com/botpress.com" },
-      { name: "Voiceflow", logo: "https://logo.clearbit.com/voiceflow.com" },
-      { name: "Rasa", logo: "https://logo.clearbit.com/rasa.com" },
+      { name: "Botpress", logo: botpressLogo },
+      { name: "Voiceflow", logo: voiceflowLogo },
+      { name: "Rasa", logo: rasaLogo },
     ],
   },
   {
@@ -57,47 +76,31 @@ const useCases = [
     desc: "AI-powered code writing, review, and refactoring for engineering teams.",
     icon: "⟐",
     providers: [
-      { name: "Cursor", logo: "https://logo.clearbit.com/cursor.com" },
-      { name: "GitHub", logo: "https://logo.clearbit.com/github.com" },
-      { name: "Codeium", logo: "https://logo.clearbit.com/codeium.com" },
+      { name: "Cursor", logo: cursorLogo },
+      { name: "GitHub", logo: githubLogo },
+      { name: "Codeium", logo: codeiumLogo },
     ],
   },
 ];
 
 const ProviderLogos = ({ providers }: { providers: typeof useCases[0]["providers"] }) => (
-  <div className="absolute top-0 right-0 w-[55%] h-full pointer-events-none">
+  <div className="absolute top-0 right-0 w-[50%] h-full pointer-events-none flex items-start justify-end gap-2 p-4 pt-5 pr-5">
     {providers.map((p, i) => (
-      <motion.img
+      <img
         key={p.name}
         src={p.logo}
         alt={p.name}
-        initial={{ opacity: 0, scale: 0.7, y: 10 }}
-        className="absolute object-contain grayscale"
+        loading="lazy"
+        width={512}
+        height={512}
+        className="opacity-0 group-hover:opacity-[0.10] transition-all duration-700 grayscale object-contain"
         style={{
-          width: `${36 - i * 4}px`,
-          height: `${36 - i * 4}px`,
-          top: `${16 + i * 30}px`,
-          right: `${12 + i * 24}px`,
-          opacity: 0,
+          width: `${32 - i * 4}px`,
+          height: `${32 - i * 4}px`,
+          transitionDelay: `${i * 100}ms`,
+          transform: `translateY(${i * 6}px)`,
         }}
-        onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
       />
-    ))}
-    {/* Fallback: always show text names on hover */}
-    {providers.map((p, i) => (
-      <span
-        key={`text-${p.name}`}
-        className="absolute font-grotesk font-black uppercase tracking-[-0.02em] text-foreground/0 group-hover:text-foreground/[0.06] transition-all duration-700 select-none whitespace-nowrap"
-        style={{
-          fontSize: `${26 - i * 5}px`,
-          top: `${14 + i * 30}px`,
-          right: `${10 + i * 18}px`,
-          transform: `rotate(${-3 + i * 3}deg)`,
-          transitionDelay: `${i * 80}ms`,
-        }}
-      >
-        {p.name}
-      </span>
     ))}
   </div>
 );

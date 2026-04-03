@@ -157,11 +157,7 @@ const Hero = () => {
               transition={{ delay: 1.2, duration: 0.6 }}
               className="mt-4 flex flex-wrap gap-2 justify-center"
             >
-              {[
-                "Summarize legal documents",
-                "Generate marketing copy",
-                "Code review assistant",
-              ].map((prompt) => (
+              {PLACEHOLDER_EXAMPLES.map((prompt) => (
                 <button
                   key={prompt}
                   onClick={() => {

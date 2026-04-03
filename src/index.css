@@ -66,7 +66,7 @@
   }
 
   ::selection {
-    background: hsl(225 45% 42% / 0.15);
+    background: hsl(215 20% 50% / 0.15);
     color: hsl(230 25% 12%);
   }
 }

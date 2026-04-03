@@ -120,7 +120,7 @@ const Hero = () => {
             transition={{ duration: 0.8, delay: 0.7 }}
             className="w-full"
           >
-            <div className="relative bg-background/70 backdrop-blur-md border border-border shadow-[0_8px_40px_-12px_hsl(215_20%_50%/0.12)] transition-all duration-300 focus-within:shadow-[0_12px_50px_-10px_hsl(215_20%_50%/0.2)] focus-within:border-accent/30">
+            <div className="relative bg-[hsl(220_20%_12%)] backdrop-blur-md border border-[hsl(220_15%_20%)] shadow-[0_8px_40px_-12px_hsl(220_30%_8%/0.5)] transition-all duration-300 focus-within:shadow-[0_12px_50px_-10px_hsl(220_30%_8%/0.6)] focus-within:border-[hsl(220_15%_28%)]">
               <textarea
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
@@ -132,15 +132,15 @@ const Hero = () => {
                 }}
                 placeholder={animatedPlaceholder + "│"}
                 rows={3}
-                className="w-full bg-transparent px-6 py-5 text-[14px] text-foreground placeholder:text-muted-foreground/50 outline-none resize-none font-sans leading-relaxed"
+                className="w-full bg-transparent px-6 py-5 text-[14px] text-[hsl(220_15%_90%)] placeholder:text-[hsl(220_10%_50%)] outline-none resize-none font-sans leading-relaxed"
               />
               <div className="flex items-center justify-between px-5 pb-4">
-                <span className="text-[11px] font-grotesk text-muted-foreground/40 tracking-wide">
+                <span className="text-[11px] font-grotesk text-[hsl(220_10%_40%)] tracking-wide">
                   Press Enter to start
                 </span>
                 <button
                   onClick={handleChatSubmit}
-                  className="group flex items-center gap-2 bg-foreground text-background px-5 py-2 font-grotesk font-semibold text-[11px] uppercase tracking-[0.08em] hover:shadow-[0_8px_24px_-8px_hsl(215_20%_50%/0.3)] transition-all duration-300"
+                  className="group flex items-center gap-2 bg-[hsl(220_15%_90%)] text-[hsl(220_20%_12%)] px-5 py-2 font-grotesk font-semibold text-[11px] uppercase tracking-[0.08em] hover:bg-white hover:shadow-[0_8px_24px_-8px_hsl(220_20%_50%/0.3)] transition-all duration-300"
                 >
                   <span>Start</span>
                   <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="transition-transform duration-300 group-hover:translate-x-1">
@@ -149,27 +149,6 @@ const Hero = () => {
                 </button>
               </div>
             </div>
-
-            {/* Quick prompts */}
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              transition={{ delay: 1.2, duration: 0.6 }}
-              className="mt-4 flex flex-wrap gap-2 justify-center"
-            >
-              {PLACEHOLDER_EXAMPLES.map((prompt) => (
-                <button
-                  key={prompt}
-                  onClick={() => {
-                    setChatInput(prompt);
-                    navigate("/playground", { state: { initialMessage: prompt } });
-                  }}
-                  className="px-4 py-2 text-[11px] font-grotesk font-medium text-muted-foreground border border-border/60 hover:border-accent/40 hover:text-foreground bg-background/40 backdrop-blur-sm transition-all duration-300"
-                >
-                  {prompt}
-                </button>
-              ))}
-            </motion.div>
           </motion.div>
         </div>
       </section>

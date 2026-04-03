@@ -71,7 +71,7 @@ const Hero = () => {
 
         {/* THE CRYSTAL — big, beautiful, central */}
         <motion.img
-          src={heroCrystal}
+          src={heroSilk}
           alt=""
           width={1920}
           height={1080}

@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
 
 type Stage = "describe" | "upload" | "testing" | "results";
@@ -29,6 +29,8 @@ const MOCK_CANDIDATES: Candidate[] = [
 ];
 
 const Playground = () => {
+  const location = useLocation();
+  const initialMessage = (location.state as any)?.initialMessage || "";
   const [stage, setStage] = useState<Stage>("describe");
   const [messages, setMessages] = useState<Message[]>([
     {
@@ -42,6 +44,7 @@ const Playground = () => {
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [testProgress, setTestProgress] = useState(0);
   const chatEndRef = useRef<HTMLDivElement>(null);
+  const [hasAutoSent, setHasAutoSent] = useState(false);
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -101,6 +104,32 @@ const Playground = () => {
     }, 200);
     return () => clearInterval(interval);
   }, [stage]);
+
+  // Auto-send initial message from homepage
+  useEffect(() => {
+    if (initialMessage && !hasAutoSent && stage === "describe") {
+      setHasAutoSent(true);
+      setInput(initialMessage);
+      // Trigger send after a brief delay
+      setTimeout(() => {
+        const userMsg: Message = { id: Date.now(), role: "user", content: initialMessage };
+        setMessages((m) => [...m, userMsg]);
+        setInput("");
+        setTimeout(() => {
+          setCandidates(MOCK_CANDIDATES);
+          setMessages((m) => [
+            ...m,
+            {
+              id: Date.now(),
+              role: "assistant",
+              content: `Great. I've identified ${MOCK_CANDIDATES.length} candidate AI solutions that match your workflow. You can review them in the right panel and add any specific tools manually.\n\nWhen ready, upload a test sample or describe your test criteria so we can benchmark them.`,
+            },
+          ]);
+          setStage("upload");
+        }, 1200);
+      }, 500);
+    }
+  }, [initialMessage, hasAutoSent, stage]);
 
   const handleSend = () => {
     if (!input.trim()) return;

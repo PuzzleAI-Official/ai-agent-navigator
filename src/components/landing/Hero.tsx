@@ -171,6 +171,13 @@ const Hero = () => {
       {/* Puzzle pieces layer */}
       <PuzzleBackground />
 
+      {/* Popping tool labels — starts with puzzle pieces */}
+      <div className="absolute inset-0 z-10 pointer-events-none">
+        <div className="sticky top-0 h-screen">
+          <PopUpLabels />
+        </div>
+      </div>
+
       {/* SECTION 1: Chat prompt — stays at top */}
       <div className="relative z-20 h-screen flex flex-col items-center justify-center">
         <div className="w-full max-w-[720px] px-8 flex flex-col items-center">

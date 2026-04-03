@@ -6,33 +6,64 @@ const useCases = [
     title: "Document Parsing",
     desc: "Extract, summarize, and structure data from contracts, invoices, and reports.",
     icon: "◈",
+    providers: ["Anthropic", "OpenAI", "Google"],
   },
   {
     title: "Inbound Agents",
     desc: "AI agents that handle customer inquiries, support tickets, and lead qualification.",
     icon: "◇",
+    providers: ["Intercom", "Zendesk", "Ada"],
   },
   {
     title: "Outbound Agents",
     desc: "Automate outreach, follow-ups, and personalized messaging at scale.",
     icon: "▹",
+    providers: ["Apollo", "Outreach", "Salesloft"],
   },
   {
     title: "Voice & Phone Agents",
     desc: "Real-time AI voice assistants for calls, IVR, and conversational workflows.",
     icon: "◎",
+    providers: ["Vapi", "Bland AI", "Retell"],
   },
   {
     title: "Chatbot Agents",
     desc: "Deploy intelligent chatbots across web, Slack, and messaging platforms.",
     icon: "⬡",
+    providers: ["Botpress", "Voiceflow", "Rasa"],
   },
   {
     title: "Code Generation",
     desc: "AI-powered code writing, review, and refactoring for engineering teams.",
     icon: "⟐",
+    providers: ["Cursor", "Copilot", "Codeium"],
   },
 ];
+
+const ProviderGhost = ({ names }: { names: string[] }) => (
+  <div className="absolute -top-2 -right-2 w-[65%] h-[75%] pointer-events-none opacity-0 group-hover:opacity-100 transition-all duration-700 ease-out">
+    {names.map((name, i) => (
+      <div
+        key={name}
+        className="absolute font-grotesk font-black uppercase tracking-[-0.04em] text-foreground/[0.04] group-hover:text-foreground/[0.07] transition-all duration-700 select-none whitespace-nowrap"
+        style={{
+          fontSize: `${28 - i * 6}px`,
+          top: `${i * 32 + 8}px`,
+          right: `${i * 12 + 8}px`,
+          transform: `rotate(-${4 + i * 2}deg) translateY(8px)`,
+          transitionDelay: `${i * 80}ms`,
+        }}
+      >
+        {name}
+      </div>
+    ))}
+    {/* Radial glow behind providers */}
+    <div
+      className="absolute top-1/2 right-0 -translate-y-1/2 w-32 h-32 rounded-full opacity-0 group-hover:opacity-100 transition-opacity duration-700 blur-3xl"
+      style={{ background: "hsl(var(--accent) / 0.06)" }}
+    />
+  </div>
+);
 
 const Testimonials = () => {
   const navigate = useNavigate();
@@ -69,17 +100,18 @@ const Testimonials = () => {
               onClick={() => navigate("/playground")}
               className="group border border-border p-7 cursor-pointer hover:border-accent/30 transition-all duration-500 bg-background/50 backdrop-blur-sm relative overflow-hidden"
             >
+              <ProviderGhost names={item.providers} />
               <div className="absolute bottom-0 left-0 w-0 h-[2px] bg-accent/40 group-hover:w-[40%] transition-all duration-700" style={{ transform: "skewX(-20deg)" }} />
-              <div className="flex items-start gap-3 mb-3">
+              <div className="flex items-start gap-3 mb-3 relative z-10">
                 <span className="text-accent/40 text-sm mt-0.5">{item.icon}</span>
                 <h3 className="font-grotesk font-semibold text-[15px] group-hover:translate-x-1 transition-transform duration-500">
                   {item.title}
                 </h3>
               </div>
-              <p className="text-muted-foreground text-sm leading-relaxed pl-[1.6rem]">
+              <p className="text-muted-foreground text-sm leading-relaxed pl-[1.6rem] relative z-10">
                 {item.desc}
               </p>
-              <span className="absolute top-6 right-6 font-grotesk text-[10px] text-accent/0 group-hover:text-accent/40 transition-colors duration-500 uppercase tracking-wider">
+              <span className="absolute top-6 right-6 font-grotesk text-[10px] text-accent/0 group-hover:text-accent/40 transition-colors duration-500 uppercase tracking-wider z-10">
                 Try →
               </span>
             </motion.div>

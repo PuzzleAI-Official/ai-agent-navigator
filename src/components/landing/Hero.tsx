@@ -171,6 +171,13 @@ const Hero = () => {
       {/* Puzzle pieces layer */}
       <PuzzleBackground />
 
+      {/* Popping tool labels — starts with puzzle pieces */}
+      <div className="absolute inset-0 z-10 pointer-events-none">
+        <div className="sticky top-0 h-screen">
+          <PopUpLabels />
+        </div>
+      </div>
+
       {/* SECTION 1: Chat prompt — stays at top */}
       <div className="relative z-20 h-screen flex flex-col items-center justify-center">
         <div className="w-full max-w-[720px] px-8 flex flex-col items-center">
@@ -226,8 +233,6 @@ const Hero = () => {
 
       {/* SECTION 2: Extended "The AI hiring platform" with popping tools */}
       <div ref={section2Ref} className="relative z-20 min-h-[160vh]" style={{ marginTop: "80vh" }}>
-        {/* Popping tool labels background */}
-        <PopUpLabels />
 
         <div className="min-h-screen flex flex-col justify-end pb-12 md:pb-16 relative">
           <div className="max-w-[1400px] mx-auto w-full px-8">

@@ -62,7 +62,7 @@ const TICKER_ROWS = [
 
 const TickerBackground = () => {
   return (
-    <div className="overflow-hidden pointer-events-none flex flex-col gap-5">
+    <div className="overflow-hidden pointer-events-none flex flex-col gap-5 opacity-[0.12]">
       {TICKER_ROWS.map((row, rowIndex) => {
         const direction = rowIndex % 2 === 0 ? "left" : "right";
         const speed = 40 + rowIndex * 8;

@@ -130,7 +130,7 @@ const Hero = () => {
                     handleChatSubmit();
                   }
                 }}
-                placeholder="e.g. I need an AI to summarize customer support tickets and route them..."
+                placeholder={animatedPlaceholder + "│"}
                 rows={3}
                 className="w-full bg-transparent px-6 py-5 text-[14px] text-foreground placeholder:text-muted-foreground/50 outline-none resize-none font-sans leading-relaxed"
               />

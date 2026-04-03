@@ -59,7 +59,7 @@ const CTASection = () => {
                 Ready?
               </span>
               <h2 className="font-display text-[clamp(3rem,7vw,7rem)] leading-[0.9] tracking-[-0.03em] mb-6">
-                Stop researching.
+                Stop guessing.
                 <br />
                 Start <span className="italic text-gradient">deciding</span>.
               </h2>

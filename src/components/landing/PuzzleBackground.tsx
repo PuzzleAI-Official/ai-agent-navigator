@@ -215,7 +215,7 @@ const PuzzleBackground = () => {
           className="absolute w-[70vw] md:w-[40vw] lg:w-[30vw] max-w-[480px] h-auto"
           style={{
             opacity: infinityFinalOpacity,
-            scale: useTransform(() => infinityScale.get() * infinityShrinkScale.get()),
+            scale: combinedScale,
             filter: "drop-shadow(0 20px 50px rgba(80, 55, 30, 0.15))",
           }}
         />

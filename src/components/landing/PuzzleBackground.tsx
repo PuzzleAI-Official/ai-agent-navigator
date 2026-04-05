@@ -116,8 +116,8 @@ const pieces: PieceConfig[] = [
   },
 ];
 
-const ASSEMBLE_START = 0.65;
-const ASSEMBLE_END = 0.85;
+const ASSEMBLE_START = 0.3;
+const ASSEMBLE_END = 0.5;
 
 const PuzzleBackground = () => {
   const containerRef = useRef<HTMLDivElement>(null);

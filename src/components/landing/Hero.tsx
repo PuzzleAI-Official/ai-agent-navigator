@@ -154,7 +154,7 @@ const Hero = () => {
 
   // Fade out pop-up labels before section 2 content appears
   // In 340vh container, first screen ~29%, labels should fade by ~55%
-  const labelsOpacity = useTransform(scrollYProgress, [0.25, 0.4], [1, 0]);
+  const labelsOpacity = useTransform(scrollYProgress, [0.12, 0.22], [1, 0]);
 
   const handleChatSubmit = () => {
     if (!chatInput.trim()) return;

@@ -126,40 +126,21 @@ const PuzzleBackground = () => {
     offset: ["start start", "end end"],
   });
 
-  // Assembled infinity image fades in as pieces converge
-  const infinityOpacity = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0, 1]);
-  const infinityScaleRaw = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0.6, 1]);
-
-  // After assembly: infinity shrinks to a shine point
-  const POST_ASSEMBLE = ASSEMBLE_END;
-  const SHINE_START = POST_ASSEMBLE + 0.02;
+  // After pieces converge: shine point appears
+  const SHINE_START = ASSEMBLE_END + 0.02;
   const SHINE_TRAVEL = 0.95;
-
-  const infinityShrinkScale = useTransform(
-    scrollYProgress,
-    [POST_ASSEMBLE, SHINE_START],
-    [1, 0]
-  );
-  const infinityFinalOpacity = useTransform(
-    scrollYProgress,
-    [POST_ASSEMBLE, SHINE_START],
-    [1, 0]
-  );
-  const combinedScale = useTransform(() => infinityScaleRaw.get() * infinityShrinkScale.get());
-
 
   // Shine point
   const shineOpacity = useTransform(
     scrollYProgress,
-    [POST_ASSEMBLE, SHINE_START, SHINE_TRAVEL, 1],
+    [ASSEMBLE_END, SHINE_START, SHINE_TRAVEL, 1],
     [0, 1, 1, 0]
   );
   const shineScale = useTransform(
     scrollYProgress,
-    [POST_ASSEMBLE, SHINE_START, SHINE_START + 0.03, SHINE_TRAVEL],
+    [ASSEMBLE_END, SHINE_START, SHINE_START + 0.03, SHINE_TRAVEL],
     [0.3, 1.2, 1, 0.8]
   );
-  // Shine moves down from center toward bottom
   const shineY = useTransform(
     scrollYProgress,
     [SHINE_START, SHINE_TRAVEL],
@@ -208,19 +189,6 @@ const PuzzleBackground = () => {
         {pieces.map((piece, i) => (
           <PuzzlePiece key={i} piece={piece} progress={scrollYProgress} />
         ))}
-        {/* Assembled infinity symbol — shrinks to point after assembly */}
-        <motion.img
-          src={infinityAssembled}
-          alt=""
-          width={512}
-          height={512}
-          className="absolute w-[70vw] md:w-[40vw] lg:w-[30vw] max-w-[480px] h-auto"
-          style={{
-            opacity: infinityFinalOpacity,
-            scale: combinedScale,
-            filter: "drop-shadow(0 20px 50px rgba(80, 55, 30, 0.15))",
-          }}
-        />
 
         {/* Vertical guide line */}
         <motion.div

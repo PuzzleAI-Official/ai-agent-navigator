@@ -5,7 +5,7 @@ import puzzlePiece2 from "@/assets/puzzle-piece-2.png";
 import puzzlePiece3 from "@/assets/puzzle-piece-3.png";
 import puzzlePiece4 from "@/assets/puzzle-piece-4.png";
 import puzzlePiece6 from "@/assets/puzzle-piece-6.png";
-import infinityAssembled from "@/assets/infinity-piece-6.png";
+
 
 const images = [puzzlePiece1, puzzlePiece2, puzzlePiece3, puzzlePiece4, puzzlePiece6];
 

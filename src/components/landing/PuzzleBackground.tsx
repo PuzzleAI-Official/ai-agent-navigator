@@ -126,144 +126,15 @@ const PuzzleBackground = () => {
     offset: ["start start", "end end"],
   });
 
-  // After pieces converge: shine point appears
-  const SHINE_START = ASSEMBLE_END + 0.02;
-  const SHINE_TRAVEL = 0.95;
-
-  // Shine point
-  const shineOpacity = useTransform(
-    scrollYProgress,
-    [ASSEMBLE_END, SHINE_START, SHINE_TRAVEL, 1],
-    [0, 1, 1, 0]
-  );
-  const shineScale = useTransform(
-    scrollYProgress,
-    [ASSEMBLE_END, SHINE_START, SHINE_START + 0.03, SHINE_TRAVEL],
-    [0.3, 1.2, 1, 0.8]
-  );
-  const shineY = useTransform(
-    scrollYProgress,
-    [SHINE_START, SHINE_TRAVEL],
-    [0, 220]
-  );
-
-  // Vertical line grows down from center
-  const lineHeight = useTransform(
-    scrollYProgress,
-    [SHINE_START, SHINE_TRAVEL],
-    [0, 220]
-  );
-  const lineOpacity = useTransform(
-    scrollYProgress,
-    [SHINE_START, SHINE_START + 0.03, SHINE_TRAVEL, 1],
-    [0, 0.4, 0.4, 0]
-  );
-
-  // Horizontal workflow line appears at the bottom
-  const workflowWidth = useTransform(
-    scrollYProgress,
-    [SHINE_TRAVEL - 0.05, SHINE_TRAVEL + 0.02],
-    [0, 400]
-  );
-  const workflowOpacity = useTransform(
-    scrollYProgress,
-    [SHINE_TRAVEL - 0.05, SHINE_TRAVEL, 1],
-    [0, 0.5, 0.3]
-  );
-
-  // Merge burst when shine hits workflow line
-  const burstOpacity = useTransform(
-    scrollYProgress,
-    [SHINE_TRAVEL - 0.02, SHINE_TRAVEL, SHINE_TRAVEL + 0.04],
-    [0, 1, 0]
-  );
-  const burstScale = useTransform(
-    scrollYProgress,
-    [SHINE_TRAVEL - 0.02, SHINE_TRAVEL + 0.04],
-    [0.5, 2.5]
-  );
-
   return (
     <div ref={containerRef} className="absolute inset-0 z-10 pointer-events-none">
       <div className="sticky top-0 h-screen flex items-center justify-center">
         {pieces.map((piece, i) => (
           <PuzzlePiece key={i} piece={piece} progress={scrollYProgress} />
         ))}
-
-        {/* Vertical guide line */}
-        <motion.div
-          className="absolute w-px origin-top"
-          style={{
-            height: lineHeight,
-            opacity: lineOpacity,
-            background: "linear-gradient(to bottom, hsl(215 30% 60% / 0.6), hsl(215 30% 60% / 0.1))",
-          }}
-        />
-
-        {/* Shine point */}
-        <motion.div
-          className="absolute"
-          style={{
-            y: shineY,
-            opacity: shineOpacity,
-            scale: shineScale,
-          }}
-        >
-          <div
-            className="w-4 h-4 rounded-full"
-            style={{
-              background: "radial-gradient(circle, hsl(215 50% 85%) 0%, hsl(215 40% 70%) 40%, transparent 70%)",
-              boxShadow: "0 0 20px 8px hsl(215 45% 70% / 0.5), 0 0 40px 16px hsl(215 40% 60% / 0.25), 0 0 60px 24px hsl(215 35% 55% / 0.1)",
-            }}
-          />
-        </motion.div>
-
-        {/* Horizontal workflow line */}
-        <motion.div
-          className="absolute h-px"
-          style={{
-            y: 220,
-            width: workflowWidth,
-            x: useTransform(workflowWidth, (w) => -w / 2),
-            opacity: workflowOpacity,
-            background: "linear-gradient(to right, transparent, hsl(215 30% 55% / 0.5) 30%, hsl(215 30% 55% / 0.5) 70%, transparent)",
-          }}
-        />
-
-        {/* Workflow label */}
-        <motion.span
-          className="absolute font-grotesk text-[10px] uppercase tracking-[0.25em] text-muted-foreground/50"
-          style={{
-            y: 235,
-            opacity: workflowOpacity,
-          }}
-        >
-          your workflow
-        </motion.span>
-
-        {/* Merge burst */}
-        <motion.div
-          className="absolute"
-          style={{
-            y: 220,
-            opacity: burstOpacity,
-            scale: burstScale,
-          }}
-        >
-          <div
-            className="w-6 h-6 rounded-full"
-            style={{
-              background: "radial-gradient(circle, hsl(215 60% 90%) 0%, hsl(215 50% 75% / 0.6) 30%, transparent 70%)",
-              boxShadow: "0 0 30px 12px hsl(215 50% 70% / 0.4)",
-            }}
-          />
-        </motion.div>
       </div>
     </div>
   );
-};
-
-const PuzzlePiece = ({
   piece,
   progress,
 }: {

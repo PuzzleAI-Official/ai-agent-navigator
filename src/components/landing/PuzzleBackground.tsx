@@ -145,6 +145,8 @@ const PuzzleBackground = () => {
     [POST_ASSEMBLE, SHINE_START],
     [1, 0]
   );
+  const combinedScale = useTransform(() => infinityScaleRaw.get() * infinityShrinkScale.get());
+
 
   // Shine point
   const shineOpacity = useTransform(

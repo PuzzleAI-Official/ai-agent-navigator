@@ -5,6 +5,7 @@ import puzzlePiece2 from "@/assets/puzzle-piece-2.png";
 import puzzlePiece3 from "@/assets/puzzle-piece-3.png";
 import puzzlePiece4 from "@/assets/puzzle-piece-4.png";
 import puzzlePiece6 from "@/assets/puzzle-piece-6.png";
+import infinityAssembled from "@/assets/infinity-piece-6.png";
 
 const images = [puzzlePiece1, puzzlePiece2, puzzlePiece3, puzzlePiece4, puzzlePiece6];
 
@@ -15,133 +16,108 @@ interface PieceConfig {
   startScale: number;
   startRotate: number;
   spinAmount: number;
-  // Scattered mid position (lemniscate)
   midX: number;
   midY: number;
   midScale: number;
   midRotate: number;
-  // Final assembled position (tight puzzle)
-  endX: number;
-  endY: number;
-  endScale: number;
-  endRotate: number;
   enterAt: number;
   sizeClass: string;
 }
 
-// Pieces fly in → scatter along lemniscate → converge into assembled puzzle
+// Pieces fly in → scatter → converge to center & fade out as infinity fades in
 const pieces: PieceConfig[] = [
-  // CENTER
   {
     src: images[0],
     startX: 0, startY: 0, startScale: 3.2, startRotate: 0,
     spinAmount: 360,
     midX: 0, midY: 0, midScale: 0.38, midRotate: 0,
-    endX: 0, endY: 0, endScale: 0.35, endRotate: 0,
     enterAt: 0,
     sizeClass: "w-[50vw] md:w-[28vw] lg:w-[20vw] max-w-[280px]",
   },
-  // RIGHT TOP
   {
     src: images[1],
     startX: 800, startY: -400, startScale: 0.1, startRotate: -90,
     spinAmount: -540,
     midX: 160, midY: -40, midScale: 0.32, midRotate: 15,
-    endX: 72, endY: -58, endScale: 0.34, endRotate: 0,
     enterAt: 0.08,
     sizeClass: "w-[40vw] md:w-[24vw] lg:w-[17vw] max-w-[240px]",
   },
-  // LEFT TOP
   {
     src: images[2],
     startX: -800, startY: -300, startScale: 0.1, startRotate: 120,
     spinAmount: 480,
     midX: -155, midY: -35, midScale: 0.30, midRotate: -20,
-    endX: -72, endY: -58, endScale: 0.34, endRotate: 0,
     enterAt: 0.1,
     sizeClass: "w-[38vw] md:w-[22vw] lg:w-[16vw] max-w-[220px]",
   },
-  // RIGHT BOTTOM
   {
     src: images[3],
     startX: 600, startY: 500, startScale: 0.1, startRotate: 200,
     spinAmount: -420,
     midX: 120, midY: 55, midScale: 0.28, midRotate: 40,
-    endX: 72, endY: 58, endScale: 0.34, endRotate: 0,
     enterAt: 0.12,
     sizeClass: "w-[36vw] md:w-[20vw] lg:w-[15vw] max-w-[210px]",
   },
-  // LEFT BOTTOM
   {
     src: images[4],
     startX: -700, startY: 400, startScale: 0.1, startRotate: -150,
     spinAmount: 600,
     midX: -130, midY: 50, midScale: 0.26, midRotate: -35,
-    endX: -72, endY: 58, endScale: 0.34, endRotate: 0,
     enterAt: 0.14,
     sizeClass: "w-[34vw] md:w-[19vw] lg:w-[14vw] max-w-[200px]",
   },
-  // FAR RIGHT
   {
     src: images[0],
     startX: 1000, startY: 0, startScale: 0.05, startRotate: 45,
     spinAmount: -720,
     midX: 260, midY: 10, midScale: 0.22, midRotate: 60,
-    endX: 140, endY: 0, endScale: 0.32, endRotate: 0,
     enterAt: 0.18,
     sizeClass: "w-[30vw] md:w-[17vw] lg:w-[12vw] max-w-[170px]",
   },
-  // FAR LEFT
   {
     src: images[1],
     startX: -900, startY: 100, startScale: 0.05, startRotate: -60,
     spinAmount: 540,
     midX: -250, midY: 15, midScale: 0.20, midRotate: -55,
-    endX: -140, endY: 0, endScale: 0.32, endRotate: 0,
     enterAt: 0.2,
     sizeClass: "w-[28vw] md:w-[16vw] lg:w-[11vw] max-w-[160px]",
   },
-  // TOP ACCENT
   {
     src: images[3],
     startX: 200, startY: -600, startScale: 0.05, startRotate: 180,
     spinAmount: -900,
     midX: 60, midY: -90, midScale: 0.18, midRotate: 25,
-    endX: 0, endY: -115, endScale: 0.30, endRotate: 0,
     enterAt: 0.22,
     sizeClass: "w-[24vw] md:w-[14vw] lg:w-[10vw] max-w-[140px]",
   },
-  // BOTTOM ACCENT
   {
     src: images[4],
     startX: -300, startY: 600, startScale: 0.05, startRotate: -200,
     spinAmount: 720,
     midX: -50, midY: 85, midScale: 0.17, midRotate: -30,
-    endX: 0, endY: 115, endScale: 0.30, endRotate: 0,
     enterAt: 0.24,
     sizeClass: "w-[22vw] md:w-[13vw] lg:w-[9vw] max-w-[130px]",
   },
-  // OUTER RIGHT TIP
   {
     src: images[2],
     startX: 1200, startY: -200, startScale: 0.05, startRotate: 90,
     spinAmount: -480,
     midX: 320, midY: -20, midScale: 0.15, midRotate: 75,
-    endX: 140, endY: -58, endScale: 0.30, endRotate: 0,
     enterAt: 0.26,
     sizeClass: "w-[20vw] md:w-[12vw] lg:w-[8vw] max-w-[120px]",
   },
-  // OUTER LEFT TIP
   {
     src: images[0],
     startX: -1100, startY: -150, startScale: 0.05, startRotate: -120,
     spinAmount: 600,
     midX: -310, midY: -25, midScale: 0.14, midRotate: -70,
-    endX: -140, endY: -58, endScale: 0.30, endRotate: 0,
     enterAt: 0.28,
     sizeClass: "w-[18vw] md:w-[11vw] lg:w-[8vw] max-w-[110px]",
   },
 ];
+
+const ASSEMBLE_START = 0.65;
+const ASSEMBLE_END = 0.85;
 
 const PuzzleBackground = () => {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -150,12 +126,29 @@ const PuzzleBackground = () => {
     offset: ["start start", "end end"],
   });
 
+  // Assembled infinity image fades in as pieces converge
+  const infinityOpacity = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0, 1]);
+  const infinityScale = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0.6, 1]);
+
   return (
     <div ref={containerRef} className="absolute inset-0 z-10 pointer-events-none">
       <div className="sticky top-0 h-screen flex items-center justify-center">
         {pieces.map((piece, i) => (
           <PuzzlePiece key={i} piece={piece} progress={scrollYProgress} />
         ))}
+        {/* Assembled infinity symbol */}
+        <motion.img
+          src={infinityAssembled}
+          alt=""
+          width={512}
+          height={512}
+          className="absolute w-[70vw] md:w-[40vw] lg:w-[30vw] max-w-[480px] h-auto"
+          style={{
+            opacity: infinityOpacity,
+            scale: infinityScale,
+            filter: "drop-shadow(0 20px 50px rgba(80, 55, 30, 0.15))",
+          }}
+        />
       </div>
     </div>
   );
@@ -171,51 +164,49 @@ const PuzzlePiece = ({
   const isCenter = piece.enterAt === 0;
   const enter = piece.enterAt;
   const scatterPoint = Math.min(enter + 0.3, 0.55);
-  const assembleStart = 0.65;
-  const assembleEnd = 0.85;
 
-  // Position: fly in → scatter → assemble
+  // Position: fly in → scatter → converge to center
   const x = useTransform(
     progress,
-    [enter, scatterPoint, assembleStart, assembleEnd],
-    [piece.startX, piece.midX, piece.midX, piece.endX]
+    [enter, scatterPoint, ASSEMBLE_START, ASSEMBLE_END],
+    [piece.startX, piece.midX, piece.midX, 0]
   );
   const y = useTransform(
     progress,
-    [enter, scatterPoint, assembleStart, assembleEnd],
-    [piece.startY, piece.midY, piece.midY, piece.endY]
+    [enter, scatterPoint, ASSEMBLE_START, ASSEMBLE_END],
+    [piece.startY, piece.midY, piece.midY, 0]
   );
 
-  // Scale
+  // Scale: shrink to nothing as they converge
   const scale = useTransform(
     progress,
     isCenter
-      ? [0, 0.2, 0.5, assembleStart, assembleEnd]
-      : [enter, Math.min(enter + 0.15, 0.4), scatterPoint, assembleStart, assembleEnd],
+      ? [0, 0.2, 0.5, ASSEMBLE_START, ASSEMBLE_END]
+      : [enter, Math.min(enter + 0.15, 0.4), scatterPoint, ASSEMBLE_START, ASSEMBLE_END],
     isCenter
-      ? [piece.startScale, piece.startScale * 0.7, piece.midScale * 1.3, piece.midScale, piece.endScale]
-      : [piece.startScale, piece.midScale * 0.5, piece.midScale, piece.midScale, piece.endScale]
+      ? [piece.startScale, piece.startScale * 0.7, piece.midScale * 1.3, piece.midScale, 0.05]
+      : [piece.startScale, piece.midScale * 0.5, piece.midScale, piece.midScale, 0.05]
   );
 
-  // Rotation: spin during scatter, then flatten to 0 during assembly
+  // Rotation
   const baseRotate = useTransform(
     progress,
-    [enter, scatterPoint, assembleStart, assembleEnd],
-    [piece.startRotate, piece.midRotate, piece.midRotate, piece.endRotate]
+    [enter, scatterPoint, ASSEMBLE_START, ASSEMBLE_END],
+    [piece.startRotate, piece.midRotate, piece.midRotate, 0]
   );
-  const spin = useTransform(progress, [0, assembleStart], [0, piece.spinAmount]);
-  const spinFade = useTransform(progress, [assembleStart, assembleEnd], [1, 0]);
+  const spin = useTransform(progress, [0, ASSEMBLE_START], [0, piece.spinAmount]);
+  const spinFade = useTransform(progress, [ASSEMBLE_START, ASSEMBLE_END], [1, 0]);
   const rotate = useTransform(() => baseRotate.get() + spin.get() * spinFade.get());
 
-  // Opacity
+  // Opacity: fade out as infinity fades in
   const opacity = useTransform(
     progress,
     isCenter
-      ? [0, 0.02, 0.6, assembleEnd]
-      : [enter, enter + 0.05, enter + 0.2, assembleEnd],
+      ? [0, 0.02, 0.6, ASSEMBLE_START, ASSEMBLE_END]
+      : [enter, enter + 0.05, enter + 0.2, ASSEMBLE_START, ASSEMBLE_END],
     isCenter
-      ? [0.3, 0.5, 0.85, 1]
-      : [0, 0.3, 0.75, 1]
+      ? [0.3, 0.5, 0.85, 0.8, 0]
+      : [0, 0.3, 0.75, 0.7, 0]
   );
 
   return (

@@ -128,7 +128,7 @@ const PuzzleBackground = () => {
 
   // Assembled infinity image fades in as pieces converge
   const infinityOpacity = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0, 1]);
-  const infinityScale = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0.6, 1]);
+  const infinityScaleRaw = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0.6, 1]);
 
   // After assembly: infinity shrinks to a shine point
   const POST_ASSEMBLE = ASSEMBLE_END;

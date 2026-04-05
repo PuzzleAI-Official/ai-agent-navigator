@@ -1,13 +1,12 @@
 import { motion, useScroll, useTransform, MotionValue } from "framer-motion";
 import { useRef } from "react";
-import infinityPiece1 from "@/assets/infinity-piece-1.png";
-import infinityPiece2 from "@/assets/infinity-piece-2.png";
-import infinityPiece3 from "@/assets/infinity-piece-3.png";
-import infinityPiece4 from "@/assets/infinity-piece-4.png";
-import infinityPiece5 from "@/assets/infinity-piece-5.png";
-import infinityPiece6 from "@/assets/infinity-piece-6.png";
+import puzzlePiece1 from "@/assets/puzzle-piece-1.png";
+import puzzlePiece2 from "@/assets/puzzle-piece-2.png";
+import puzzlePiece3 from "@/assets/puzzle-piece-3.png";
+import puzzlePiece4 from "@/assets/puzzle-piece-4.png";
+import puzzlePiece6 from "@/assets/puzzle-piece-6.png";
 
-const images = [infinityPiece1, infinityPiece2, infinityPiece3, infinityPiece4, infinityPiece5, infinityPiece6];
+const images = [puzzlePiece1, puzzlePiece2, puzzlePiece3, puzzlePiece4, puzzlePiece6];
 
 interface PieceConfig {
   src: string;
@@ -16,80 +15,131 @@ interface PieceConfig {
   startScale: number;
   startRotate: number;
   spinAmount: number;
+  // Scattered mid position (lemniscate)
   midX: number;
   midY: number;
   midScale: number;
   midRotate: number;
+  // Final assembled position (tight puzzle)
   endX: number;
   endY: number;
   endScale: number;
   endRotate: number;
   enterAt: number;
   sizeClass: string;
-  endOpacity: number;
 }
 
-// Pieces fly in → scatter → converge into layered infinity symbol
+// Pieces fly in → scatter along lemniscate → converge into assembled puzzle
 const pieces: PieceConfig[] = [
-  // Core center piece — largest, anchor
+  // CENTER
   {
     src: images[0],
-    startX: 0, startY: 0, startScale: 3.0, startRotate: 0,
-    spinAmount: 180,
-    midX: 0, midY: 0, midScale: 0.5, midRotate: 0,
-    endX: 0, endY: 0, endScale: 0.55, endRotate: 0,
-    enterAt: 0, endOpacity: 1,
-    sizeClass: "w-[60vw] md:w-[35vw] lg:w-[28vw] max-w-[400px]",
+    startX: 0, startY: 0, startScale: 3.2, startRotate: 0,
+    spinAmount: 360,
+    midX: 0, midY: 0, midScale: 0.38, midRotate: 0,
+    endX: 0, endY: 0, endScale: 0.35, endRotate: 0,
+    enterAt: 0,
+    sizeClass: "w-[50vw] md:w-[28vw] lg:w-[20vw] max-w-[280px]",
   },
-  // Layer 2 — slight offset, different hue
+  // RIGHT TOP
   {
     src: images[1],
-    startX: 700, startY: -350, startScale: 0.1, startRotate: -120,
-    spinAmount: -360,
-    midX: 180, midY: -60, midScale: 0.35, midRotate: 20,
-    endX: 0, endY: 0, endScale: 0.55, endRotate: 0,
-    enterAt: 0.06, endOpacity: 0.7,
-    sizeClass: "w-[60vw] md:w-[35vw] lg:w-[28vw] max-w-[400px]",
+    startX: 800, startY: -400, startScale: 0.1, startRotate: -90,
+    spinAmount: -540,
+    midX: 160, midY: -40, midScale: 0.32, midRotate: 15,
+    endX: 72, endY: -58, endScale: 0.34, endRotate: 0,
+    enterAt: 0.08,
+    sizeClass: "w-[40vw] md:w-[24vw] lg:w-[17vw] max-w-[240px]",
   },
-  // Layer 3 — from left
+  // LEFT TOP
   {
     src: images[2],
-    startX: -800, startY: -200, startScale: 0.1, startRotate: 150,
-    spinAmount: 420,
-    midX: -200, midY: -40, midScale: 0.32, midRotate: -25,
-    endX: 0, endY: 0, endScale: 0.55, endRotate: 0,
-    enterAt: 0.1, endOpacity: 0.6,
-    sizeClass: "w-[60vw] md:w-[35vw] lg:w-[28vw] max-w-[400px]",
+    startX: -800, startY: -300, startScale: 0.1, startRotate: 120,
+    spinAmount: 480,
+    midX: -155, midY: -35, midScale: 0.30, midRotate: -20,
+    endX: -72, endY: -58, endScale: 0.34, endRotate: 0,
+    enterAt: 0.1,
+    sizeClass: "w-[38vw] md:w-[22vw] lg:w-[16vw] max-w-[220px]",
   },
-  // Layer 4 — from bottom right
+  // RIGHT BOTTOM
   {
     src: images[3],
     startX: 600, startY: 500, startScale: 0.1, startRotate: 200,
-    spinAmount: -540,
-    midX: 150, midY: 80, midScale: 0.28, midRotate: 40,
-    endX: 0, endY: 0, endScale: 0.55, endRotate: 0,
-    enterAt: 0.14, endOpacity: 0.5,
-    sizeClass: "w-[60vw] md:w-[35vw] lg:w-[28vw] max-w-[400px]",
+    spinAmount: -420,
+    midX: 120, midY: 55, midScale: 0.28, midRotate: 40,
+    endX: 72, endY: 58, endScale: 0.34, endRotate: 0,
+    enterAt: 0.12,
+    sizeClass: "w-[36vw] md:w-[20vw] lg:w-[15vw] max-w-[210px]",
   },
-  // Layer 5 — from bottom left
+  // LEFT BOTTOM
   {
     src: images[4],
-    startX: -700, startY: 400, startScale: 0.1, startRotate: -180,
+    startX: -700, startY: 400, startScale: 0.1, startRotate: -150,
     spinAmount: 600,
-    midX: -160, midY: 70, midScale: 0.25, midRotate: -35,
-    endX: 0, endY: 0, endScale: 0.55, endRotate: 0,
-    enterAt: 0.18, endOpacity: 0.45,
-    sizeClass: "w-[60vw] md:w-[35vw] lg:w-[28vw] max-w-[400px]",
+    midX: -130, midY: 50, midScale: 0.26, midRotate: -35,
+    endX: -72, endY: 58, endScale: 0.34, endRotate: 0,
+    enterAt: 0.14,
+    sizeClass: "w-[34vw] md:w-[19vw] lg:w-[14vw] max-w-[200px]",
   },
-  // Layer 6 — accent glow from far
+  // FAR RIGHT
   {
-    src: images[5],
-    startX: 900, startY: -100, startScale: 0.05, startRotate: 90,
+    src: images[0],
+    startX: 1000, startY: 0, startScale: 0.05, startRotate: 45,
     spinAmount: -720,
-    midX: 250, midY: 20, midScale: 0.2, midRotate: 60,
-    endX: 0, endY: 0, endScale: 0.58, endRotate: 0,
-    enterAt: 0.22, endOpacity: 0.35,
-    sizeClass: "w-[60vw] md:w-[35vw] lg:w-[28vw] max-w-[400px]",
+    midX: 260, midY: 10, midScale: 0.22, midRotate: 60,
+    endX: 140, endY: 0, endScale: 0.32, endRotate: 0,
+    enterAt: 0.18,
+    sizeClass: "w-[30vw] md:w-[17vw] lg:w-[12vw] max-w-[170px]",
+  },
+  // FAR LEFT
+  {
+    src: images[1],
+    startX: -900, startY: 100, startScale: 0.05, startRotate: -60,
+    spinAmount: 540,
+    midX: -250, midY: 15, midScale: 0.20, midRotate: -55,
+    endX: -140, endY: 0, endScale: 0.32, endRotate: 0,
+    enterAt: 0.2,
+    sizeClass: "w-[28vw] md:w-[16vw] lg:w-[11vw] max-w-[160px]",
+  },
+  // TOP ACCENT
+  {
+    src: images[3],
+    startX: 200, startY: -600, startScale: 0.05, startRotate: 180,
+    spinAmount: -900,
+    midX: 60, midY: -90, midScale: 0.18, midRotate: 25,
+    endX: 0, endY: -115, endScale: 0.30, endRotate: 0,
+    enterAt: 0.22,
+    sizeClass: "w-[24vw] md:w-[14vw] lg:w-[10vw] max-w-[140px]",
+  },
+  // BOTTOM ACCENT
+  {
+    src: images[4],
+    startX: -300, startY: 600, startScale: 0.05, startRotate: -200,
+    spinAmount: 720,
+    midX: -50, midY: 85, midScale: 0.17, midRotate: -30,
+    endX: 0, endY: 115, endScale: 0.30, endRotate: 0,
+    enterAt: 0.24,
+    sizeClass: "w-[22vw] md:w-[13vw] lg:w-[9vw] max-w-[130px]",
+  },
+  // OUTER RIGHT TIP
+  {
+    src: images[2],
+    startX: 1200, startY: -200, startScale: 0.05, startRotate: 90,
+    spinAmount: -480,
+    midX: 320, midY: -20, midScale: 0.15, midRotate: 75,
+    endX: 140, endY: -58, endScale: 0.30, endRotate: 0,
+    enterAt: 0.26,
+    sizeClass: "w-[20vw] md:w-[12vw] lg:w-[8vw] max-w-[120px]",
+  },
+  // OUTER LEFT TIP
+  {
+    src: images[0],
+    startX: -1100, startY: -150, startScale: 0.05, startRotate: -120,
+    spinAmount: 600,
+    midX: -310, midY: -25, midScale: 0.14, midRotate: -70,
+    endX: -140, endY: -58, endScale: 0.30, endRotate: 0,
+    enterAt: 0.28,
+    sizeClass: "w-[18vw] md:w-[11vw] lg:w-[8vw] max-w-[110px]",
   },
 ];
 
@@ -124,6 +174,7 @@ const PuzzlePiece = ({
   const assembleStart = 0.65;
   const assembleEnd = 0.85;
 
+  // Position: fly in → scatter → assemble
   const x = useTransform(
     progress,
     [enter, scatterPoint, assembleStart, assembleEnd],
@@ -135,6 +186,7 @@ const PuzzlePiece = ({
     [piece.startY, piece.midY, piece.midY, piece.endY]
   );
 
+  // Scale
   const scale = useTransform(
     progress,
     isCenter
@@ -145,6 +197,7 @@ const PuzzlePiece = ({
       : [piece.startScale, piece.midScale * 0.5, piece.midScale, piece.midScale, piece.endScale]
   );
 
+  // Rotation: spin during scatter, then flatten to 0 during assembly
   const baseRotate = useTransform(
     progress,
     [enter, scatterPoint, assembleStart, assembleEnd],
@@ -154,14 +207,15 @@ const PuzzlePiece = ({
   const spinFade = useTransform(progress, [assembleStart, assembleEnd], [1, 0]);
   const rotate = useTransform(() => baseRotate.get() + spin.get() * spinFade.get());
 
+  // Opacity
   const opacity = useTransform(
     progress,
     isCenter
       ? [0, 0.02, 0.6, assembleEnd]
       : [enter, enter + 0.05, enter + 0.2, assembleEnd],
     isCenter
-      ? [0.3, 0.5, 0.85, piece.endOpacity]
-      : [0, 0.3, 0.75, piece.endOpacity]
+      ? [0.3, 0.5, 0.85, 1]
+      : [0, 0.3, 0.75, 1]
   );
 
   return (

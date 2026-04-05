@@ -136,15 +136,25 @@ const Hero = () => {
   const [chatInput, setChatInput] = useState("");
   const navigate = useNavigate();
   const animatedPlaceholder = useTypingPlaceholder(PLACEHOLDER_EXAMPLES);
+  const containerRef = useRef<HTMLDivElement>(null);
   const section2Ref = useRef<HTMLDivElement>(null);
 
   const { scrollYProgress } = useScroll({
+    target: containerRef,
+    offset: ["start start", "end end"],
+  });
+
+  const { scrollYProgress: section2Progress } = useScroll({
     target: section2Ref,
     offset: ["start end", "end start"],
   });
 
-  const transitionOpacity = useTransform(scrollYProgress, [0.6, 0.85], [0, 1]);
-  const transitionY = useTransform(scrollYProgress, [0.6, 0.85], [40, 0]);
+  const transitionOpacity = useTransform(section2Progress, [0.6, 0.85], [0, 1]);
+  const transitionY = useTransform(section2Progress, [0.6, 0.85], [40, 0]);
+
+  // Fade out pop-up labels before section 2 content appears
+  // In 340vh container, first screen ~29%, labels should fade by ~55%
+  const labelsOpacity = useTransform(scrollYProgress, [0.25, 0.4], [1, 0]);
 
   const handleChatSubmit = () => {
     if (!chatInput.trim()) return;
@@ -152,7 +162,7 @@ const Hero = () => {
   };
 
   return (
-    <div className="relative" style={{ height: "340vh" }}>
+    <div ref={containerRef} className="relative" style={{ height: "340vh" }}>
       {/* Shared background for both sections */}
       <div className="absolute inset-0">
         <div className="sticky top-0 h-screen" style={{
@@ -171,11 +181,11 @@ const Hero = () => {
       {/* Puzzle pieces layer */}
       <PuzzleBackground />
 
-      {/* Popping tool labels — starts with puzzle pieces */}
+      {/* Popping tool labels — fades out before content section */}
       <div className="absolute inset-0 z-10 pointer-events-none">
-        <div className="sticky top-0 h-screen">
+        <motion.div className="sticky top-0 h-screen" style={{ opacity: labelsOpacity }}>
           <PopUpLabels />
-        </div>
+        </motion.div>
       </div>
 
       {/* SECTION 1: Chat prompt — stays at top */}
@@ -231,7 +241,7 @@ const Hero = () => {
         </div>
       </div>
 
-      {/* SECTION 2: Extended "The AI hiring platform" with popping tools */}
+      {/* SECTION 2: The AI hiring platform */}
       <div ref={section2Ref} className="relative z-20 min-h-[160vh]" style={{ marginTop: "80vh" }}>
 
         <div className="min-h-screen flex flex-col justify-end pb-12 md:pb-16 relative">
@@ -256,30 +266,74 @@ const Hero = () => {
               transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1] }}
               className="font-display text-[clamp(2.8rem,6.5vw,6.5rem)] leading-[0.9] tracking-[-0.03em] text-foreground"
             >
-              We help you find the <span className="italic text-gradient">right</span> AI.
+              The AI landscape is{" "}
+              <span className="italic text-gradient">chaos</span>.
             </motion.h2>
+
+            {/* Stats row */}
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-60px" }}
+              transition={{ duration: 0.8, delay: 0.15 }}
+              className="flex flex-wrap gap-8 md:gap-14 mt-10 mb-10"
+            >
+              {[
+                { stat: "1%", label: "of AI tools reach maturity" },
+                { stat: "78%", label: "enterprise adoption rate" },
+                { stat: "1000+", label: "new tools every month" },
+              ].map((item, i) => (
+                <motion.div
+                  key={item.stat}
+                  initial={{ opacity: 0, y: 15 }}
+                  whileInView={{ opacity: 1, y: 0 }}
+                  viewport={{ once: true }}
+                  transition={{ delay: 0.3 + i * 0.12 }}
+                  className="flex flex-col"
+                >
+                  <span className="font-display text-[clamp(2rem,4vw,3.5rem)] leading-none tracking-[-0.03em] text-foreground">
+                    {item.stat}
+                  </span>
+                  <span className="font-grotesk text-[11px] uppercase tracking-[0.15em] text-muted-foreground mt-2">
+                    {item.label}
+                  </span>
+                </motion.div>
+              ))}
+            </motion.div>
 
             <motion.p
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, margin: "-50px" }}
-              transition={{ duration: 0.7, delay: 0.15 }}
-              className="mt-6 text-[15px] md:text-[17px] text-muted-foreground max-w-[620px] leading-[1.8]"
+              transition={{ duration: 0.7, delay: 0.2 }}
+              className="text-[15px] md:text-[17px] text-muted-foreground max-w-[640px] leading-[1.8]"
             >
-              Thousands of AI services and agents emerge every week — and update just as fast. 
-              New models, new frameworks, new promises. Keeping up is a full-time job, and picking 
-              the wrong one costs you months.
+              Thousands of AI services and agents emerge every month — and update just as fast. 
+              New models, new frameworks, new promises. Enterprises and developers are adopting at 
+              record pace, yet only a fraction of these tools will survive.
             </motion.p>
 
             <motion.p
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, margin: "-50px" }}
-              transition={{ duration: 0.7, delay: 0.3 }}
-              className="mt-4 text-[15px] md:text-[17px] text-muted-foreground max-w-[620px] leading-[1.8]"
+              transition={{ duration: 0.7, delay: 0.35 }}
+              className="mt-4 text-[15px] md:text-[17px] text-muted-foreground max-w-[640px] leading-[1.8]"
             >
-              It's nearly impossible to understand what you <span className="italic text-foreground/80">really</span> need 
-              for your specific workflow and project — until now.
+              Picking the wrong one costs you months. Committing with uncertainty is the{" "}
+              <span className="italic text-foreground/80">most expensive mistake</span> you can make.
+            </motion.p>
+
+            <motion.p
+              initial={{ opacity: 0, y: 20 }}
+              whileInView={{ opacity: 1, y: 0 }}
+              viewport={{ once: true, margin: "-50px" }}
+              transition={{ duration: 0.7, delay: 0.5 }}
+              className="mt-4 text-[15px] md:text-[17px] text-foreground/90 max-w-[640px] leading-[1.8] font-medium"
+            >
+              We're here to end the confusion. Run every candidate against{" "}
+              <span className="italic">your own data and workflow</span>, before going live. 
+              That's the gold.
             </motion.p>
           </div>
         </div>

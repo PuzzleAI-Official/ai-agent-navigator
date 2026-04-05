@@ -135,6 +135,9 @@ const PuzzleBackground = () => {
       </div>
     </div>
   );
+};
+
+const PuzzlePiece = ({
   piece,
   progress,
 }: {

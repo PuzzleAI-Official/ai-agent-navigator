@@ -128,7 +128,7 @@ const PuzzleBackground = () => {
 
   // Assembled infinity image fades in as pieces converge
   const infinityOpacity = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0, 1]);
-  const infinityScale = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0.6, 1]);
+  const infinityScaleRaw = useTransform(scrollYProgress, [ASSEMBLE_START, ASSEMBLE_END], [0.6, 1]);
 
   // After assembly: infinity shrinks to a shine point
   const POST_ASSEMBLE = ASSEMBLE_END;
@@ -145,6 +145,8 @@ const PuzzleBackground = () => {
     [POST_ASSEMBLE, SHINE_START],
     [1, 0]
   );
+  const combinedScale = useTransform(() => infinityScaleRaw.get() * infinityShrinkScale.get());
+
 
   // Shine point
   const shineOpacity = useTransform(
@@ -215,7 +217,7 @@ const PuzzleBackground = () => {
           className="absolute w-[70vw] md:w-[40vw] lg:w-[30vw] max-w-[480px] h-auto"
           style={{
             opacity: infinityFinalOpacity,
-            scale: useTransform(() => infinityScale.get() * infinityShrinkScale.get()),
+            scale: combinedScale,
             filter: "drop-shadow(0 20px 50px rgba(80, 55, 30, 0.15))",
           }}
         />
@@ -302,7 +304,7 @@ const PuzzlePiece = ({
 }) => {
   const isCenter = piece.enterAt === 0;
   const enter = piece.enterAt;
-  const scatterPoint = Math.min(enter + 0.3, 0.55);
+  const scatterPoint = Math.min(enter + 0.3, ASSEMBLE_START - 0.01);
 
   // Position: fly in → scatter → converge to center
   const x = useTransform(
@@ -317,11 +319,12 @@ const PuzzlePiece = ({
   );
 
   // Scale: shrink to nothing as they converge
+  const midKeyframe = Math.min(enter + 0.15, scatterPoint - 0.01);
   const scale = useTransform(
     progress,
     isCenter
       ? [0, 0.2, 0.5, ASSEMBLE_START, ASSEMBLE_END]
-      : [enter, Math.min(enter + 0.15, 0.4), scatterPoint, ASSEMBLE_START, ASSEMBLE_END],
+      : [enter, midKeyframe, scatterPoint, ASSEMBLE_START, ASSEMBLE_END],
     isCenter
       ? [piece.startScale, piece.startScale * 0.7, piece.midScale * 1.3, piece.midScale, 0.05]
       : [piece.startScale, piece.midScale * 0.5, piece.midScale, piece.midScale, 0.05]
@@ -338,11 +341,13 @@ const PuzzlePiece = ({
   const rotate = useTransform(() => baseRotate.get() + spin.get() * spinFade.get());
 
   // Opacity: fade out as infinity fades in
+  const enterMid = Math.min(enter + 0.05, scatterPoint - 0.02);
+  const enterEnd = Math.min(enter + 0.2, scatterPoint - 0.01);
   const opacity = useTransform(
     progress,
     isCenter
-      ? [0, 0.02, 0.6, ASSEMBLE_START, ASSEMBLE_END]
-      : [enter, enter + 0.05, enter + 0.2, ASSEMBLE_START, ASSEMBLE_END],
+      ? [0, 0.02, 0.5, ASSEMBLE_START, ASSEMBLE_END]
+      : [enter, enterMid, enterEnd, ASSEMBLE_START, ASSEMBLE_END],
     isCenter
       ? [0.3, 0.5, 0.85, 0.8, 0]
       : [0, 0.3, 0.75, 0.7, 0]

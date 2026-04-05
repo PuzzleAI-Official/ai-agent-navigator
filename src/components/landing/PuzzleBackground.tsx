@@ -168,8 +168,8 @@ const PuzzlePiece = ({
       ? [0, 0.2, 0.5, ASSEMBLE_START, ASSEMBLE_END]
       : [enter, midKeyframe, scatterPoint, ASSEMBLE_START, ASSEMBLE_END],
     isCenter
-      ? [piece.startScale, piece.startScale * 0.7, piece.midScale * 1.3, piece.midScale, 0.05]
-      : [piece.startScale, piece.midScale * 0.5, piece.midScale, piece.midScale, 0.05]
+      ? [piece.startScale, piece.startScale * 0.7, piece.midScale * 1.3, piece.midScale, 0]
+      : [piece.startScale, piece.midScale * 0.5, piece.midScale, piece.midScale, 0]
   );
 
   // Rotation

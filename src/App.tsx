@@ -7,6 +7,7 @@ import Index from "./pages/Index.tsx";
 import NotFound from "./pages/NotFound.tsx";
 import Playground from "./pages/Playground.tsx";
 import Feature from "./pages/Feature.tsx";
+import ApiDocs from "./pages/ApiDocs.tsx";
 
 const queryClient = new QueryClient();
 
@@ -20,6 +21,7 @@ const App = () => (
           <Route path="/" element={<Index />} />
           <Route path="/playground" element={<Playground />} />
           <Route path="/feature" element={<Feature />} />
+          <Route path="/api" element={<ApiDocs />} />
           {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
           <Route path="*" element={<NotFound />} />
         </Routes>

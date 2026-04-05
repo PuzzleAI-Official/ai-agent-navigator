@@ -304,7 +304,7 @@ const PuzzlePiece = ({
 }) => {
   const isCenter = piece.enterAt === 0;
   const enter = piece.enterAt;
-  const scatterPoint = Math.min(enter + 0.3, 0.55);
+  const scatterPoint = Math.min(enter + 0.3, ASSEMBLE_START - 0.01);
 
   // Position: fly in → scatter → converge to center
   const x = useTransform(
@@ -319,11 +319,12 @@ const PuzzlePiece = ({
   );
 
   // Scale: shrink to nothing as they converge
+  const midKeyframe = Math.min(enter + 0.15, scatterPoint - 0.01);
   const scale = useTransform(
     progress,
     isCenter
       ? [0, 0.2, 0.5, ASSEMBLE_START, ASSEMBLE_END]
-      : [enter, Math.min(enter + 0.15, 0.4), scatterPoint, ASSEMBLE_START, ASSEMBLE_END],
+      : [enter, midKeyframe, scatterPoint, ASSEMBLE_START, ASSEMBLE_END],
     isCenter
       ? [piece.startScale, piece.startScale * 0.7, piece.midScale * 1.3, piece.midScale, 0.05]
       : [piece.startScale, piece.midScale * 0.5, piece.midScale, piece.midScale, 0.05]
@@ -340,11 +341,13 @@ const PuzzlePiece = ({
   const rotate = useTransform(() => baseRotate.get() + spin.get() * spinFade.get());
 
   // Opacity: fade out as infinity fades in
+  const enterMid = Math.min(enter + 0.05, scatterPoint - 0.02);
+  const enterEnd = Math.min(enter + 0.2, scatterPoint - 0.01);
   const opacity = useTransform(
     progress,
     isCenter
-      ? [0, 0.02, 0.6, ASSEMBLE_START, ASSEMBLE_END]
-      : [enter, enter + 0.05, enter + 0.2, ASSEMBLE_START, ASSEMBLE_END],
+      ? [0, 0.02, 0.5, ASSEMBLE_START, ASSEMBLE_END]
+      : [enter, enterMid, enterEnd, ASSEMBLE_START, ASSEMBLE_END],
     isCenter
       ? [0.3, 0.5, 0.85, 0.8, 0]
       : [0, 0.3, 0.75, 0.7, 0]

@@ -341,15 +341,6 @@ const Hero = () => {
         {/* Transition bridge toward Live Evaluation */}
         <div className="relative pb-20 md:pb-32">
           <div className="max-w-[1400px] mx-auto w-full px-8">
-            {/* Connecting line */}
-            <motion.div
-              className="w-px h-24 bg-gradient-to-b from-accent/0 via-accent/30 to-accent/0 mx-auto mb-16"
-              initial={{ scaleY: 0, opacity: 0 }}
-              whileInView={{ scaleY: 1, opacity: 1 }}
-              viewport={{ once: true }}
-              transition={{ duration: 0.8 }}
-              style={{ transformOrigin: "top" }}
-            />
 
             <motion.div
               initial={{ opacity: 0, y: 30 }}

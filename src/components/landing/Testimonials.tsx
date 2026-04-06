@@ -67,7 +67,7 @@ const Testimonials = () => {
           </span>
           <div className="w-8 h-[2px] bg-accent/30 mt-3 mb-6" style={{ transform: "skewX(-20deg)" }} />
           <h2 className="font-display text-[clamp(2rem,4vw,3.5rem)] leading-[1.05] tracking-[-0.02em]">
-            Discover Use Cases
+            Find agents that help with
           </h2>
         </motion.div>
 

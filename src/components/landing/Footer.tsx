@@ -19,7 +19,7 @@ const Footer = () => {
               <span className="font-grotesk font-bold text-[18px] text-accent">.</span>
             </div>
             <p className="text-muted-foreground text-sm leading-relaxed max-w-xs">
-              The first agent-to-agent hiring platform. Find the right AI for your work.
+              Smarter AI decisions
             </p>
           </div>
 

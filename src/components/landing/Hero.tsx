@@ -244,17 +244,17 @@ const Hero = () => {
       {/* SECTION 2: The AI hiring platform */}
       <div ref={section2Ref} className="relative z-20 min-h-[160vh]" style={{ marginTop: "80vh" }}>
 
-        <div className="min-h-screen flex flex-col justify-end pb-12 md:pb-16 relative">
-          <div className="max-w-[1400px] mx-auto w-full px-[33px] my-0">
+        <div className="min-h-screen flex flex-col justify-end pb-16 md:pb-24 relative">
+          <div className="max-w-[1100px] mx-auto w-full px-[33px] my-0">
             <motion.div
               initial={{ opacity: 0 }}
               whileInView={{ opacity: 1 }}
               viewport={{ once: true, margin: "-100px" }}
               transition={{ duration: 0.8 }}
-              className="flex items-center gap-4 mb-8"
+              className="flex items-center gap-3 mb-12"
             >
-              <div className="w-8 h-[2px] bg-accent/30" style={{ transform: "skewX(-20deg)" }} />
-              <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-muted-foreground">
+              <div className="w-6 h-[1.5px] bg-accent/40" />
+              <span className="font-grotesk font-semibold text-[10px] uppercase tracking-[0.3em] text-muted-foreground/70">
                 THE AI SELECTION INFRASTRUCTURE
               </span>
             </motion.div>
@@ -264,24 +264,25 @@ const Hero = () => {
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, margin: "-80px" }}
               transition={{ duration: 1.2, ease: [0.16, 1, 0.3, 1] }}
-              className="font-display text-[clamp(2.8rem,6.5vw,6.5rem)] leading-[0.9] tracking-[-0.03em] text-foreground"
+              className="font-display text-[clamp(2.5rem,5.5vw,5.5rem)] leading-[0.92] tracking-[-0.03em] text-foreground mb-16"
             >
-              The AI landscape is{" "}
-              <span className="italic text-gradient">chaos</span>.
+              The AI landscape
+              <br />
+              is <span className="italic text-gradient">chaos</span>.
             </motion.h2>
 
-            {/* Stats row */}
+            {/* Stats row — refined with dividers */}
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, margin: "-60px" }}
               transition={{ duration: 0.8, delay: 0.15 }}
-              className="flex flex-wrap gap-8 md:gap-14 mt-10 mb-10"
+              className="flex items-start gap-0 mb-16 border-t border-border pt-8"
             >
               {[
-                { stat: "1%", label: "of AI tools reach maturity" },
-                { stat: "78%", label: "enterprise adoption rate" },
-                { stat: "1000+", label: "new tools every month" },
+                { stat: "1%", label: "reach maturity" },
+                { stat: "78%", label: "adoption rate" },
+                { stat: "1000+", label: "new tools / mo" },
               ].map((item, i) => (
                 <motion.div
                   key={item.stat}
@@ -289,110 +290,102 @@ const Hero = () => {
                   whileInView={{ opacity: 1, y: 0 }}
                   viewport={{ once: true }}
                   transition={{ delay: 0.3 + i * 0.12 }}
-                  className="flex flex-col"
+                  className="flex-1 flex flex-col border-r border-border last:border-r-0 pr-6 last:pr-0"
                 >
-                  <span className="font-display text-[clamp(2rem,4vw,3.5rem)] leading-none tracking-[-0.03em] text-foreground">
+                  <span className="font-display text-[clamp(1.8rem,3.5vw,3rem)] leading-none tracking-[-0.03em] text-foreground">
                     {item.stat}
                   </span>
-                  <span className="font-grotesk text-[11px] uppercase tracking-[0.15em] text-muted-foreground mt-2">
+                  <span className="font-grotesk text-[10px] uppercase tracking-[0.2em] text-muted-foreground/60 mt-3">
                     {item.label}
                   </span>
                 </motion.div>
               ))}
             </motion.div>
 
-            <motion.p
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-50px" }}
-              transition={{ duration: 0.7, delay: 0.2 }}
-              className="text-[15px] md:text-[17px] text-muted-foreground max-w-[640px] leading-[1.8]"
-            >
-              Thousands of AI services and agents emerge every month — and update just as fast. 
-              New models, new frameworks, new promises. Enterprises and developers are adopting at 
-              record pace, yet only a fraction of these tools will survive.
-            </motion.p>
+            <div className="max-w-[520px]">
+              <motion.p
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true, margin: "-50px" }}
+                transition={{ duration: 0.7, delay: 0.2 }}
+                className="text-[15px] text-muted-foreground leading-[1.85] mb-5"
+              >
+                Thousands of AI tools launch every month. New models, new promises. 
+                Only a fraction survive — yet teams commit blindly.
+              </motion.p>
 
-            <motion.p
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-50px" }}
-              transition={{ duration: 0.7, delay: 0.35 }}
-              className="mt-4 text-[15px] md:text-[17px] text-muted-foreground max-w-[640px] leading-[1.8]"
-            >
-              Picking the wrong one costs you months. Committing with uncertainty is the{" "}
-              <span className="italic text-foreground/80">most expensive mistake</span> you can make.
-            </motion.p>
-
-            <motion.p
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-50px" }}
-              transition={{ duration: 0.7, delay: 0.5 }}
-              className="mt-4 text-[15px] md:text-[17px] text-foreground/90 max-w-[640px] leading-[1.8] font-medium"
-            >
-              We're here to end the confusion. Run every candidate against{" "}
-              <span className="italic">your own data and workflow</span>, before going live. 
-              That's the gold.
-            </motion.p>
+              <motion.p
+                initial={{ opacity: 0, y: 20 }}
+                whileInView={{ opacity: 1, y: 0 }}
+                viewport={{ once: true, margin: "-50px" }}
+                transition={{ duration: 0.7, delay: 0.35 }}
+                className="text-[15px] text-foreground/85 leading-[1.85] font-medium"
+              >
+                Test every candidate against{" "}
+                <span className="italic">your data</span>, before going live.
+              </motion.p>
+            </div>
           </div>
         </div>
 
-        {/* Transition bridge toward Live Evaluation */}
-        <div className="relative pb-20 md:pb-32">
-          <div className="max-w-[1400px] mx-auto w-full px-8">
+        {/* Transition bridge */}
+        <div className="relative pb-24 md:pb-36">
+          <div className="max-w-[1100px] mx-auto w-full px-[33px]">
 
             <motion.div
               initial={{ opacity: 0, y: 30 }}
               whileInView={{ opacity: 1, y: 0 }}
               viewport={{ once: true, margin: "-80px" }}
               transition={{ duration: 0.8 }}
-              className="text-center max-w-2xl mx-auto"
+              className="max-w-xl"
             >
-              <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/40 block mb-6">
-                Our approach
+              <span className="font-grotesk font-semibold text-[10px] uppercase tracking-[0.3em] text-muted-foreground/50 block mb-8">
+                How it works
               </span>
-              <p className="font-display text-[clamp(1.6rem,3.5vw,3rem)] leading-[1.1] tracking-[-0.02em] text-foreground">
-                Describe your workflow.{" "}
-                <span className="italic text-muted-foreground">
-                  We test every AI solution against your real use cases
-                </span>{" "}
-                — and deliver three verdicts.
+              <p className="font-display text-[clamp(1.5rem,3vw,2.6rem)] leading-[1.15] tracking-[-0.02em] text-foreground">
+                Describe your workflow.
               </p>
-              <div className="flex items-center justify-center gap-8 mt-10">
+              <p className="font-display text-[clamp(1.5rem,3vw,2.6rem)] leading-[1.15] tracking-[-0.02em] text-muted-foreground/60 italic mt-1">
+                We return three verdicts.
+              </p>
+
+              <div className="flex items-center gap-10 mt-12">
                 {["Performance", "Speed", "Cost"].map((metric, i) => (
-                  <motion.span
+                  <motion.div
                     key={metric}
                     initial={{ opacity: 0, y: 10 }}
                     whileInView={{ opacity: 1, y: 0 }}
                     viewport={{ once: true }}
                     transition={{ delay: 0.3 + i * 0.15 }}
-                    className="font-mono text-[11px] uppercase tracking-[0.2em] text-accent/60 border-b border-accent/20 pb-1"
+                    className="flex flex-col items-start"
                   >
-                    {metric}
-                  </motion.span>
+                    <span className="font-mono text-[10px] uppercase tracking-[0.25em] text-foreground/70">
+                      {metric}
+                    </span>
+                    <div className="w-full h-[1px] bg-accent/25 mt-2" />
+                  </motion.div>
                 ))}
               </div>
             </motion.div>
 
-            {/* Arrow pointing down to next section */}
+            {/* Subtle scroll indicator */}
             <motion.div
-              className="flex justify-center mt-16"
+              className="flex justify-start mt-20"
               initial={{ opacity: 0 }}
               whileInView={{ opacity: 1 }}
               viewport={{ once: true }}
               transition={{ delay: 0.6 }}
             >
               <motion.svg
-                width="20"
-                height="32"
-                viewBox="0 0 20 32"
+                width="16"
+                height="28"
+                viewBox="0 0 16 28"
                 fill="none"
-                className="text-accent/30"
-                animate={{ y: [0, 6, 0] }}
-                transition={{ duration: 2, repeat: Infinity, ease: "easeInOut" }}
+                className="text-accent/25"
+                animate={{ y: [0, 5, 0] }}
+                transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
               >
-                <path d="M10 0V28M10 28L2 20M10 28L18 20" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+                <path d="M8 0V24M8 24L1 17M8 24L15 17" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
               </motion.svg>
             </motion.div>
           </div>

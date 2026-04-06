@@ -171,12 +171,6 @@ const ApiTypingDemo = () => {
 
   return (
     <div ref={ref}>
-      {/* A2A message */}
-      <p className="text-[15px] md:text-[17px] text-foreground/90 leading-[1.8] max-w-[640px] mb-8">
-        A2A-compatible. Agent Card discovery, sandbox-as-a-service, and evaluation 
-        endpoints — designed for a world where agents choose their own tools.
-      </p>
-
       {/* Editor header */}
       <div className="border border-border border-b-0 px-4 py-3 flex items-center justify-between">
         <div className="flex items-center gap-3">

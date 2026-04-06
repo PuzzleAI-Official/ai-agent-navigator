@@ -19,7 +19,7 @@ const ApiDocs = () => {
           </h1>
           <p className="text-[15px] md:text-[17px] text-muted-foreground max-w-[640px] leading-[1.8] mb-16">
             Integrate PuzzleAI into your workflow programmatically. Evaluate AI candidates, 
-            run benchmarks, and retrieve verdicts — all via a simple REST API.
+            run benchmarks, and get results — all via a simple REST API.
           </p>
 
           {/* Coming soon placeholder */}

@@ -38,7 +38,7 @@ const Navbar = () => {
             { label: "Home", href: "/" },
             { label: "Feature", href: "/feature" },
             { label: "API", href: "/api" },
-            { label: "About", href: "#about" },
+            { label: "About", href: "/about" },
           ].map((item) => (
             <a
               key={item.label}

@@ -162,7 +162,7 @@ const Hero = () => {
   };
 
   return (
-    <div ref={containerRef} className="relative" style={{ height: "340vh" }}>
+    <div ref={containerRef} className="relative" style={{ height: "280vh" }}>
       {/* Shared background for both sections */}
       <div className="absolute inset-0">
         <div className="sticky top-0 h-screen" style={{
@@ -242,7 +242,7 @@ const Hero = () => {
       </div>
 
       {/* SECTION 2: The AI hiring platform */}
-      <div ref={section2Ref} className="relative z-20 min-h-[160vh]" style={{ marginTop: "80vh" }}>
+      <div ref={section2Ref} className="relative z-20 min-h-[80vh]" style={{ marginTop: "80vh" }}>
 
         <div className="min-h-screen flex flex-col justify-end pb-16 md:pb-24 relative">
           <div className="max-w-[1100px] mx-auto w-full px-[33px] my-0">

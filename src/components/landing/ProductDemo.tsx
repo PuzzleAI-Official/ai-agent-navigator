@@ -126,7 +126,7 @@ const ProductDemo = () => {
               </h2>
               <p className="text-background/35 leading-relaxed max-w-md mb-12 text-[15px] whitespace-pre-line">
                 We break your workflow into real-world scenarios, generate test data that matches your edge cases, and run every candidate head-to-head in a sandbox — with your data, not theirs.
-                {"\n"}Every result is transparent. Every comparison is earned..
+                {"\n"}Every result is transparent. Every comparison is earned.
               </p>
 
               <div className="grid grid-cols-3 gap-6 pt-8 border-t border-background/10">

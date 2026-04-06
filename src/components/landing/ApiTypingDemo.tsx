@@ -68,7 +68,7 @@ const ApiTypingDemo = () => {
 
     if (type === "comment") {
       return (
-        <span className="text-muted-foreground/45">{visible}</span>
+        <span className="text-[#e0e0e6]/35">{visible}</span>
       );
     }
 
@@ -78,7 +78,7 @@ const ApiTypingDemo = () => {
     }
 
     if (type === "string") {
-      return <span className="text-amber-700/80">{visible}</span>;
+      return <span className="text-[#c9a96e]">{visible}</span>;
     }
 
     if (type === "code-comment") {

@@ -245,7 +245,7 @@ const Hero = () => {
       <div ref={section2Ref} className="relative z-20 min-h-[160vh]" style={{ marginTop: "80vh" }}>
 
         <div className="min-h-screen flex flex-col justify-end pb-12 md:pb-16 relative">
-          <div className="max-w-[1400px] mx-auto w-full px-8">
+          <div className="max-w-[1400px] mx-auto w-full px-[33px] my-0">
             <motion.div
               initial={{ opacity: 0 }}
               whileInView={{ opacity: 1 }}
@@ -255,7 +255,7 @@ const Hero = () => {
             >
               <div className="w-8 h-[2px] bg-accent/30" style={{ transform: "skewX(-20deg)" }} />
               <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-muted-foreground">
-                The AI hiring platform
+                THE AI SELECTION INFRASTRUCTURE
               </span>
             </motion.div>
 

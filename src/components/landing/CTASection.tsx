@@ -64,8 +64,8 @@ const CTASection = () => {
                 Start <span className="italic text-gradient">deciding</span>.
               </h2>
               <p className="text-muted-foreground max-w-lg mx-auto mb-12 leading-relaxed">
-                Describe your workflow in plain language. Get performance, speed, and cost
-                verdicts on 200+ AI solutions in under five minutes.
+                Describe what you need. Test 200+ AI tools with your own data in minutes.
+                Compare real results, not marketing pages. Choose with proof, not gut feel.
               </p>
               <div className="flex items-center justify-center">
                 <a

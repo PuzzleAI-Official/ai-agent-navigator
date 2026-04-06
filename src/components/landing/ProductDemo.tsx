@@ -122,11 +122,11 @@ const ProductDemo = () => {
               <h2 className="font-display text-[clamp(2.2rem,4vw,4rem)] leading-[1] tracking-[-0.02em] mb-8">
                 Your workflow,
                 <br />
-                <span className="italic text-background/50">dissected.</span>
+                <span className="italic text-background/50">benchmarked.</span>
               </h2>
-              <p className="text-background/35 leading-relaxed max-w-md mb-12 text-[15px]">
-                We decompose your workflow into atomic test cases, synthesize edge-case data,
-                and run every candidate head-to-head. No black boxes.
+              <p className="text-background/35 leading-relaxed max-w-md mb-12 text-[15px] whitespace-pre-line">
+                We break your workflow into real-world scenarios, generate test data that matches your edge cases, and run every candidate head-to-head in a sandbox — with your data, not theirs.
+                {"\n"}Every result is transparent. Every comparison is earned..
               </p>
 
               <div className="grid grid-cols-3 gap-6 pt-8 border-t border-background/10">

@@ -328,68 +328,6 @@ const Hero = () => {
           </div>
         </div>
 
-        {/* Transition bridge */}
-        <div className="relative pb-24 md:pb-36">
-          <div className="max-w-[1100px] mx-auto w-full px-[33px]">
-
-            <motion.div
-              initial={{ opacity: 0, y: 30 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true, margin: "-80px" }}
-              transition={{ duration: 0.8 }}
-              className="max-w-xl"
-            >
-              <span className="font-grotesk font-semibold text-[10px] uppercase tracking-[0.3em] text-muted-foreground/50 block mb-8">
-                How it works
-              </span>
-              <p className="font-display text-[clamp(1.5rem,3vw,2.6rem)] leading-[1.15] tracking-[-0.02em] text-foreground">
-                Describe your workflow.
-              </p>
-              <p className="font-display text-[clamp(1.5rem,3vw,2.6rem)] leading-[1.15] tracking-[-0.02em] text-muted-foreground/60 italic mt-1">
-                We return three verdicts.
-              </p>
-
-              <div className="flex items-center gap-10 mt-12">
-                {["Performance", "Speed", "Cost"].map((metric, i) => (
-                  <motion.div
-                    key={metric}
-                    initial={{ opacity: 0, y: 10 }}
-                    whileInView={{ opacity: 1, y: 0 }}
-                    viewport={{ once: true }}
-                    transition={{ delay: 0.3 + i * 0.15 }}
-                    className="flex flex-col items-start"
-                  >
-                    <span className="font-mono text-[10px] uppercase tracking-[0.25em] text-foreground/70">
-                      {metric}
-                    </span>
-                    <div className="w-full h-[1px] bg-accent/25 mt-2" />
-                  </motion.div>
-                ))}
-              </div>
-            </motion.div>
-
-            {/* Subtle scroll indicator */}
-            <motion.div
-              className="flex justify-start mt-20"
-              initial={{ opacity: 0 }}
-              whileInView={{ opacity: 1 }}
-              viewport={{ once: true }}
-              transition={{ delay: 0.6 }}
-            >
-              <motion.svg
-                width="16"
-                height="28"
-                viewBox="0 0 16 28"
-                fill="none"
-                className="text-accent/25"
-                animate={{ y: [0, 5, 0] }}
-                transition={{ duration: 2.5, repeat: Infinity, ease: "easeInOut" }}
-              >
-                <path d="M8 0V24M8 24L1 17M8 24L15 17" stroke="currentColor" strokeWidth="1" strokeLinecap="round" strokeLinejoin="round" />
-              </motion.svg>
-            </motion.div>
-          </div>
-        </div>
       </div>
     </div>
   );

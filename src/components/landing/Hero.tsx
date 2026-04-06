@@ -162,7 +162,7 @@ const Hero = () => {
   };
 
   return (
-    <div ref={containerRef} className="relative" style={{ height: "340vh" }}>
+    <div ref={containerRef} className="relative" style={{ height: "280vh" }}>
       {/* Shared background for both sections */}
       <div className="absolute inset-0">
         <div className="sticky top-0 h-screen" style={{

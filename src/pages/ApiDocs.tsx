@@ -10,7 +10,7 @@ const ApiDocs = () => {
           <div className="flex items-center gap-4 mb-8">
             <div className="w-8 h-[2px] bg-accent/30" style={{ transform: "skewX(-20deg)" }} />
             <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-muted-foreground">
-              Developer API
+              Built for the Agent Era
             </span>
           </div>
 

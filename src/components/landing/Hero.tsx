@@ -319,7 +319,7 @@ const Hero = () => {
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true, margin: "-50px" }}
                 transition={{ duration: 0.7, delay: 0.35 }}
-                className="text-[15px] text-foreground/85 leading-[1.85] font-medium"
+                className="text-foreground/85 leading-[1.85] font-semibold text-xl"
               >
                 Test every candidate against{" "}
                 <span className="italic">your data</span>, before going live.

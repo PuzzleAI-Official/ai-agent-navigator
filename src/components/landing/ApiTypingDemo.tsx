@@ -1,107 +1,173 @@
 import { useState, useEffect, useRef } from "react";
 
-const API_LINES = [
-  { type: "comment", text: "# Agent Card Discovery" },
-  { type: "method", method: "GET", path: "/v1/agents", desc: "List all available agents" },
-  { type: "method", method: "GET", path: "/v1/agents/{id}/card", desc: "Retrieve agent capability card" },
-  { type: "method", method: "POST", path: "/v1/agents/discover", desc: "Search agents by task description" },
-  { type: "blank" },
-  { type: "comment", text: "# Sandbox-as-a-Service" },
-  { type: "method", method: "POST", path: "/v1/sandbox/create", desc: "Spin up isolated test environment" },
-  { type: "method", method: "POST", path: "/v1/sandbox/{id}/run", desc: "Execute workflow in sandbox" },
-  { type: "method", method: "DELETE", path: "/v1/sandbox/{id}", desc: "Tear down sandbox instance" },
-  { type: "blank" },
-  { type: "comment", text: "# Evaluation Endpoints" },
-  { type: "method", method: "POST", path: "/v1/evaluate", desc: "Run head-to-head benchmark" },
-  { type: "method", method: "GET", path: "/v1/evaluate/{id}/results", desc: "Get performance verdicts" },
-  { type: "method", method: "GET", path: "/v1/evaluate/{id}/compare", desc: "Side-by-side comparison matrix" },
+const CODE_LINES = [
+  { text: "# When your agent needs to hire another agent.", type: "comment" },
+  { text: "# This is what that looks like.", type: "comment" },
+  { text: "", type: "blank" },
+  { text: "from puzzleai import AgentHR", type: "import" },
+  { text: "", type: "blank" },
+  { text: "# Your orchestrator agent describes what it needs", type: "comment" },
+  { text: 'hr = AgentHR(protocol="a2a")', type: "code" },
+  { text: "", type: "blank" },
+  { text: "# 1. Scout — discover agents via A2A Agent Cards", type: "comment" },
+  { text: "candidates = hr.discover(", type: "code" },
+  { text: '    role="Translate customer tickets from JP → EN,', type: "string" },
+  { text: '          then route by urgency",', type: "string" },
+  { text: '    requirements=["multilingual", "sub-2s latency", "pii-safe"],', type: "code" },
+  { text: '    budget="$0.02/ticket"', type: "string" },
+  { text: ") # → 12 agents matched from 3 registries", type: "code-comment" },
+  { text: "", type: "blank" },
+  { text: "# 2. Interview — sandbox each candidate with your data", type: "comment" },
+  { text: "results = hr.evaluate(", type: "code" },
+  { text: "    candidates=candidates,", type: "code" },
+  { text: '    test_data="s3://our-tickets/sample_500.jsonl",', type: "string" },
+  { text: '    criteria=["accuracy", "latency", "cost", "pii_leakage"],', type: "code" },
+  { text: "    sandbox=True # isolated environment, your data never leaves", type: "code-comment" },
+  { text: ")", type: "code" },
+  { text: "", type: "blank" },
+  { text: "# 3. Hire — the best candidate joins your workflow", type: "comment" },
+  { text: 'hired = hr.select(results, strategy="pareto-optimal")', type: "code" },
+  { text: 'hired.onboard(webhook="https://ops.acme.com/agents/new")', type: "code" },
+  { text: "", type: "blank" },
+  { text: "# 4. Monitor — continuous performance reviews", type: "comment" },
+  { text: "hr.monitor(", type: "code" },
+  { text: "    agent=hired,", type: "code" },
+  { text: '    sla={"accuracy": 0.95, "latency_p99": "1800ms"},', type: "code" },
+  { text: '    on_underperform="re-evaluate" # automatically find a replacement', type: "code-comment" },
+  { text: ")", type: "code" },
 ];
-
-const METHOD_COLORS: Record<string, string> = {
-  GET: "text-emerald-600",
-  POST: "text-amber-600",
-  DELETE: "text-red-500",
-};
 
 const ApiTypingDemo = () => {
   const [visibleChars, setVisibleChars] = useState(0);
   const [isInView, setIsInView] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
-  // Build full text for character counting
-  const fullLines = API_LINES.map((line) => {
-    if (line.type === "blank") return "";
-    if (line.type === "comment") return line.text!;
-    return `${line.method}  ${line.path}  ${line.desc}`;
-  });
-  const totalChars = fullLines.reduce((sum, l) => sum + l.length + 1, 0);
+  const lineTexts = CODE_LINES.map((l) => l.text);
+  const totalChars = lineTexts.reduce((sum, l) => sum + l.length + 1, 0);
 
   useEffect(() => {
     const observer = new IntersectionObserver(
       ([entry]) => { if (entry.isIntersecting) setIsInView(true); },
-      { threshold: 0.3 }
+      { threshold: 0.2 }
     );
     if (ref.current) observer.observe(ref.current);
     return () => observer.disconnect();
   }, []);
 
   useEffect(() => {
-    if (!isInView) return;
-    if (visibleChars >= totalChars) return;
-    const speed = Math.random() * 20 + 10;
+    if (!isInView || visibleChars >= totalChars) return;
+    const speed = Math.random() * 18 + 8;
     const timer = setTimeout(() => setVisibleChars((c) => c + 1), speed);
     return () => clearTimeout(timer);
   }, [isInView, visibleChars, totalChars]);
 
-  // Render lines with typing effect
   let charCount = 0;
-  const renderedLines = API_LINES.map((line, i) => {
-    const lineText = fullLines[i];
+
+  const renderLine = (text: string, type: string, charsToShow: number, showCursor: boolean) => {
+    const visible = text.slice(0, charsToShow);
+
+    if (type === "comment") {
+      return (
+        <span className="text-muted-foreground/45">{visible}</span>
+      );
+    }
+
+    if (type === "import") {
+      // Highlight "from" and "import" keywords
+      return highlightPython(visible);
+    }
+
+    if (type === "string") {
+      return <span className="text-amber-700/80">{visible}</span>;
+    }
+
+    if (type === "code-comment") {
+      // Split at #
+      const hashIdx = text.indexOf(" #");
+      if (hashIdx >= 0 && charsToShow > hashIdx) {
+        return (
+          <>
+            {highlightPython(visible.slice(0, hashIdx))}
+            <span className="text-muted-foreground/45">{visible.slice(hashIdx)}</span>
+          </>
+        );
+      }
+      return highlightPython(visible);
+    }
+
+    return highlightPython(visible);
+  };
+
+  const highlightPython = (text: string) => {
+    // Simple keyword highlighting
+    const keywords = ["from", "import", "True", "False", "None"];
+    const parts: { text: string; isKeyword: boolean; isString: boolean }[] = [];
+
+    let remaining = text;
+    while (remaining.length > 0) {
+      // Check for string literals
+      const strMatch = remaining.match(/^("(?:[^"\\]|\\.)*"?)/);
+      if (strMatch) {
+        parts.push({ text: strMatch[1], isKeyword: false, isString: true });
+        remaining = remaining.slice(strMatch[1].length);
+        continue;
+      }
+
+      // Check for keywords
+      let foundKeyword = false;
+      for (const kw of keywords) {
+        if (remaining.startsWith(kw) && (remaining.length === kw.length || /[^a-zA-Z_]/.test(remaining[kw.length]))) {
+          parts.push({ text: kw, isKeyword: true, isString: false });
+          remaining = remaining.slice(kw.length);
+          foundKeyword = true;
+          break;
+        }
+      }
+      if (foundKeyword) continue;
+
+      // Regular char
+      const nextSpecial = remaining.slice(1).search(/("|(?:^|\b)(?:from|import|True|False|None)(?:\b|$))/);
+      const chunk = nextSpecial >= 0 ? remaining.slice(0, nextSpecial + 1) : remaining;
+      parts.push({ text: chunk, isKeyword: false, isString: false });
+      remaining = remaining.slice(chunk.length);
+    }
+
+    return (
+      <>
+        {parts.map((p, i) =>
+          p.isKeyword ? (
+            <span key={i} className="text-violet-600/80 font-semibold">{p.text}</span>
+          ) : p.isString ? (
+            <span key={i} className="text-amber-700/80">{p.text}</span>
+          ) : (
+            <span key={i} className="text-foreground/85">{p.text}</span>
+          )
+        )}
+      </>
+    );
+  };
+
+  const renderedLines = CODE_LINES.map((line, i) => {
+    const lineText = lineTexts[i];
     const lineStart = charCount;
     charCount += lineText.length + 1;
     const charsToShow = Math.max(0, Math.min(lineText.length, visibleChars - lineStart));
 
     if (charsToShow <= 0 && visibleChars < totalChars) return null;
-    if (line.type === "blank") return <div key={i} className="h-4" />;
+    if (line.type === "blank") return <div key={i} className="h-[1.6em]" />;
 
-    const visibleText = lineText.slice(0, charsToShow);
     const showCursor = visibleChars >= lineStart && visibleChars < lineStart + lineText.length + 1;
 
-    if (line.type === "comment") {
-      return (
-        <div key={i} className="text-muted-foreground/50 select-none">
-          {visibleText}
-          {showCursor && <span className="animate-pulse">▊</span>}
-        </div>
-      );
-    }
-
-    const methodEnd = line.method!.length;
-    const pathStart = methodEnd + 2;
-    const pathEnd = pathStart + line.path!.length;
-    const descStart = pathEnd + 2;
-
     return (
-      <div key={i} className="flex gap-0 whitespace-nowrap">
-        <span className={`${METHOD_COLORS[line.method!]} font-bold min-w-[70px] inline-block`}>
-          {visibleText.slice(0, methodEnd)}
-        </span>
-        {charsToShow > pathStart && (
-          <span className="text-foreground/90">
-            {visibleText.slice(pathStart, Math.min(charsToShow, pathEnd))}
-          </span>
-        )}
-        {charsToShow > descStart && (
-          <span className="text-muted-foreground/50 ml-4">
-            {"// "}{visibleText.slice(descStart)}
-          </span>
-        )}
-        {showCursor && <span className="animate-pulse text-foreground/70">▊</span>}
+      <div key={i} className="whitespace-pre">
+        {renderLine(lineText, line.type, charsToShow, showCursor)}
+        {showCursor && <span className="animate-pulse text-foreground/60">▊</span>}
       </div>
     );
   });
 
   const isComplete = visibleChars >= totalChars;
+  let lineNum = 0;
 
   return (
     <div ref={ref}>
@@ -120,7 +186,7 @@ const ApiTypingDemo = () => {
             <div className="w-2.5 h-2.5 rounded-full bg-muted-foreground/20" />
           </div>
           <span className="font-mono text-[11px] text-muted-foreground/50 ml-2">
-            api-reference.rest
+            hire_agent.py
           </span>
         </div>
         <span className="font-mono text-[10px] text-muted-foreground/30 uppercase tracking-wider">
@@ -129,32 +195,42 @@ const ApiTypingDemo = () => {
       </div>
 
       {/* Code area */}
-      <div className="border border-border bg-foreground/[0.02] p-6 md:p-8 font-mono text-[12px] md:text-[13px] leading-[2] overflow-x-auto min-h-[340px]">
+      <div className="border border-border bg-foreground/[0.02] p-6 md:p-8 font-mono text-[12px] md:text-[13px] leading-[1.85] overflow-x-auto">
         <div className="flex">
           {/* Line numbers */}
-          <div className="select-none pr-6 text-muted-foreground/25 text-right min-w-[32px]">
-            {API_LINES.map((_, i) => {
-              const lineStart = fullLines.slice(0, i).reduce((s, l) => s + l.length + 1, 0);
-              if (visibleChars < lineStart && visibleChars < totalChars) return null;
-              return <div key={i} className={API_LINES[i].type === "blank" ? "h-4" : ""}>{API_LINES[i].type !== "blank" ? i + 1 : ""}</div>;
+          <div className="select-none pr-6 text-muted-foreground/20 text-right min-w-[32px]">
+            {CODE_LINES.map((line, i) => {
+              const lineStart2 = lineTexts.slice(0, i).reduce((s, l) => s + l.length + 1, 0);
+              if (visibleChars < lineStart2 && visibleChars < totalChars) return null;
+              lineNum++;
+              return (
+                <div key={i} className={line.type === "blank" ? "h-[1.6em]" : ""}>
+                  {line.type !== "blank" ? lineNum : ""}
+                </div>
+              );
             })}
           </div>
-          {/* Code content */}
-          <div className="flex-1">
-            {renderedLines}
-          </div>
+          {/* Code */}
+          <div className="flex-1">{renderedLines}</div>
         </div>
       </div>
 
       {/* Footer */}
       <div className="border border-border border-t-0 px-4 py-2.5 flex items-center justify-between">
         <span className="font-mono text-[10px] text-muted-foreground/40">
-          A2A-compatible · REST · JSON
+          Python 3.12 · A2A Protocol
         </span>
         <span className="font-mono text-[10px] text-muted-foreground/30">
-          Coming soon — join the waitlist for early access
+          UTF-8 · LF
         </span>
       </div>
+
+      {/* Footnote */}
+      <p className="mt-8 text-[13px] text-muted-foreground/50 leading-[1.8] max-w-[640px]">
+        This is where we're headed. The API above is illustrative — we're building it now 
+        and opening early access later this year. If you want to shape how agents hire agents, 
+        get on the list.
+      </p>
     </div>
   );
 };

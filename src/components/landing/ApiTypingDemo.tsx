@@ -180,7 +180,7 @@ const ApiTypingDemo = () => {
             <div className="w-2.5 h-2.5 rounded-full bg-[#2a2b35]" />
           </div>
           <span className="font-mono text-[11px] text-[#e0e0e6]/30 ml-2">
-            hire_agent.py
+            PUZZLE A2A SDK - PREVIEW
           </span>
         </div>
         <span className="font-mono text-[10px] text-[#e0e0e6]/20 uppercase tracking-wider">
@@ -220,7 +220,7 @@ const ApiTypingDemo = () => {
       </div>
 
       {/* Footnote */}
-      <p className="mt-8 text-[13px] text-muted-foreground/50 leading-[1.8] max-w-[640px]">
+      <p className="mt-8 leading-[1.8] max-w-[640px] text-sm text-muted-foreground font-mono">
         This is where we're headed. The API above is illustrative — we're building it now 
         and opening early access later this year. If you want to shape how agents hire agents, 
         get on the list.

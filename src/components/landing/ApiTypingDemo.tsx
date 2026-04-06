@@ -68,7 +68,7 @@ const ApiTypingDemo = () => {
 
     if (type === "comment") {
       return (
-        <span className="text-muted-foreground/45">{visible}</span>
+        <span className="text-[#e0e0e6]/35">{visible}</span>
       );
     }
 
@@ -78,7 +78,7 @@ const ApiTypingDemo = () => {
     }
 
     if (type === "string") {
-      return <span className="text-amber-700/80">{visible}</span>;
+      return <span className="text-[#c9a96e]">{visible}</span>;
     }
 
     if (type === "code-comment") {
@@ -88,7 +88,7 @@ const ApiTypingDemo = () => {
         return (
           <>
             {highlightPython(visible.slice(0, hashIdx))}
-            <span className="text-muted-foreground/45">{visible.slice(hashIdx)}</span>
+            <span className="text-[#e0e0e6]/35">{visible.slice(hashIdx)}</span>
           </>
         );
       }
@@ -136,11 +136,11 @@ const ApiTypingDemo = () => {
       <>
         {parts.map((p, i) =>
           p.isKeyword ? (
-            <span key={i} className="text-violet-600/80 font-semibold">{p.text}</span>
+            <span key={i} className="text-[hsl(215,25%,65%)] font-semibold">{p.text}</span>
           ) : p.isString ? (
-            <span key={i} className="text-amber-700/80">{p.text}</span>
+            <span key={i} className="text-[#c9a96e]">{p.text}</span>
           ) : (
-            <span key={i} className="text-foreground/85">{p.text}</span>
+            <span key={i} className="text-[#d0d0da]">{p.text}</span>
           )
         )}
       </>
@@ -161,7 +161,7 @@ const ApiTypingDemo = () => {
     return (
       <div key={i} className="whitespace-pre">
         {renderLine(lineText, line.type, charsToShow, showCursor)}
-        {showCursor && <span className="animate-pulse text-foreground/60">▊</span>}
+        {showCursor && <span className="animate-pulse text-[hsl(215,25%,65%)]">▊</span>}
       </div>
     );
   });
@@ -172,27 +172,27 @@ const ApiTypingDemo = () => {
   return (
     <div ref={ref}>
       {/* Editor header */}
-      <div className="border border-border border-b-0 px-4 py-3 flex items-center justify-between">
+      <div className="border border-[#1e2028] border-b-0 px-4 py-3 flex items-center justify-between bg-[#13141b]">
         <div className="flex items-center gap-3">
           <div className="flex gap-1.5">
-            <div className="w-2.5 h-2.5 rounded-full bg-muted-foreground/20" />
-            <div className="w-2.5 h-2.5 rounded-full bg-muted-foreground/20" />
-            <div className="w-2.5 h-2.5 rounded-full bg-muted-foreground/20" />
+            <div className="w-2.5 h-2.5 rounded-full bg-[#2a2b35]" />
+            <div className="w-2.5 h-2.5 rounded-full bg-[#2a2b35]" />
+            <div className="w-2.5 h-2.5 rounded-full bg-[#2a2b35]" />
           </div>
-          <span className="font-mono text-[11px] text-muted-foreground/50 ml-2">
+          <span className="font-mono text-[11px] text-[#e0e0e6]/30 ml-2">
             hire_agent.py
           </span>
         </div>
-        <span className="font-mono text-[10px] text-muted-foreground/30 uppercase tracking-wider">
+        <span className="font-mono text-[10px] text-[#e0e0e6]/20 uppercase tracking-wider">
           {isComplete ? "ready" : "typing…"}
         </span>
       </div>
 
       {/* Code area */}
-      <div className="border border-border bg-foreground/[0.02] p-6 md:p-8 font-mono text-[12px] md:text-[13px] leading-[1.85] overflow-x-auto">
+      <div className="border border-[#1e2028] bg-[#0f1117] p-6 md:p-8 font-mono text-[12px] md:text-[13px] leading-[1.85] overflow-x-auto">
         <div className="flex">
           {/* Line numbers */}
-          <div className="select-none pr-6 text-muted-foreground/20 text-right min-w-[32px]">
+          <div className="select-none pr-6 text-[#e0e0e6]/15 text-right min-w-[32px]">
             {CODE_LINES.map((line, i) => {
               const lineStart2 = lineTexts.slice(0, i).reduce((s, l) => s + l.length + 1, 0);
               if (visibleChars < lineStart2 && visibleChars < totalChars) return null;
@@ -210,11 +210,11 @@ const ApiTypingDemo = () => {
       </div>
 
       {/* Footer */}
-      <div className="border border-border border-t-0 px-4 py-2.5 flex items-center justify-between">
-        <span className="font-mono text-[10px] text-muted-foreground/40">
+      <div className="border border-[#1e2028] border-t-0 px-4 py-2.5 flex items-center justify-between bg-[#13141b]">
+        <span className="font-mono text-[10px] text-[#e0e0e6]/25">
           Python 3.12 · A2A Protocol
         </span>
-        <span className="font-mono text-[10px] text-muted-foreground/30">
+        <span className="font-mono text-[10px] text-[#e0e0e6]/15">
           UTF-8 · LF
         </span>
       </div>

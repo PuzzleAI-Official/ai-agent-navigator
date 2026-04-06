@@ -221,7 +221,7 @@ const ApiTypingDemo = () => {
 
       {/* Footnote */}
       <p className="mt-8 leading-[1.8] max-w-[640px] text-sm text-muted-foreground font-mono">
-        This is where we're headed. The API above is illustrative — we're building it now 
+        A2A is where we're headed. The API above is illustrative — we're building it now 
         and opening early access later this year. If you want to shape how agents hire agents, 
         get on the list.
       </p>

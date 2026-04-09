@@ -13,13 +13,13 @@ export const articles: Article[] = [
   {
     slug: "why-we-started-puzzleai",
     title: "Why We Started PuzzleAI",
-    date: "2025-03-15",
-    author: "PuzzleAI Team",
+    date: "2026-04-01",
+    author: "Lianming Hu",
     authorRole: "Founders",
     excerpt:
-      "The hiring process for AI agents is broken. We set out to fix it with infrastructure that puts performance data first.",
-    content: `The hiring process for AI agents is broken. There are thousands of agents being built every day, yet no standardized way to evaluate, compare, or select the right one for a given task.
-
+      "The inspiration for building A2A infrastructure is not coming from nowhere. It is naturally rooted in the work: the team has been building agentic services and found that the current infrastructure workflow is fragmented.",
+    content: `The inspiration for building A2A infrastructure is not coming from nowhere. It is naturally rooted in the work: the team has been building agentic services and found that the current infrastructure workflow is fragmented.
+    
 We started PuzzleAI because we lived this problem firsthand. As agent builders ourselves, we spent countless hours testing, benchmarking, and comparing agents — only to realize the tooling simply didn't exist.
 
 So we built it.
@@ -33,12 +33,15 @@ This is just the beginning. We're building toward a world where finding the righ
   {
     slug: "the-three-metrics-that-matter",
     title: "The Three Metrics That Matter",
-    date: "2025-04-01",
-    author: "PuzzleAI Team",
+    date: "2026-04-09",
+    author: "Jeffrey Wu",
     authorRole: "Engineering",
     excerpt:
-      "Performance, speed, cost. Here's why we deliberately ignore everything else when evaluating AI agents.",
-    content: `When we set out to build an evaluation framework for AI agents, we had to make a choice: measure everything, or measure what matters.
+      "Before Stripe, accepting payments online was technically painful, fragmented, and trust-broken. Merchants existed. Buyers existed. The infrastructure layer that made the transaction trustworthy at scale didn't. Stripe built it — and became a $95B company without owning a single product being sold.\nThe agent economy is in the same moment Stripe found in 2010.\n",
+    content: `Before Stripe, accepting payments online was technically painful, fragmented, and trust-broken. Merchants existed. Buyers existed. The infrastructure layer that made the transaction trustworthy at scale didn't. Stripe built it — and became a $95B company without owning a single product being sold.
+The agent economy is in the same moment Stripe found in 2010.
+
+When we set out to build an evaluation framework for AI agents, we had to make a choice: measure everything, or measure what matters.
 
 We chose the latter.
 

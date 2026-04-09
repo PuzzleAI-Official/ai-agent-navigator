@@ -86,9 +86,16 @@ const BlogPost = () => {
 
           {/* Article body */}
           <div className="space-y-6 text-foreground/80 text-[16px] leading-[1.9] font-sans">
-            {article.content.split("\n\n").map((paragraph, i) => (
-              <p key={i}>{paragraph}</p>
-            ))}
+            {article.content.split("\n\n").map((paragraph, i) => {
+              const trimmed = paragraph.trim();
+              if (!trimmed) return null;
+              // Detect section headers (short lines without periods, typically under 60 chars)
+              const isHeader = trimmed.length < 80 && !trimmed.includes('.') && !trimmed.includes('?') && !trimmed.includes('—') && trimmed === trimmed.replace(/\n/g, '');
+              if (isHeader) {
+                return <h2 key={i} className="font-display text-xl md:text-2xl tracking-[-0.02em] text-foreground mt-4">{trimmed}</h2>;
+              }
+              return <p key={i}>{trimmed}</p>;
+            })}
           </div>
         </motion.div>
       </article>

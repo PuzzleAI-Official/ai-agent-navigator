@@ -73,12 +73,20 @@ const WhySection = () => {
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true }}
                 transition={{ delay: 0.4 }}
-                className="mt-10 inline-flex items-center gap-4 border border-accent/15 px-5 py-3 bg-accent/[0.03]"
+                className="mt-10 flex flex-col sm:flex-row gap-3"
               >
-                <span className="font-display text-3xl text-accent italic">50k+</span>
-                <span className="font-grotesk text-[10px] text-muted-foreground uppercase tracking-wider leading-tight">
-                  test scenarios<br />generated
-                </span>
+                <div className="border border-border px-5 py-4 bg-background/80 flex-1">
+                  <span className="font-grotesk font-semibold text-[9px] uppercase tracking-[0.2em] text-muted-foreground/40 block mb-2">Without Puzzle</span>
+                  <p className="font-display text-[15px] leading-snug text-muted-foreground">
+                    3 weeks of trial-and-error<br />across 4 tools
+                  </p>
+                </div>
+                <div className="border border-accent/30 px-5 py-4 bg-accent/[0.04] flex-1">
+                  <span className="font-grotesk font-semibold text-[9px] uppercase tracking-[0.2em] text-accent/60 block mb-2">With Puzzle</span>
+                  <p className="font-display text-[15px] leading-snug">
+                    5 minutes, side-by-side,<br />with your data
+                  </p>
+                </div>
               </motion.div>
             </div>
           </motion.div>

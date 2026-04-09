@@ -64,9 +64,8 @@ const WhySection = () => {
                 <br />We run your <span className="italic">actual</span> workload.
               </h3>
               <p className="text-muted-foreground max-w-lg text-[15px] leading-relaxed">
-                Every AI solution is tested against synthesized scenarios built from your real data.
-                We generate edge cases you haven't thought of, because the right solution must handle
-                the unexpected.
+                Every AI solution is tested in a sandboxed environment against your actual tasks and data. 
+                You see what works, what breaks, and what wins before you commit.
               </p>
 
               <motion.div

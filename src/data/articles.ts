@@ -13,7 +13,7 @@ export const articles: Article[] = [
   {
     slug: "why-we-started-puzzleai",
     title: "Why We Started PuzzleAI",
-    date: "2026-04-01",
+    date: "2026-04-02",
     author: "Lianming Hu",
     authorRole: "Founders",
     excerpt:

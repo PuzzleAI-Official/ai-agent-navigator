@@ -23,24 +23,30 @@ const Footer = () => {
             </p>
           </div>
 
-          {[
-            { title: "Product", links: ["How it works", "Companies", "Pricing", "API"] },
-            { title: "Company", links: ["About", "Blog", "Careers", "Contact"] },
-            { title: "Connect", links: ["Twitter", "LinkedIn", "GitHub", "Discord"] },
-          ].map((col) => (
-            <div key={col.title} className="md:col-span-2">
-              <h4 className="font-grotesk font-semibold text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-4">{col.title}</h4>
-              <ul className="space-y-2.5">
-                {col.links.map((link) => (
-                  <li key={link}>
-                    <a href="#" className="text-sm text-foreground/60 hover:text-accent transition-colors duration-200">
-                      {link}
-                    </a>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          ))}
+          <div className="md:col-span-2">
+            <h4 className="font-grotesk font-semibold text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-4">Product</h4>
+            <ul className="space-y-2.5">
+              <li><a href="/feature" className="text-sm text-foreground/60 hover:text-accent transition-colors duration-200">How it works</a></li>
+              <li><a href="/playground" className="text-sm text-foreground/60 hover:text-accent transition-colors duration-200">Playground</a></li>
+              <li><a href="/api-docs" className="text-sm text-foreground/60 hover:text-accent transition-colors duration-200">API</a></li>
+            </ul>
+          </div>
+
+          <div className="md:col-span-2">
+            <h4 className="font-grotesk font-semibold text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-4">Company</h4>
+            <ul className="space-y-2.5">
+              <li><a href="/about" className="text-sm text-foreground/60 hover:text-accent transition-colors duration-200">About</a></li>
+              <li><a href="mailto:info@puzzleai.us" className="text-sm text-foreground/60 hover:text-accent transition-colors duration-200">Contact</a></li>
+            </ul>
+          </div>
+
+          <div className="md:col-span-2">
+            <h4 className="font-grotesk font-semibold text-[10px] uppercase tracking-[0.2em] text-muted-foreground mb-4">Connect</h4>
+            <ul className="space-y-2.5">
+              <li><a href="#" className="text-sm text-foreground/60 hover:text-accent transition-colors duration-200">Twitter</a></li>
+              <li><a href="#" className="text-sm text-foreground/60 hover:text-accent transition-colors duration-200">LinkedIn</a></li>
+            </ul>
+          </div>
         </div>
 
         <div className="pt-8 border-t border-border flex flex-col md:flex-row items-center justify-between gap-4">

@@ -24,7 +24,7 @@ const About = () => {
           }} />
         </div>
 
-        <div className="relative max-w-[1400px] mx-auto px-8 pt-32 pb-16 md:pt-40 md:pb-20">
+        <div className="relative max-w-[1400px] mx-auto px-8 pt-40 pb-28 md:pt-52 md:pb-36">
           <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}

@@ -132,7 +132,7 @@ const steps = [
     num: "03",
     title: "Decide",
     headline: "Your numbers. No noise.",
-    body: "Metrics you can customize to access the most important numbers for your unique work.",
+    body: "Customizable metrics that surface the numbers that actually matter for your workflow — nothing more, nothing less.",
     visual: <DecideVisual />,
   },
 ];

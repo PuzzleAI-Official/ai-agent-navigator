@@ -31,10 +31,7 @@ const About = () => {
             transition={{ duration: 0.7 }}
             className="max-w-[720px]"
           >
-            <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block mb-3">
-              About
-            </span>
-            <div className="w-8 h-[2px] bg-accent/30 mb-10" style={{ transform: "skewX(-20deg)" }} />
+            <div className="mb-10" />
 
             <h1 className="font-display text-[clamp(2rem,4vw,3rem)] leading-[1.15] tracking-[-0.02em] mb-6">
               Built by agent builders,{" "}
@@ -62,9 +59,12 @@ const About = () => {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.2 }}
         >
-          <span className="font-grotesk uppercase tracking-[0.25em] text-accent/50 block mb-8 text-2xl mx-0 px-0 font-normal">
-            Blogs
-          </span>
+          <div className="flex items-center gap-6 mb-10">
+            <h2 className="font-display text-[clamp(1.75rem,3vw,2.5rem)] tracking-[-0.02em] text-foreground/85">
+              Blogs
+            </h2>
+            <div className="flex-1 h-[1px] bg-border" />
+          </div>
         </motion.div>
 
         <div className="space-y-0">

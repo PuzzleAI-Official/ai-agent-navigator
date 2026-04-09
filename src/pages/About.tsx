@@ -62,8 +62,8 @@ const About = () => {
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.5, delay: 0.2 }}
         >
-          <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block mb-8">
-            From the team
+          <span className="font-grotesk uppercase tracking-[0.25em] text-accent/50 block mb-8 text-2xl mx-0 px-0 font-normal">
+            Blogs
           </span>
         </motion.div>
 

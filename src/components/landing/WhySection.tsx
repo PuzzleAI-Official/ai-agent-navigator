@@ -123,11 +123,11 @@ const WhySection = () => {
               <div>
                 <span className="font-grotesk font-semibold text-[10px] uppercase tracking-[0.25em] text-accent/40 block mb-4">Transparency</span>
                 <h3 className="font-display text-2xl md:text-3xl leading-tight mb-3 group-hover:translate-x-1 transition-transform duration-500">
-                  Three metrics.<br /><span className="italic">Zero noise.</span>
+                  Your metrics.<br /><span className="italic">Zero noise.</span>
                 </h3>
               </div>
               <p className="text-muted-foreground text-sm mt-4">
-                Performance, speed, and cost. We cut everything else so you can make confident decisions.
+                Performance, speed, cost, etc. We cut everything else so you can make confident decisions.
               </p>
             </motion.div>
           </div>

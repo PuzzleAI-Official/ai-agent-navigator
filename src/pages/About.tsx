@@ -1,50 +1,99 @@
 import { motion } from "framer-motion";
+import { Link } from "react-router-dom";
+import { format } from "date-fns";
 import Navbar from "@/components/landing/Navbar";
 import Footer from "@/components/landing/Footer";
-import heroSilk from "@/assets/hero-silk.png";
+import { articles } from "@/data/articles";
 
 const About = () => {
   return (
     <div className="min-h-screen bg-background">
       <Navbar />
 
-      {/* Silk visual — full bleed, cinematic with gentle float */}
-      <div className="relative w-full h-[50vh] md:h-[60vh] overflow-hidden">
-        <motion.img
-          src={heroSilk}
-          alt="Abstract silk form"
-          initial={{ opacity: 0, scale: 1.08 }}
-          animate={{ opacity: 1, scale: 1 }}
-          transition={{ duration: 1.4, ease: "easeOut" }}
-          className="w-full h-full object-cover object-center animate-float"
-        />
-        <div className="absolute inset-0 bg-gradient-to-b from-background/30 via-transparent to-background" />
-      </div>
-
-      {/* Memo section — left-aligned, pulled up */}
-      <section className="max-w-[1400px] mx-auto px-8 -mt-16 relative z-10 pb-24 md:pb-32">
+      {/* Mission statement */}
+      <section className="max-w-[1400px] mx-auto px-8 pt-32 pb-16 md:pt-40 md:pb-20">
         <motion.div
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.7, delay: 0.3 }}
-          className="max-w-[680px]"
+          transition={{ duration: 0.7 }}
+          className="max-w-[720px]"
         >
           <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block mb-3">
-            Founder's Memo
+            About
           </span>
-          <div className="w-8 h-[2px] bg-accent/30 mb-12" style={{ transform: "skewX(-20deg)" }} />
+          <div className="w-8 h-[2px] bg-accent/30 mb-10" style={{ transform: "skewX(-20deg)" }} />
 
-          <h1 className="font-display text-[clamp(2.2rem,4.5vw,3.5rem)] leading-[1.1] tracking-[-0.02em] mb-12">
-            Why we're building{" "}
-            <span className="italic text-muted-foreground">this.</span>
+          <h1 className="font-display text-[clamp(2rem,4vw,3rem)] leading-[1.15] tracking-[-0.02em] mb-6">
+            Built by agent builders,{" "}
+            <span className="italic text-muted-foreground">for everyone.</span>
           </h1>
 
-          <div className="space-y-6 text-muted-foreground text-[16px] leading-[1.85] font-sans">
-            <p className="text-foreground/30 italic font-display text-lg">
-              Coming soon — the story behind PuzzleAI, in the founder's own words.
-            </p>
-          </div>
+          <p className="text-muted-foreground text-[16px] leading-[1.85] font-sans max-w-[600px]">
+            PuzzleAI is founded by agent builders with a single focus: developing
+            infrastructure that benefits everyone in the era of AI agents. We
+            believe evaluation should be simple, transparent, and accessible.
+          </p>
         </motion.div>
+      </section>
+
+      {/* Divider */}
+      <div className="max-w-[1400px] mx-auto px-8">
+        <div className="h-[1px] bg-border" />
+      </div>
+
+      {/* Articles / Blog */}
+      <section className="max-w-[1400px] mx-auto px-8 py-16 md:py-24">
+        <motion.div
+          initial={{ opacity: 0, y: 12 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.2 }}
+        >
+          <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block mb-8">
+            From the team
+          </span>
+        </motion.div>
+
+        <div className="space-y-0">
+          {articles.map((article, i) => (
+            <motion.div
+              key={article.slug}
+              initial={{ opacity: 0, y: 16 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.5, delay: 0.3 + i * 0.1 }}
+            >
+              <Link
+                to={`/about/${article.slug}`}
+                className="group block border-b border-border py-8 md:py-10 hover:bg-muted/30 -mx-8 px-8 transition-colors duration-300"
+              >
+                <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-4">
+                  <div className="flex-1 max-w-[600px]">
+                    <h2 className="font-display text-xl md:text-2xl leading-tight mb-2 group-hover:translate-x-1 transition-transform duration-300">
+                      {article.title}
+                    </h2>
+                    <p className="text-muted-foreground text-sm leading-relaxed">
+                      {article.excerpt}
+                    </p>
+                  </div>
+
+                  <div className="flex items-center gap-3 md:text-right md:flex-shrink-0">
+                    <div>
+                      <p className="font-grotesk text-xs text-muted-foreground">
+                        {article.author}
+                      </p>
+                      <p className="font-grotesk text-[11px] text-muted-foreground/50">
+                        {format(new Date(article.date), "MMM d, yyyy")}
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <span className="inline-block mt-4 font-grotesk text-xs uppercase tracking-[0.15em] text-accent/60 group-hover:text-accent transition-colors duration-300">
+                  Read →
+                </span>
+              </Link>
+            </motion.div>
+          ))}
+        </div>
       </section>
 
       <Footer />

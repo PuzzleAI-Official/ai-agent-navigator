@@ -45,16 +45,16 @@ const DescribeVisual = () => (
 
 const TestVisual = () => {
   const providers = [
-    { name: "Claude 3.5", progress: 94, delay: 0.6, duration: 1.8 },
-    { name: "GPT-4o", progress: 89, delay: 0.8, duration: 2.0 },
-    { name: "Gemini 1.5", progress: 76, delay: 1.0, duration: 2.2 },
-    { name: "Mistral L", progress: 68, delay: 1.2, duration: 2.4 },
+    { name: "Mindee V2", progress: 94, delay: 0.6, duration: 1.8 },
+    { name: "Verify OCR", progress: 89, delay: 0.8, duration: 2.0 },
+    { name: "Nanonets ITM", progress: 76, delay: 1.0, duration: 2.2 },
+    { name: "Klippa", progress: 68, delay: 1.2, duration: 2.4 },
   ];
 
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between mb-1">
-        <span className="font-mono text-[8px] uppercase tracking-[0.2em] text-muted-foreground/50">Running 50 test cases</span>
+        <span className="font-mono text-[8px] uppercase tracking-[0.2em] text-muted-foreground/50">RUNNING 5 TEST CASES</span>
         <motion.span
           animate={{ opacity: [0.3, 1, 0.3] }}
           transition={{ repeat: Infinity, duration: 1.5 }}
@@ -125,14 +125,14 @@ const steps = [
     num: "02",
     title: "Test",
     headline: "We run every candidate against your reality.",
-    body: "We match relevant AI solutions from 200+ indexed providers, synthesize comprehensive test data, and run each candidate head-to-head on your actual scenarios.",
+    body: "We match relevant AI solutions from indexed provider database, synthesize comprehensive test data, and run each candidate head-to-head on your actual scenarios.",
     visual: <TestVisual />,
   },
   {
     num: "03",
     title: "Decide",
-    headline: "Three numbers. No noise.",
-    body: "Performance — how many use cases each solution handles. Speed — real latency. Cost — actual pricing on your workload. You decide.",
+    headline: "Your numbers. No noise.",
+    body: "Metrics you can customize to access the most important numbers for your unique work.",
     visual: <DecideVisual />,
   },
 ];

@@ -47,9 +47,8 @@ const About = () => {
         </div>
       </section>
 
-
       {/* Articles / Blog */}
-      <section className="max-w-[1400px] mx-auto px-8 py-16 md:py-24">
+      <section className="max-w-[1400px] mx-auto px-8 pt-8 pb-16 md:pt-12 md:pb-24">
         <motion.div
           initial={{ opacity: 0, y: 12 }}
           animate={{ opacity: 1, y: 0 }}

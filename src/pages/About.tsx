@@ -47,10 +47,6 @@ const About = () => {
         </div>
       </section>
 
-      {/* Divider */}
-      <div className="max-w-[1400px] mx-auto px-8">
-        <div className="h-[1px] bg-border" />
-      </div>
 
       {/* Articles / Blog */}
       <section className="max-w-[1400px] mx-auto px-8 py-16 md:py-24">

@@ -1,6 +1,7 @@
 import { motion } from "framer-motion";
 import { Link } from "react-router-dom";
 import { format } from "date-fns";
+import heroSilk from "@/assets/hero-silk.png";
 import Navbar from "@/components/landing/Navbar";
 import Footer from "@/components/landing/Footer";
 import { articles } from "@/data/articles";
@@ -13,17 +14,14 @@ const About = () => {
       {/* Mission statement with silk background */}
       <section className="relative overflow-hidden">
         <div className="absolute inset-0">
-          <div className="absolute inset-0" style={{
-            background: "linear-gradient(170deg, hsl(36 50% 91%) 0%, hsl(38 40% 94%) 30%, hsl(40 33% 97%) 55%, hsl(38 30% 95%) 100%)"
-          }} />
-          <div className="absolute top-0 left-[10%] w-[80%] h-full bg-[radial-gradient(ellipse_at_50%_40%,hsl(33_55%_85%/0.55),transparent_65%)]" />
-          <div className="absolute top-[5vh] left-[20%] w-[60%] h-[70%] bg-[radial-gradient(ellipse_at_50%_35%,hsl(260_20%_90%/0.18),transparent_55%)]" />
-          <div
-            className="absolute inset-0 opacity-[0.015]"
-            style={{
-              backgroundImage: `repeating-linear-gradient(-45deg, transparent, transparent 120px, hsl(var(--foreground)) 120px, hsl(var(--foreground)) 121px)`,
-            }}
+          <img
+            src={heroSilk}
+            alt=""
+            className="absolute inset-0 w-full h-full object-cover"
           />
+          <div className="absolute inset-0" style={{
+            background: "linear-gradient(170deg, hsl(36 50% 91% / 0.85) 0%, hsl(38 40% 94% / 0.8) 30%, hsl(40 33% 97% / 0.75) 55%, hsl(38 30% 95% / 0.7) 100%)"
+          }} />
         </div>
 
         <div className="relative max-w-[1400px] mx-auto px-8 pt-32 pb-16 md:pt-40 md:pb-20">

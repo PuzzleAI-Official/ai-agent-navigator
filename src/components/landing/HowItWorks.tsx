@@ -91,7 +91,7 @@ const TestVisual = () => {
 const DecideVisual = () => (
   <div className="space-y-2">
     {[
-      { metric: "Performance", value: "94%", icon: "◈" },
+      { metric: "Accuracy", value: "94%", icon: "◈" },
       { metric: "Speed", value: "0.9s", icon: "◈" },
       { metric: "Cost", value: "$0.003", icon: "◈" },
     ].map((m, i) => (

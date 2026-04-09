@@ -10,30 +10,46 @@ const About = () => {
     <div className="min-h-screen bg-background">
       <Navbar />
 
-      {/* Mission statement */}
-      <section className="max-w-[1400px] mx-auto px-8 pt-32 pb-16 md:pt-40 md:pb-20">
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.7 }}
-          className="max-w-[720px]"
-        >
-          <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block mb-3">
-            About
-          </span>
-          <div className="w-8 h-[2px] bg-accent/30 mb-10" style={{ transform: "skewX(-20deg)" }} />
+      {/* Mission statement with silk background */}
+      <section className="relative overflow-hidden">
+        <div className="absolute inset-0">
+          <div className="absolute inset-0" style={{
+            background: "linear-gradient(170deg, hsl(36 50% 91%) 0%, hsl(38 40% 94%) 30%, hsl(40 33% 97%) 55%, hsl(38 30% 95%) 100%)"
+          }} />
+          <div className="absolute top-0 left-[10%] w-[80%] h-full bg-[radial-gradient(ellipse_at_50%_40%,hsl(33_55%_85%/0.55),transparent_65%)]" />
+          <div className="absolute top-[5vh] left-[20%] w-[60%] h-[70%] bg-[radial-gradient(ellipse_at_50%_35%,hsl(260_20%_90%/0.18),transparent_55%)]" />
+          <div
+            className="absolute inset-0 opacity-[0.015]"
+            style={{
+              backgroundImage: `repeating-linear-gradient(-45deg, transparent, transparent 120px, hsl(var(--foreground)) 120px, hsl(var(--foreground)) 121px)`,
+            }}
+          />
+        </div>
 
-          <h1 className="font-display text-[clamp(2rem,4vw,3rem)] leading-[1.15] tracking-[-0.02em] mb-6">
-            Built by agent builders,{" "}
-            <span className="italic text-muted-foreground">for everyone.</span>
-          </h1>
+        <div className="relative max-w-[1400px] mx-auto px-8 pt-32 pb-16 md:pt-40 md:pb-20">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.7 }}
+            className="max-w-[720px]"
+          >
+            <span className="font-grotesk font-semibold text-[11px] uppercase tracking-[0.25em] text-accent/50 block mb-3">
+              About
+            </span>
+            <div className="w-8 h-[2px] bg-accent/30 mb-10" style={{ transform: "skewX(-20deg)" }} />
 
-          <p className="text-muted-foreground text-[16px] leading-[1.85] font-sans max-w-[600px]">
-            PuzzleAI is founded by agent builders with a single focus: developing
-            infrastructure that benefits everyone in the era of AI agents. We
-            believe evaluation should be simple, transparent, and accessible.
-          </p>
-        </motion.div>
+            <h1 className="font-display text-[clamp(2rem,4vw,3rem)] leading-[1.15] tracking-[-0.02em] mb-6">
+              Built by agent builders,{" "}
+              <span className="italic text-muted-foreground">for everyone.</span>
+            </h1>
+
+            <p className="text-muted-foreground text-[16px] leading-[1.85] font-sans max-w-[600px]">
+              PuzzleAI is founded by agent builders with a single focus: developing
+              infrastructure that benefits everyone in the era of AI agents. We
+              believe evaluation should be simple, transparent, and accessible.
+            </p>
+          </motion.div>
+        </div>
       </section>
 
       {/* Divider */}

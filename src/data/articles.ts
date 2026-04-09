@@ -119,18 +119,99 @@ Puzzle would take the first shot.`,
     excerpt:
       "Before Stripe, accepting payments online was technically painful, fragmented, and trust-broken. Merchants existed. Buyers existed. The infrastructure layer that made the transaction trustworthy at scale didn't. Stripe built it — and became a $95B company without owning a single product being sold.\nThe agent economy is in the same moment Stripe found in 2010.\n",
     content: `Before Stripe, accepting payments online was technically painful, fragmented, and trust-broken. Merchants existed. Buyers existed. The infrastructure layer that made the transaction trustworthy at scale didn't. Stripe built it — and became a $95B company without owning a single product being sold.
+
 The agent economy is in the same moment Stripe found in 2010.
 
-When we set out to build an evaluation framework for AI agents, we had to make a choice: measure everything, or measure what matters.
+The agents exist. The buyers exist. The infrastructure that makes agent deployment trustworthy, fast, and scalable does not. Puzzle builds it.
 
-We chose the latter.
+The market is here. The selection layer isn't.
 
-Performance tells you if the agent actually does what it claims. Speed tells you if it does it fast enough for your use case. Cost tells you if it's sustainable at scale.
+Enterprise AI software spend reached $75.6B in 2025. LLM budgets are growing at 75% year-over-year. 37% of enterprises now run five or more AI models simultaneously — and that number compounds with every new deployment cycle. Thousands of new agents, tools, and agentic services ship every month.
 
-Every other metric is either derived from these three or is noise that distracts from decision-making.
+But the way companies actually choose which agents to run has not changed at all. Read the website. Watch the demo. Pay. Hope.
 
-This isn't a limitation — it's a feature. By constraining our evaluation to these three dimensions, we force clarity. Teams don't get lost in dashboards with dozens of metrics. They get a clear signal.
+McKinsey reported in 2025 that 88% of companies have AI in at least one business function. Fewer than 7% have reached full organizational maturity. The bottleneck is not capability. It is commitment — and commitment requires trust that the market currently cannot provide.
 
-We've seen teams cut their agent evaluation time from weeks to hours using this framework. That's the power of focus.`,
+The result: selection is driven by marketing budgets and SEO, not performance. Evaluation is shallow or absent. Switching costs compound every week after a wrong decision is made.
+
+This is a structural gap. It will not fix itself. Someone has to own the trust layer.
+
+The problem, stated precisely
+
+Discovery is a noise problem. The best-resourced vendor wins, not the best-fit one. That's a phone book, not a recommendation engine.
+
+Evaluation is a faith problem. Most decisions are made on documentation, demos, and sales calls, not on actual performance against the buyer's real workflows and data. The mismatch between promise and delivery is structural.
+
+Commitment is an asymmetry problem. By the time a team discovers Agent B outperforms the one they're using, they've already paid, integrated, and built on top of it. Switching costs compound every week.
+
+This is not a developer skill problem. It is an infrastructure gap: the same gap that existed in e-commerce before Stripe, in navigation before Google Maps, in lending before the credit score.
+
+What Puzzle builds
+
+Think of us as Google Maps for the agent economy.
+
+Google Maps did not build cities or roads. It built the navigation layer that made the world traversable, and that every other major platform (Uber, DoorDash, Airbnb) eventually ran on top of. Every destination already existed. The routing layer didn't.
+
+In the agent economy, every agent is a destination. Every workflow is a route. Getting from "I need X done" to "the right agent is running it" is currently opaque, slow, and full of wrong turns. Puzzle builds the map. Three layers:
+
+Needs understanding: Before any search, Puzzle's intake process surfaces what the workflow actually requires: latency tolerance, cost constraints, compliance requirements, data sensitivity, task type. Most buyers are partially uncertain about their own requirements. Puzzle makes that uncertainty explicit and resolvable.
+
+Sandbox testing with real data: The best signal is performance on your actual task. Puzzle runs candidate agents against the buyer's own data inside isolated sandbox environments, returning results-based rankings — not feature comparisons, not marketing claims. Just output.
+
+Result-as-a-service: Selection becomes a query with a defensible answer. Reproducible. Auditable. Weighted by the metrics that matter to that specific buyer. The commitment comes after the data, not before.
+
+The business model: infrastructure on both sides
+
+Puzzle operates as a two-sided platform with compounding network effects.
+
+The buyer side — developer teams, startups, and enterprises — accesses Puzzle via SaaS subscription for ongoing evaluation programs, or usage-based pricing per evaluation run for one-time decisions.
+
+The vendor side — agent developers and AI tool companies — follows the Steam model. Listing is open and free. But vendors pay for promoted placement, featured evaluation slots, and priority discovery in relevant query results. As Puzzle drives downstream selection decisions, a revenue share on facilitated contracts flows back to the platform.
+
+More buyers make Puzzle indispensable to vendors. More vendors improve selection quality for buyers. The flywheel runs in both directions.
+
+The TAM across three horizons
+
+Horizon 1 — Today: Enterprise AI Tool Selection. Enterprise AI software spend is $75.6B in 2025, growing at 45%+ annually. Enterprise procurement overhead historically runs 8–12% of software spend. Addressable today: ~$3.8B, growing to ~$17B by 2030 at underlying market CAGR.
+
+Horizon 2 — Mid-term: The Agent Marketplace. The AI agents market reaches $52B by 2030. App Store and Steam capture 15–30% of developer revenue through distribution. Marketplace TAM by 2030: ~$5B on the vendor distribution side alone.
+
+Horizon 3 — The A2A Infrastructure Prize. Gartner's 2025 strategic predictions: by 2028, 90% of all B2B buying will be AI agent intermediated, pushing over $15 trillion in spend through automated exchanges. In that world, verifiable trust infrastructure is not a feature — it is a prerequisite for participation. Long-term TAM: $150B as the trust layer for AI-to-AI commerce.
+
+Why 2026 is the only window that matters
+
+Infrastructure locks in early. HTTP was not the only hypertext protocol — it won because it got adopted first. TCP/IP was not the only networking standard — it became the default before alternatives could consolidate.
+
+Right now, in 2026, the A2A protocol standards are being written. Google launched A2A in April 2025 — it now has support from over 150 organizations including Salesforce, SAP, ServiceNow, and PayPal, governed by the Linux Foundation. Anthropic's MCP is standardizing how agents connect to tools. The railroad gauges are being decided before the tracks are fully laid.
+
+Whoever owns the selection and routing layer before the standards lock in will own it permanently. Miss this window and it gets absorbed by a hyperscaler: Google, Microsoft, or Anthropic, who will build a captured, non-neutral version that serves their own interests.
+
+This is the App Store moment. 2008, before Apple locked in distribution. The window to build the neutral infrastructure layer is now: not a five-year thesis, a 12-month window.
+
+Why Puzzle, and not Google or Microsoft?
+
+The answer is neutrality.
+
+Google cannot build a neutral agent marketplace for the same reason Google cannot build a neutral search competitor. Its incentives are structurally misaligned — it will always favor its own agents. Microsoft, Amazon, and Anthropic have the same problem.
+
+Puzzle has no agents to sell. No model to promote. No vendor relationship to protect. The value of our evaluation is entirely contingent on our neutrality. That's not a positioning choice — it's a structural moat.
+
+Beyond neutrality, the data flywheel compounds. Every evaluation run makes the ranking model smarter. Every sandbox test produces signal that improves future recommendations. First-mover on that dataset is defensible in a way that no marketing budget can replicate.
+
+Where we are
+
+Puzzle has an early prototype in development. The core evaluation loop — intake, candidate retrieval, sandbox test execution, results ranking — is being validated with initial users. Vendor partnerships and sandbox integrations are in early conversations.
+
+We are raising to prove the wedge: get ten enterprise teams running evaluations through Puzzle, demonstrate the time-and-money savings, and build the dataset that makes the ranking model defensible.
+
+What winning looks like
+
+In five years, every serious enterprise AI deployment runs through a Puzzle evaluation before it goes live. Every AI vendor — from OpenAI to the two-person agent studio — pays for Puzzle distribution the way game studios pay Steam. Every A2A transaction is routed through a trust layer Puzzle owns.
+
+Not because Puzzle forced it. Because the market needed a neutral infrastructure layer, and Puzzle was there first.
+
+That is how Stripe won payments. That is how Maps won navigation.
+
+Puzzle takes the first shot.`,
   },
 ];

@@ -280,9 +280,9 @@ const Hero = () => {
               className="flex items-start gap-0 mb-16 border-t border-border pt-8"
             >
               {[
-                { stat: "1%", label: "reach maturity" },
-                { stat: "78%", label: "adoption rate" },
-                { stat: "1000+", label: "new tools / mo" },
+                { stat: "6%", label: "reach maturity" },
+                { stat: "88%", label: "adoption rate" },
+                { stat: "7000+", label: "new tools / mo" },
               ].map((item, i) => (
                 <motion.div
                   key={item.stat}

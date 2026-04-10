@@ -4,10 +4,17 @@ import { motion, AnimatePresence } from "framer-motion";
 
 type Stage = "describe" | "upload" | "testing" | "results";
 
+interface Attachment {
+  name: string;
+  size: number;
+  type: string;
+}
+
 interface Message {
   id: number;
   role: "user" | "assistant";
   content: string;
+  attachments?: Attachment[];
 }
 
 interface Candidate {

@@ -4,10 +4,17 @@ import { motion, AnimatePresence } from "framer-motion";
 
 type Stage = "describe" | "upload" | "testing" | "results";
 
+interface Attachment {
+  name: string;
+  size: number;
+  type: string;
+}
+
 interface Message {
   id: number;
   role: "user" | "assistant";
   content: string;
+  attachments?: Attachment[];
 }
 
 interface Candidate {
@@ -41,6 +48,8 @@ const Playground = () => {
     },
   ]);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [testProgress, setTestProgress] = useState(0);
   const chatEndRef = useRef<HTMLDivElement>(null);
@@ -131,11 +140,34 @@ const Playground = () => {
     }
   }, [initialMessage, hasAutoSent, stage]);
 
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    const newAttachments: Attachment[] = Array.from(files).map((f) => ({
+      name: f.name,
+      size: f.size,
+      type: f.type,
+    }));
+    setAttachments((prev) => [...prev, ...newAttachments]);
+    e.target.value = "";
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  };
+
   const handleSend = () => {
-    if (!input.trim()) return;
-    const userMsg: Message = { id: Date.now(), role: "user", content: input };
+    if (!input.trim() && attachments.length === 0) return;
+    const userMsg: Message = { id: Date.now(), role: "user", content: input || (attachments.length > 0 ? `Uploaded ${attachments.length} file(s)` : ""), attachments: attachments.length > 0 ? [...attachments] : undefined };
     setMessages((m) => [...m, userMsg]);
     setInput("");
+    setAttachments([]);
 
     if (stage === "describe") {
       setTimeout(() => {
@@ -277,6 +309,20 @@ const Playground = () => {
                   }`}
                 >
                   {msg.content}
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {msg.attachments.map((att, i) => (
+                        <div key={i} className="flex items-center gap-2 px-2 py-1.5 bg-[#0f1017]/50 border border-[#2a2b35]/50 text-[11px]">
+                          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 text-[#606070]">
+                            <path d="M9 1H4a1 1 0 00-1 1v12a1 1 0 001 1h8a1 1 0 001-1V5L9 1z" stroke="currentColor" strokeWidth="1.2" />
+                            <path d="M9 1v4h4" stroke="currentColor" strokeWidth="1.2" />
+                          </svg>
+                          <span className="text-[#a0a0b0] truncate">{att.name}</span>
+                          <span className="text-[#40404d] shrink-0">{formatFileSize(att.size)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </motion.div>
             ))}
@@ -285,7 +331,45 @@ const Playground = () => {
 
           {/* Input */}
           <div className="p-4 border-t border-[#1e2028]">
-            <div className="flex items-center gap-2 bg-[#1a1b24] border border-[#2a2b35] focus-within:border-[hsl(215,20%,50%)]/40 transition-colors">
+            {/* Attachment previews */}
+            {attachments.length > 0 && (
+              <div className="mb-2 space-y-1">
+                {attachments.map((att, i) => (
+                  <div key={i} className="flex items-center justify-between gap-2 px-3 py-2 bg-[#1a1b24] border border-[#2a2b35] text-[11px]">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 text-[#606070]">
+                        <path d="M9 1H4a1 1 0 00-1 1v12a1 1 0 001 1h8a1 1 0 001-1V5L9 1z" stroke="currentColor" strokeWidth="1.2" />
+                        <path d="M9 1v4h4" stroke="currentColor" strokeWidth="1.2" />
+                      </svg>
+                      <span className="text-[#a0a0b0] truncate">{att.name}</span>
+                      <span className="text-[#40404d] shrink-0">{formatFileSize(att.size)}</span>
+                    </div>
+                    <button onClick={() => removeAttachment(i)} className="text-[#50505d] hover:text-[#a0a0b0] transition-colors shrink-0">
+                      <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                        <path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" strokeWidth="1.2" />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <input
+              ref={fileInputRef}
+              type="file"
+              multiple
+              onChange={handleFileSelect}
+              className="hidden"
+            />
+            <div className="flex items-center gap-0 bg-[#1a1b24] border border-[#2a2b35] focus-within:border-[hsl(215,20%,50%)]/40 transition-colors">
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                className="px-3 py-3 text-[#50505d] hover:text-[#a0a0b0] transition-colors shrink-0"
+                title="Attach files"
+              >
+                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                  <path d="M14 8.5l-5.5 5.5a3.5 3.5 0 01-5-5L9 3.5a2 2 0 013 3L6.5 12a.5.5 0 01-1-1L11 5.5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
               <input
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
@@ -297,7 +381,7 @@ const Playground = () => {
                     ? "Describe test criteria or paste a sample..."
                     : "Ask a follow-up question..."
                 }
-                className="flex-1 bg-transparent px-4 py-3 text-[13px] text-[#e0e0e6] placeholder:text-[#40404d] outline-none font-sans"
+                className="flex-1 bg-transparent px-2 py-3 text-[13px] text-[#e0e0e6] placeholder:text-[#40404d] outline-none font-sans"
               />
               <button
                 onClick={handleSend}

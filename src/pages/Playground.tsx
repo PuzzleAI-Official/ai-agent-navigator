@@ -140,11 +140,34 @@ const Playground = () => {
     }
   }, [initialMessage, hasAutoSent, stage]);
 
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files) return;
+    const newAttachments: Attachment[] = Array.from(files).map((f) => ({
+      name: f.name,
+      size: f.size,
+      type: f.type,
+    }));
+    setAttachments((prev) => [...prev, ...newAttachments]);
+    e.target.value = "";
+  };
+
+  const removeAttachment = (index: number) => {
+    setAttachments((prev) => prev.filter((_, i) => i !== index));
+  };
+
+  const formatFileSize = (bytes: number) => {
+    if (bytes < 1024) return `${bytes}B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+  };
+
   const handleSend = () => {
-    if (!input.trim()) return;
-    const userMsg: Message = { id: Date.now(), role: "user", content: input };
+    if (!input.trim() && attachments.length === 0) return;
+    const userMsg: Message = { id: Date.now(), role: "user", content: input || (attachments.length > 0 ? `Uploaded ${attachments.length} file(s)` : ""), attachments: attachments.length > 0 ? [...attachments] : undefined };
     setMessages((m) => [...m, userMsg]);
     setInput("");
+    setAttachments([]);
 
     if (stage === "describe") {
       setTimeout(() => {

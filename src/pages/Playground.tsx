@@ -309,6 +309,20 @@ const Playground = () => {
                   }`}
                 >
                   {msg.content}
+                  {msg.attachments && msg.attachments.length > 0 && (
+                    <div className="mt-2 space-y-1">
+                      {msg.attachments.map((att, i) => (
+                        <div key={i} className="flex items-center gap-2 px-2 py-1.5 bg-[#0f1017]/50 border border-[#2a2b35]/50 text-[11px]">
+                          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 text-[#606070]">
+                            <path d="M9 1H4a1 1 0 00-1 1v12a1 1 0 001 1h8a1 1 0 001-1V5L9 1z" stroke="currentColor" strokeWidth="1.2" />
+                            <path d="M9 1v4h4" stroke="currentColor" strokeWidth="1.2" />
+                          </svg>
+                          <span className="text-[#a0a0b0] truncate">{att.name}</span>
+                          <span className="text-[#40404d] shrink-0">{formatFileSize(att.size)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </motion.div>
             ))}

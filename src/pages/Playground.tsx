@@ -48,6 +48,8 @@ const Playground = () => {
     },
   ]);
   const [input, setInput] = useState("");
+  const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [candidates, setCandidates] = useState<Candidate[]>([]);
   const [testProgress, setTestProgress] = useState(0);
   const chatEndRef = useRef<HTMLDivElement>(null);

@@ -72,7 +72,7 @@ const CTASection = () => {
                   href="/playground"
                   className="group relative inline-flex items-center gap-3 bg-foreground text-background px-10 py-5 font-grotesk font-semibold text-[13px] uppercase tracking-[0.08em] overflow-hidden transition-all duration-300 hover:shadow-[0_12px_40px_-12px_hsl(215_20%_50%/0.4)] shimmer-hover"
                 >
-                  <span className="relative z-10">Get started — it's free</span>
+                  <span className="relative z-10">Get started</span>
                   <svg width="16" height="16" viewBox="0 0 16 16" fill="none" className="relative z-10 transition-transform duration-300 group-hover:translate-x-1">
                     <path d="M3 8H13M13 8L9 4M13 8L9 12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>

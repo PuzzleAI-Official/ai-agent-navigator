@@ -1,0 +1,247 @@
+# ============================================================================
+# Configuration — Centralized settings loaded from environment variables
+# ============================================================================
+# WHY ENVIRONMENT VARIABLES?
+#   - API keys should NEVER be hardcoded in source code (security risk).
+#   - Different environments (dev, staging, prod) need different settings.
+#   - Environment variables are the industry standard for configuration.
+#
+# HOW TO SET THEM:
+#   Linux/Mac:  export ANTHROPIC_API_KEY="sk-ant-..."
+#   Windows:    set ANTHROPIC_API_KEY=sk-ant-...
+#   Or use a .env file (but never commit it to git).
+#
+# EVERY agent in the pipeline imports from this file, so changes here
+# affect the entire system.
+# ============================================================================
+
+import os
+
+
+# ---------------------------------------------------------------------------
+# Anthropic API Key
+# ---------------------------------------------------------------------------
+# This is your secret key for calling Claude's API.
+# Get one at: https://console.anthropic.com/
+# The agent will fail immediately with a clear error if this is not set.
+# ---------------------------------------------------------------------------
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
+
+if not ANTHROPIC_API_KEY:
+    raise EnvironmentError(
+        "ANTHROPIC_API_KEY environment variable is not set. "
+        "Get your API key from https://console.anthropic.com/ and set it:\n"
+        "  export ANTHROPIC_API_KEY='sk-ant-...'"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Model Selection
+# ---------------------------------------------------------------------------
+# Which Claude model to use. Defaults to claude-sonnet-4-6 — best speed/intelligence
+# balance. Used by Agents 1-4 and post-loop evaluation.
+# Override with: export PUZZLEEVAL_MODEL="claude-opus-4-6"
+#
+# Available models (as of 2026):
+#   claude-opus-4-6    — most capable, slowest, most expensive (Agent 5 builder)
+#   claude-sonnet-4-6  — best speed/intelligence balance (Agents 1-4, research)
+#   claude-haiku-4-5   — fastest, cheapest, less capable
+# ---------------------------------------------------------------------------
+DEFAULT_MODEL = os.environ.get("PUZZLEEVAL_MODEL", "claude-sonnet-4-6")
+
+
+# ---------------------------------------------------------------------------
+# Research Model (Agent 2)
+# ---------------------------------------------------------------------------
+# Agent 2 uses Sonnet 4.6 for web research. Now the same as DEFAULT_MODEL,
+# but kept as a separate constant so web-tool-using agents (2, 4, 5 research)
+# can be tuned independently if needed.
+# ---------------------------------------------------------------------------
+RESEARCH_MODEL = os.environ.get("PUZZLEEVAL_RESEARCH_MODEL", "claude-sonnet-4-6")
+
+
+# ---------------------------------------------------------------------------
+# Screening Model (Agent 4)
+# ---------------------------------------------------------------------------
+# Agent 4 uses Sonnet 4.6 for web fetch/search verification (same reasons as
+# Agent 2: handles web content well, same price as 4.5). Defaults to
+# RESEARCH_MODEL so both web-tool-using agents stay in sync. Override with
+# PUZZLEEVAL_SCREENING_MODEL if Agent 4 needs independent tuning later.
+# ---------------------------------------------------------------------------
+SCREENING_MODEL = os.environ.get("PUZZLEEVAL_SCREENING_MODEL", RESEARCH_MODEL)
+
+
+# ---------------------------------------------------------------------------
+# Token Limits
+# ---------------------------------------------------------------------------
+# Maximum number of tokens Claude can generate in its response.
+# 4096 is generous for structured JSON output — most Agent 1 responses
+# will be ~500-1000 tokens.
+# ---------------------------------------------------------------------------
+MAX_TOKENS = int(os.environ.get("PUZZLEEVAL_MAX_TOKENS", "4096"))
+
+
+# ---------------------------------------------------------------------------
+# Logging Configuration
+# ---------------------------------------------------------------------------
+# LOG_LEVEL controls how verbose the logs are:
+#   DEBUG    — everything, including internal details (noisy)
+#   INFO     — normal operations (recommended for development)
+#   WARNING  — only potential problems
+#   ERROR    — only actual failures
+#
+# LOG_OUTPUT_PATH: if set, logs also write to this file (in addition to stderr).
+# This is useful for later piping to cloud logging services.
+# ---------------------------------------------------------------------------
+LOG_LEVEL = os.environ.get("PUZZLEEVAL_LOG_LEVEL", "INFO")
+LOG_OUTPUT_PATH = os.environ.get("PUZZLEEVAL_LOG_PATH", None)
+
+
+# ---------------------------------------------------------------------------
+# Model Pricing (USD per token)
+# ---------------------------------------------------------------------------
+# Used to calculate cost estimates in logs. These prices are from Anthropic's
+# pricing page — update them if pricing changes.
+# Format: { "model_name": (input_price_per_token, output_price_per_token) }
+# ---------------------------------------------------------------------------
+MODEL_PRICING = {
+    # Opus 4.6: $5 / 1M input, $25 / 1M output
+    "claude-opus-4-6": (5.0 / 1_000_000, 25.0 / 1_000_000),
+    # Opus 4.5: $5 / 1M input, $25 / 1M output
+    "claude-opus-4-5": (5.0 / 1_000_000, 25.0 / 1_000_000),
+    # Opus 4.1: $15 / 1M input, $75 / 1M output
+    "claude-opus-4-1": (15.0 / 1_000_000, 75.0 / 1_000_000),
+    # Sonnet 4.6: $3 / 1M input, $15 / 1M output
+    "claude-sonnet-4-6": (3.0 / 1_000_000, 15.0 / 1_000_000),
+    # Sonnet 4.5: $3 / 1M input, $15 / 1M output
+    "claude-sonnet-4-5-20250929": (3.0 / 1_000_000, 15.0 / 1_000_000),
+    # Haiku 4.5: $1 / 1M input, $5 / 1M output
+    "claude-haiku-4-5-20251001": (1.0 / 1_000_000, 5.0 / 1_000_000),
+}
+
+
+# ---------------------------------------------------------------------------
+# Cache Pricing Multipliers
+# ---------------------------------------------------------------------------
+# Prompt caching has different write costs depending on TTL:
+#   5-min TTL: 1.25x base input price for writes
+#   1-hour TTL: 2.00x base input price for writes
+#   Cache reads (hits): 0.10x base input price (same for both TTLs)
+#
+# Source: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+# ---------------------------------------------------------------------------
+CACHE_WRITE_MULTIPLIER_5M = 1.25
+CACHE_WRITE_MULTIPLIER_1H = 2.00
+CACHE_READ_MULTIPLIER = 0.10
+
+
+# ---------------------------------------------------------------------------
+# Minimum Cacheable Tokens
+# ---------------------------------------------------------------------------
+# The API silently ignores cache_control if the prefix is below this threshold.
+# No error is raised — the request just runs at full price without caching.
+#
+# This means: our ~800-token system prompt ALONE won't be cached on Opus 4.6.
+# Caching only kicks in when total cached prefix (system + file + history)
+# exceeds the threshold. A user who uploads a PDF will easily hit it.
+# A user with just a short text prompt may not — and that's fine, the cost
+# of ~800 uncached tokens is negligible.
+# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Web Search Pricing
+# ---------------------------------------------------------------------------
+# Anthropic charges $10 per 1,000 web searches = $0.01 per search.
+# This is in ADDITION to standard token costs for search-generated content.
+# Web fetch has NO additional cost — just standard token costs.
+# Used in logging to calculate total cost per Agent 2 run.
+# ---------------------------------------------------------------------------
+WEB_SEARCH_PRICE_PER_SEARCH = 0.01
+
+
+# ---------------------------------------------------------------------------
+# Agent 5: Implement Test Env Configuration
+# ---------------------------------------------------------------------------
+# Agent 5 builds test harnesses for each validated candidate. Each candidate
+# gets an autonomous builder agent that reads API docs, writes code, tests it,
+# and fixes errors iteratively.
+#
+# AGENT5_BUILDER_MODEL: Sonnet 4.6 (same as research/screening) — handles
+#   web content well and produces good code. Same price as Sonnet 4.5.
+# AGENT5_MAX_TURNS: 15 is enough for: read docs (2-3) + write code (1) +
+#   test + fix cycles (2-3 iterations) with margin for complex APIs.
+# AGENT5_MAX_BUDGET_PER_CANDIDATE: $3 covers ~15 turns of web fetch +
+#   code generation. Most candidates finish in $1-2.
+# AGENT5_MAX_OUTPUT_TOKENS: 8192 — code generation needs more output tokens
+#   than the default 4096 (a full harness.py + requirements.txt can be 2-3K tokens).
+# ---------------------------------------------------------------------------
+AGENT5_BUILDER_MODEL = os.environ.get("PUZZLEEVAL_BUILDER_MODEL", "claude-opus-4-6")
+AGENT5_MAX_TURNS = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_TURNS", "25"))
+AGENT5_MAX_BUDGET_PER_CANDIDATE = float(
+    os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_PER_CANDIDATE", "3.0")
+)
+AGENT5_MAX_BUDGET_TOTAL = float(
+    os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_TOTAL", "20.0")
+)
+AGENT5_MAX_PARALLEL = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_PARALLEL", "5"))
+AGENT5_CODE_TIMEOUT = int(os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT", "120"))  # 120s for async APIs that poll (Mindee, DocuClipper)
+AGENT5_MAX_OUTPUT_TOKENS = int(
+    os.environ.get("PUZZLEEVAL_AGENT5_MAX_TOKENS", "8192")
+)
+AGENT5_MAX_VERIFICATION_RETRIES = int(
+    os.environ.get("PUZZLEEVAL_AGENT5_MAX_VERIFICATION_RETRIES", "2")
+)
+AGENT5_MAX_CANDIDATES = int(
+    os.environ.get("PUZZLEEVAL_AGENT5_MAX_CANDIDATES", "4")
+)  # Top N by user-fit score: 3 for comparison + 1 buffer for build failures
+
+
+# ---------------------------------------------------------------------------
+# Test Execution Configuration (used by Agent 5 post-build test runner)
+# ---------------------------------------------------------------------------
+# Agent 5 executes test cases through built harnesses and evaluates results.
+# Mostly mechanical (subprocess calls) with one LLM call per candidate for
+# quality evaluation.
+# ---------------------------------------------------------------------------
+AGENT6_EVAL_MODEL = os.environ.get("PUZZLEEVAL_AGENT6_EVAL_MODEL", DEFAULT_MODEL)
+AGENT6_TEST_TIMEOUT = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_TEST_TIMEOUT", "120")
+)  # Seconds per test case — some OCR APIs poll for up to 120s
+AGENT6_RATE_LIMIT_BACKOFF = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_RATE_LIMIT_BACKOFF", "3")
+)  # Seconds to wait on rate limit before retry
+AGENT6_EVAL_MAX_TOKENS = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_EVAL_MAX_TOKENS", "4096")
+)
+AGENT6_PASS_THRESHOLD = float(
+    os.environ.get("PUZZLEEVAL_AGENT6_PASS_THRESHOLD", "0.5")
+)
+AGENT6_ERROR_ABORT_THRESHOLD = float(
+    os.environ.get("PUZZLEEVAL_AGENT6_ERROR_ABORT_THRESHOLD", "0.5")
+)
+AGENT6_MIN_TESTS_BEFORE_ABORT = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_MIN_TESTS_BEFORE_ABORT", "5")
+)
+
+
+# ---------------------------------------------------------------------------
+# Provider Registry
+# ---------------------------------------------------------------------------
+# Path to the centralized API key registry file (JSON). Used by Agent 5 for
+# live validation and test execution. If the file doesn't exist,
+# the pipeline falls back to checking environment variables.
+#
+# Override with: export PUZZLEEVAL_PROVIDER_REGISTRY="/path/to/keys.json"
+# ---------------------------------------------------------------------------
+PROVIDER_REGISTRY_PATH = os.environ.get(
+    "PUZZLEEVAL_PROVIDER_REGISTRY", "provider_registry.json"
+)
+
+
+MIN_CACHEABLE_TOKENS = {
+    "claude-opus-4-6": 4096,
+    "claude-opus-4-5": 4096,
+    "claude-opus-4-1": 1024,
+    "claude-sonnet-4-6": 2048,
+    "claude-sonnet-4-5-20250929": 1024,
+    "claude-haiku-4-5-20251001": 4096,
+}

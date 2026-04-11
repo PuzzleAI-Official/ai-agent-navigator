@@ -1,0 +1,12 @@
+{"timestamp": "2026-04-08T21:46:46.662367+00:00", "level": "INFO", "agent_name": "cli", "message": "CLI started (agent5-input mode)", "operation": "cli_start", "trace_id": "dd19d2d0-bedb-4bfa-b907-9ef23b9cafaa"}
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "C:\Users\Deanh\OneDrive\Desktop\PuzzleEval\puzzleeval\cli.py", line 593, in <module>
+    main()
+  File "C:\Users\Deanh\OneDrive\Desktop\PuzzleEval\puzzleeval\cli.py", line 172, in main
+    pipeline_run.save_agent_result("agent_5", agent5_input, None, duration_ms=0)
+  File "C:\Users\Deanh\OneDrive\Desktop\PuzzleEval\puzzleeval\pipeline.py", line 88, in save_agent_result
+    output_data.model_dump_json(indent=2), encoding="utf-8"
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+AttributeError: 'NoneType' object has no attribute 'model_dump_json'

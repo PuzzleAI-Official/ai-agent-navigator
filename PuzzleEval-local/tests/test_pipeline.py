@@ -1,0 +1,222 @@
+# ============================================================================
+# Tests for Pipeline Run Manager
+# ============================================================================
+# Run: ANTHROPIC_API_KEY=dummy python -m pytest tests/test_pipeline.py -v
+#
+# Tests that PipelineRun correctly saves intermediate outputs, tracks
+# validation results, and produces accurate pipeline summaries.
+# Uses a temp directory to avoid polluting the project with test artifacts.
+# ============================================================================
+
+import json
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from puzzleeval.pipeline import PipelineRun
+from puzzleeval.schemas import (
+    Agent1Input,
+    Agent1Result,
+    Constraints,
+    SubTask,
+    UserUnderstandingOutput,
+)
+from puzzleeval.validators import ValidationResult
+
+
+# ============================================================================
+# Fixtures
+# ============================================================================
+
+def _make_agent1_input() -> Agent1Input:
+    return Agent1Input(
+        user_text="I need AI for invoices",
+        trace_id="test-pipeline-001",
+    )
+
+
+def _make_agent1_result() -> Agent1Result:
+    return Agent1Result(
+        is_clear=True,
+        result=UserUnderstandingOutput(
+            summary="User needs invoice processing AI",
+            sub_tasks=[
+                SubTask(
+                    description="Extract data from invoices",
+                    capability="document OCR",
+                    search_keywords=["invoice OCR API"],
+                ),
+            ],
+            search_strategy="both",
+            domain="accounting",
+            search_keywords=["invoice AI"],
+            constraints=Constraints(),
+            workflow_summary=None,
+        ),
+    )
+
+
+# ============================================================================
+# Tests
+# ============================================================================
+
+class TestPipelineRun:
+
+    def test_creates_run_directory(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("test-trace-001", output_dir=tmpdir)
+            assert (Path(tmpdir) / "test-trace-001").is_dir()
+
+    def test_saves_agent_input_and_output(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("test-trace-002", output_dir=tmpdir)
+            run.save_agent_result(
+                "agent_1",
+                _make_agent1_input(),
+                _make_agent1_result(),
+                duration_ms=3200,
+                cost_usd=0.05,
+            )
+
+            run_dir = Path(tmpdir) / "test-trace-002"
+            assert (run_dir / "agent_1_input.json").exists()
+            assert (run_dir / "agent_1_output.json").exists()
+
+            # Verify input is valid JSON
+            input_data = json.loads((run_dir / "agent_1_input.json").read_text())
+            assert input_data["user_text"] == "I need AI for invoices"
+
+            # Verify output is valid JSON
+            output_data = json.loads((run_dir / "agent_1_output.json").read_text())
+            assert output_data["is_clear"] is True
+
+    def test_saves_validation(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("test-trace-003", output_dir=tmpdir)
+            run.save_agent_result(
+                "agent_1", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=3200,
+            )
+
+            validation = ValidationResult(
+                passed=True, errors=[], warnings=["Domain is vague"],
+            )
+            run.save_validation("agent_1", validation)
+
+            run_dir = Path(tmpdir) / "test-trace-003"
+            assert (run_dir / "agent_1_validation.json").exists()
+
+            v_data = json.loads((run_dir / "agent_1_validation.json").read_text())
+            assert v_data["passed"] is True
+            assert "Domain is vague" in v_data["warnings"]
+
+    def test_validation_failure_updates_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("test-trace-004", output_dir=tmpdir)
+            run.save_agent_result(
+                "agent_1", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=3200,
+            )
+
+            validation = ValidationResult(
+                passed=False, errors=["No sub-tasks"], warnings=[],
+            )
+            run.save_validation("agent_1", validation)
+
+            assert run.agents[0].status == "validation_failed"
+
+    def test_finalize_creates_summary(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("test-trace-005", output_dir=tmpdir)
+            run.save_agent_result(
+                "agent_1", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=3200, cost_usd=0.05,
+            )
+            run.save_validation("agent_1", ValidationResult(passed=True))
+
+            summary = run.finalize()
+
+            run_dir = Path(tmpdir) / "test-trace-005"
+            assert (run_dir / "pipeline_summary.json").exists()
+
+            assert summary["trace_id"] == "test-trace-005"
+            assert summary["status"] == "completed"
+            assert summary["total_cost_usd"] == 0.05
+            assert len(summary["agents"]) == 1
+            assert summary["agents"][0]["name"] == "agent_1"
+
+    def test_completed_with_warnings_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("test-trace-006", output_dir=tmpdir)
+            run.save_agent_result(
+                "agent_1", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=3200, cost_usd=0.05,
+            )
+            run.save_validation("agent_1", ValidationResult(
+                passed=True, warnings=["Domain is vague"],
+            ))
+
+            summary = run.finalize()
+            assert summary["status"] == "completed_with_warnings"
+
+    def test_failed_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("test-trace-007", output_dir=tmpdir)
+            run.save_agent_result(
+                "agent_1", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=3200, cost_usd=0.05,
+            )
+            run.fail("agent_2", "Rate limit exceeded")
+
+            summary = run.finalize()
+            assert summary["status"] == "failed"
+            assert summary["failed_at"] == "agent_2"
+            assert len(summary["agents"]) == 2
+            assert summary["agents"][1]["error"] == "Rate limit exceeded"
+
+    def test_validation_failed_status(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("test-trace-008", output_dir=tmpdir)
+            run.save_agent_result(
+                "agent_1", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=3200,
+            )
+            run.save_validation("agent_1", ValidationResult(
+                passed=False, errors=["No sub-tasks"],
+            ))
+
+            summary = run.finalize()
+            assert summary["status"] == "validation_failed"
+
+    def test_total_cost_sums_agents(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("test-trace-009", output_dir=tmpdir)
+            run.save_agent_result(
+                "agent_1", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=3200, cost_usd=0.05,
+            )
+            run.save_agent_result(
+                "agent_2", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=12000, cost_usd=0.35,
+            )
+
+            summary = run.finalize()
+            assert summary["total_cost_usd"] == 0.4
+
+    def test_multiple_runs_dont_interfere(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run1 = PipelineRun("run-A", output_dir=tmpdir)
+            run2 = PipelineRun("run-B", output_dir=tmpdir)
+
+            run1.save_agent_result(
+                "agent_1", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=1000,
+            )
+            run2.save_agent_result(
+                "agent_1", _make_agent1_input(), _make_agent1_result(),
+                duration_ms=2000,
+            )
+
+            assert (Path(tmpdir) / "run-A" / "agent_1_output.json").exists()
+            assert (Path(tmpdir) / "run-B" / "agent_1_output.json").exists()

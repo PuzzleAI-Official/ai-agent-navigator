@@ -1,0 +1,6 @@
+{
+  "user_text": "I run a small e-commerce store on Shopify selling handmade jewelry. I need an AI that can: 1) Handle customer support emails - answer questions about product availability, shipping times, and return policies. 2) Generate product descriptions for new items based on photos and basic specs I provide. 3) Analyze my sales data CSV files and give me weekly summaries of trends. My budget is around $100-200 per month. It needs to integrate with Shopify and Gmail.",
+  "workflow_file_path": null,
+  "trace_id": "test-clear-001",
+  "additional_context": null
+}

@@ -1,0 +1,1762 @@
+# ============================================================================
+# Pydantic Schemas — Data Contracts for Agent 1
+# ============================================================================
+# These models serve THREE purposes:
+#   1. DATA VALIDATION — catch bad data before it causes downstream problems
+#   2. API CONTRACT — the JSON shapes frontend devs code against
+#   3. STRUCTURED OUTPUT SCHEMA — Claude is constrained to match these exactly
+#
+# The `description` strings on each field are read by Claude when generating
+# structured output. Good descriptions = better results.
+# ============================================================================
+
+from typing import Any
+
+from pydantic import BaseModel, Field
+
+
+# ============================================================================
+# Agent 1 Input Schema
+# ============================================================================
+
+class Agent1Input(BaseModel):
+    """What gets passed INTO Agent 1. Created by the CLI or API, NOT by Claude."""
+
+    user_text: str = Field(
+        description="The user's natural language description of their AI needs"
+    )
+
+    workflow_file_path: str | None = Field(
+        default=None,
+        description="Optional file path to the user's uploaded workflow document"
+    )
+
+    trace_id: str = Field(
+        description="UUID for correlating logs across the entire pipeline"
+    )
+
+    # For backwards compatibility — simple single-string follow-up
+    additional_context: str | None = Field(
+        default=None,
+        description="User's answers to clarifying questions from a previous round"
+    )
+
+    # Full conversation history for multi-turn conversations.
+    # The CLI/API builds this by collecting messages from previous turns.
+    # Format: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]
+    conversation_history: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="Previous conversation turns for multi-turn context"
+    )
+
+
+# ============================================================================
+# Agent 1 Output Schemas
+# ============================================================================
+
+class SubTask(BaseModel):
+    """
+    A single capability/sub-task extracted from the user's request.
+
+    WHY SUB-TASKS?
+    Users describe their needs as one big request ("read invoices and put
+    them in QuickBooks"). But the best AI solution might be a combination
+    of specialized tools — one for OCR, one for QuickBooks sync. By
+    decomposing into sub-tasks, the Research Agent can search for the best
+    tool PER capability, not just all-in-one solutions.
+
+    Example decomposition of "read invoices and put in QuickBooks":
+      Sub-task 1: "Extract structured data from invoice photos" (capability: OCR/document extraction)
+      Sub-task 2: "Create bill entries in QuickBooks from structured data" (capability: accounting integration)
+    """
+
+    # What this sub-task does — described as an input→output behavior
+    description: str = Field(
+        description=(
+            "A concrete, testable task described as input→output behavior. "
+            "Example: 'Given a photo of a paper invoice, extract vendor name, "
+            "line items, and total amount into structured JSON'"
+        )
+    )
+
+    # The underlying capability needed (used for searching)
+    capability: str = Field(
+        description=(
+            "The AI capability category needed for this sub-task. Examples: "
+            "'document OCR', 'text generation', 'data extraction', "
+            "'API integration', 'image understanding', 'classification'"
+        )
+    )
+
+    # Search keywords specific to THIS sub-task
+    search_keywords: list[str] = Field(
+        description=(
+            "2-4 search keywords for finding AI solutions for this specific "
+            "sub-task. Focus on the capability, not the end-to-end workflow. "
+            "Example: for invoice OCR, use 'document OCR API', 'invoice data "
+            "extraction', 'receipt scanning AI' — NOT 'invoice QuickBooks automation'"
+        )
+    )
+
+    # Whether this sub-task requires real files for testing
+    requires_test_files: bool = Field(
+        default=False,
+        description=(
+            "True when this sub-task involves processing files: OCR, document "
+            "extraction, image analysis, PDF parsing, spreadsheet processing. "
+            "False for text-based tasks: chatbot, classification, text generation, "
+            "structured data processing via API."
+        )
+    )
+
+    test_file_description: str | None = Field(
+        default=None,
+        description=(
+            "When requires_test_files is True, describes what files the user "
+            "should provide for THIS sub-task. Be specific: "
+            "'5-10 sample invoice photos or PDFs'. Null when requires_test_files is False."
+        )
+    )
+
+
+class Constraints(BaseModel):
+    """User's constraints. All fields optional."""
+
+    budget_range: str | None = Field(
+        default=None,
+        description="Monthly budget range, e.g., '$50-200/mo', 'Free', or null if not specified"
+    )
+
+    must_have_features: list[str] = Field(
+        default_factory=list,
+        description="Non-negotiable features the AI solution must support"
+    )
+
+    # Integration requirements are tracked here but NOT used as search filters.
+    # The Research Agent searches by capability. The Screening Agent (Agent 4)
+    # later checks if candidates can integrate with these systems.
+    integration_requirements: list[str] = Field(
+        default_factory=list,
+        description=(
+            "External systems the solution must eventually work with. "
+            "NOTE: These are checked during screening, not during search — "
+            "a tool that can't directly integrate may still be usable via API glue."
+        )
+    )
+
+    # User's technical level — affects whether modular solutions are viable
+    technical_level: str | None = Field(
+        default=None,
+        description=(
+            "User's technical capability: 'non-technical' (needs turnkey), "
+            "'some-technical' (can connect APIs with guidance), "
+            "'technical' (can build custom integrations). "
+            "Null if not determined."
+        )
+    )
+
+
+class UserUnderstandingOutput(BaseModel):
+    """
+    The FULL structured output when Agent 1 has enough information.
+    Feeds into Agent 2 (Research) and Agent 3 (Synthetic Tests).
+    """
+
+    summary: str = Field(
+        description="One clear sentence restating what the user needs AI to do"
+    )
+
+    # Sub-tasks: the decomposed capabilities needed
+    sub_tasks: list[SubTask] = Field(
+        description=(
+            "The user's request broken down into independent capability areas. "
+            "Each sub-task can potentially be handled by a different AI tool. "
+            "Minimum 1 sub-task."
+        )
+    )
+
+    # Search strategy is ALWAYS "both" — we search for all-in-one AND modular
+    # solutions, then present both approaches in the final report. The user
+    # decides AFTER seeing real results, not before.
+    # This field is kept for downstream compatibility but always set to "both".
+    search_strategy: str = Field(
+        default="both",
+        description="Always 'both' — Research Agent searches all-in-one AND modular approaches"
+    )
+
+    domain: str = Field(
+        description="The business domain, e.g., 'accounting', 'e-commerce', 'healthcare'"
+    )
+
+    # Top-level keywords for all-in-one search (used when search_strategy
+    # includes all-in-one). Sub-task-level keywords are in each SubTask.
+    search_keywords: list[str] = Field(
+        description=(
+            "4-8 keywords for finding all-in-one solutions that cover the "
+            "full workflow. Only meaningful when search_strategy is "
+            "'all_in_one' or 'both'."
+        )
+    )
+
+    constraints: Constraints = Field(
+        description="User's constraints on budget, features, integrations, and technical level"
+    )
+
+    workflow_summary: str | None = Field(
+        default=None,
+        description="Summary of the uploaded workflow file, or null if no file"
+    )
+
+    # NOTE: Test file requirements are now PER SUB-TASK, not global.
+    # Each SubTask has its own requires_test_files and test_file_description.
+    # This allows mixed evaluations (e.g., OCR needs files + chatbot is text-only).
+
+
+class InfoStatus(BaseModel):
+    """
+    Tracks what information has been collected vs what's still needed.
+
+    This is the systematic categorization of required vs optional info.
+    The agent updates this on every turn so the CLI/frontend can:
+      - Show users what's been captured
+      - Know exactly why the agent is asking more questions
+      - Display optional fields as "you can also tell us about..."
+
+    CRITICAL = must have before we can search. Without these, the Research
+    Agent will return garbage results. Agent MUST ask for these.
+
+    OPTIONAL = improves results but doesn't block the search. Agent should
+    invite the user to provide these but never demand them.
+    """
+
+    # ── CRITICAL FIELDS (block search without these) ──
+
+    has_concrete_subtasks: bool = Field(
+        description="True if at least 1 sub-task with testable input→output behavior has been identified"
+    )
+
+    has_domain: bool = Field(
+        description="True if the business domain/industry has been identified or can be inferred"
+    )
+
+    # ── OPTIONAL FIELDS (improve results, don't block) ──
+
+    has_budget: bool = Field(
+        default=False,
+        description="True if the user mentioned a budget range"
+    )
+
+    has_technical_level: bool = Field(
+        default=False,
+        description="True if we know the user's technical capability (inferred or stated)"
+    )
+
+    has_integration_requirements: bool = Field(
+        default=False,
+        description="True if the user mentioned specific tools/platforms they need to integrate with"
+    )
+
+    has_workflow_file: bool = Field(
+        default=False,
+        description="True if the user uploaded a workflow document"
+    )
+
+
+class ClarifyingResponse(BaseModel):
+    """
+    Returned when the agent needs more information.
+
+    Separates critical questions (MUST answer) from optional prompts
+    (nice to have). The frontend can present these differently — e.g.,
+    critical questions as required fields, optional as expandable hints.
+    """
+
+    message: str = Field(
+        description=(
+            "A conversational message that: (1) acknowledges what was understood, "
+            "(2) shows the sub-task breakdown if identified, and (3) naturally "
+            "leads into the questions. Should feel like a smart consultant."
+        )
+    )
+
+    critical_questions: list[str] = Field(
+        description=(
+            "1-2 questions for CRITICAL missing information that blocks the search. "
+            "These correspond to InfoStatus fields that are False. "
+            "If has_concrete_subtasks is False, ask what specific tasks they need. "
+            "If has_domain is False, ask what kind of business/work this is for."
+        )
+    )
+
+    optional_prompt: str | None = Field(
+        default=None,
+        description=(
+            "A single, casual invitation for optional info. Example: "
+            "'If you'd like, you can also share your rough budget and any "
+            "tools you currently use (like Shopify, QuickBooks, etc.) — "
+            "this helps us narrow down the best options, but it's totally fine "
+            "to skip this.' Set to null if there's nothing useful to optionally collect."
+        )
+    )
+
+    partial_understanding: str = Field(
+        description="What the agent understood so far — preserves context for next turn"
+    )
+
+    info_status: InfoStatus = Field(
+        description="Systematic tracking of what information has been collected so far"
+    )
+
+
+class Agent1Result(BaseModel):
+    """
+    Branching wrapper: either a full result OR follow-up questions.
+
+    is_clear=True  → result is populated (ready for downstream agents)
+    is_clear=False → clarification_needed is populated (need more conversation)
+    """
+
+    is_clear: bool = Field(
+        description=(
+            "True if the agent has enough information to produce a high-quality "
+            "search that will find the right AI solutions. False if more "
+            "conversation would meaningfully improve the search results."
+        )
+    )
+
+    result: UserUnderstandingOutput | None = Field(
+        default=None,
+        description="Full structured output — only populated when is_clear is True"
+    )
+
+    clarification_needed: ClarifyingResponse | None = Field(
+        default=None,
+        description="Follow-up questions — only populated when is_clear is False"
+    )
+
+    cost_usd: float = Field(
+        default=0.0,
+        description="Total API cost for this agent run",
+    )
+
+
+# ============================================================================
+# Agent 2 Input Schema
+# ============================================================================
+
+class Agent2Input(BaseModel):
+    """
+    What gets passed INTO Agent 2. Created by the pipeline orchestrator
+    after Agent 1 produces a final UserUnderstandingOutput.
+
+    The orchestrator takes Agent 1's result (when is_clear=True) and wraps
+    it here along with the trace_id for log correlation.
+    """
+
+    user_understanding: UserUnderstandingOutput = Field(
+        description="Agent 1's final structured output — the parsed user request"
+    )
+
+    trace_id: str = Field(
+        description="UUID for correlating logs across the entire pipeline"
+    )
+
+
+# ============================================================================
+# Agent 2 Output Schemas
+# ============================================================================
+
+class Candidate(BaseModel):
+    """
+    A single AI service/product found during research.
+
+    WHY THESE FIELDS?
+    Different downstream agents need different fields:
+      - Screening Agent (Agent 4) needs api_available, api_docs_url, and
+        claimed_capabilities to validate candidates quickly.
+      - Implement Test Env Agent (Agent 5) needs api_docs_url to read docs
+        and build a test harness.
+      - Ranking Agent (Agent 8) needs pricing_model and pricing_details
+        to calculate the Price score.
+      - relevant_subtasks tells us which parts of the user's request this
+        candidate covers — important for coverage analysis.
+
+    WHY relevance_score?
+    This is the Research Agent's own confidence that this service can do
+    the job. It's used for prioritization when the Screening Agent needs
+    to decide which candidates to investigate first. It's NOT shown to the
+    user — the user sees Performance/Speed/Price scores from Agent 8.
+    """
+
+    name: str = Field(
+        description="Service/product name, e.g., 'Google Document AI', 'Pinecone'"
+    )
+
+    provider: str = Field(
+        description="Company or organization behind the service, e.g., 'Google', 'Pinecone Inc.'"
+    )
+
+    description: str = Field(
+        description=(
+            "1-2 sentence description of what this service does, focused on "
+            "the capabilities relevant to the user's sub-tasks"
+        )
+    )
+
+    api_available: bool = Field(
+        description=(
+            "True if the service has a publicly accessible API. "
+            "In V0, this should always be True — candidates without APIs "
+            "should not be included."
+        )
+    )
+
+    api_docs_url: str | None = Field(
+        default=None,
+        description=(
+            "URL to the service's API documentation or developer portal. "
+            "Used by Agent 5 to read docs and build test harnesses. "
+            "Null only if docs URL couldn't be confirmed via web fetch."
+        )
+    )
+
+    pricing_model: str = Field(
+        description=(
+            "How the service charges: 'per-token', 'per-request', 'per-page', "
+            "'monthly', 'usage-based', 'free-tier', or 'freemium'. "
+            "This is the PRIMARY pricing model — some services have multiple."
+        )
+    )
+
+    pricing_details: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable pricing info, e.g., '$0.01 per 1K tokens', "
+            "'Free up to 1000 pages/mo, then $0.01/page', '$99/mo for 10K requests'. "
+            "Null if pricing couldn't be determined from search results."
+        )
+    )
+
+    claimed_capabilities: list[str] = Field(
+        description=(
+            "Capabilities this service claims to have, relevant to the user's "
+            "sub-tasks. Example: ['document OCR', 'table extraction', 'handwriting recognition']. "
+            "These are claims from the provider — the Screening Agent verifies them."
+        )
+    )
+
+    relevance_score: float = Field(
+        description=(
+            "0.0 to 1.0 — the Research Agent's confidence that this candidate "
+            "can handle the user's sub-tasks. Based on: capability match, "
+            "API maturity, pricing fit, and coverage breadth. "
+            "Used for prioritization, not shown to the user."
+        )
+    )
+
+    adoption_difficulty: str = Field(
+        description=(
+            "How hard it is for the user to adopt this service, considering "
+            "their technical level and the service's setup requirements. "
+            "One of: "
+            "'easy' (signup → API key → simple REST calls, good docs with "
+            "quickstart examples, no cloud infrastructure needed), "
+            "'medium' (requires OAuth setup, SDK installation with moderate "
+            "configuration, or a managed platform account with some setup), "
+            "'hard' (requires cloud provider account, IAM/service accounts, "
+            "region configuration, resource provisioning, or significant "
+            "infrastructure knowledge). "
+            "Scored relative to the user's technical level from constraints."
+        )
+    )
+
+    relevant_subtasks: list[str] = Field(
+        description=(
+            "Which of the user's sub-task descriptions this candidate covers. "
+            "Use the exact sub-task description strings from UserUnderstandingOutput. "
+            "A candidate may cover one sub-task (specialized) or many (all-in-one)."
+        )
+    )
+
+    source: str = Field(
+        description=(
+            "Where this candidate was found. Typically a URL from web search "
+            "results (e.g., 'https://cloud.google.com/document-ai'). "
+            "Use 'training knowledge' only if the candidate was known to the "
+            "model without web search confirmation."
+        )
+    )
+
+
+class Agent2Result(BaseModel):
+    """
+    Agent 2's complete output. Consumed by Agent 4 (Screening).
+
+    WHY 5-7 CANDIDATES?
+    The Screening Agent will reject candidates that fail quick validation
+    (no API access, capabilities don't match, rate limits too low). By
+    overshooting to 5-7, we ensure 3-5 candidates survive screening —
+    enough for meaningful comparison in the testing phases.
+    """
+
+    candidates: list[Candidate] = Field(
+        description=(
+            "5-7 candidate AI services found during research. "
+            "Must include at least 4 different providers for diversity. "
+            "Should include both all-in-one and specialized candidates."
+        )
+    )
+
+    search_approach: str = Field(
+        description=(
+            "Brief summary of how the research was conducted: what was searched, "
+            "how many searches/fetches were performed, which comparison articles "
+            "were most useful. For debugging and transparency."
+        )
+    )
+
+    coverage_notes: str = Field(
+        description=(
+            "Analysis of sub-task coverage: which sub-tasks have strong candidate "
+            "options, which are underserved, and any gaps. Example: "
+            "'Document OCR has 5 strong candidates. QuickBooks integration has "
+            "fewer direct options — may need API glue between an OCR tool and "
+            "QuickBooks API.'"
+        )
+    )
+
+    cost_usd: float = Field(
+        default=0.0,
+        description="Total API cost including web search fees",
+    )
+
+
+# ============================================================================
+# Agent 3 Input Schema
+# ============================================================================
+
+class Agent3Input(BaseModel):
+    """
+    What gets passed INTO Agent 3. Created by the pipeline orchestrator
+    after Agent 1 produces a final UserUnderstandingOutput.
+
+    Agent 3 consumes the SAME Agent 1 output as Agent 2, and runs in
+    PARALLEL with Agent 2. Agent 2 finds candidates; Agent 3 generates
+    test cases. Neither depends on the other.
+
+    TWO MODES:
+      - Text mode (test_file_paths is None/empty): generates synthetic
+        text test cases. Used when the evaluation is text-based.
+      - File mode (test_file_paths has paths): reads user-uploaded files,
+        generates ground truth and criteria for each. Used when the
+        evaluation involves document/image processing.
+    """
+
+    user_understanding: UserUnderstandingOutput = Field(
+        description="Agent 1's final structured output — the parsed user request"
+    )
+
+    trace_id: str = Field(
+        description="UUID for correlating logs across the entire pipeline"
+    )
+
+    test_file_paths: list[str] | None = Field(
+        default=None,
+        description=(
+            "Paths to user-uploaded test files (invoices, documents, images, "
+            "spreadsheets). When provided, Agent 3 reads these files and "
+            "generates test cases using them as inputs. When None or empty, "
+            "Agent 3 generates synthetic text-based test data."
+        )
+    )
+
+
+# ============================================================================
+# Agent 3 Output Schemas
+# ============================================================================
+
+class JudgementCriterion(BaseModel):
+    """
+    A single criterion for judging a test case result.
+
+    WHY WEIGHTED CRITERIA?
+    Different aspects of a response matter differently. For an invoice OCR
+    test, extracting the vendor name correctly (weight=0.3) matters more
+    than having valid JSON formatting (weight=0.1). Weights let Agent 7
+    compute a meaningful quality score instead of treating all criteria equally.
+
+    WHY eval_type?
+    Agent 7 needs to know HOW to judge, not just WHAT to judge. "Must
+    extract vendor name" could mean exact string match, or semantic
+    similarity (e.g., "Acme Corp" vs "ACME CORPORATION"). The eval_type
+    tells Agent 7 which comparison method to use, making scoring consistent
+    and reproducible across all evaluations.
+    """
+
+    criterion: str = Field(
+        description=(
+            "A specific, measurable criterion for judging the output. "
+            "Example: 'Must correctly extract the vendor name', "
+            "'Response tone must be professional and empathetic'"
+        )
+    )
+
+    weight: float = Field(
+        description=(
+            "Importance weight from 0.0 to 1.0. Weights across all criteria "
+            "in a test case should sum to approximately 1.0. Higher weight "
+            "= more impact on the test case's quality score."
+        )
+    )
+
+    eval_type: str = Field(
+        description=(
+            "How Agent 7 should evaluate this criterion. One of: "
+            "'exact_match' (output must match ground truth closely), "
+            "'semantic_similarity' (output conveys the same meaning), "
+            "'contains_key_info' (output includes specific key facts/fields), "
+            "'format_compliance' (output matches expected format like valid JSON), "
+            "'subjective_quality' (quality judgment on tone, helpfulness, completeness)"
+        )
+    )
+
+
+class TestCase(BaseModel):
+    """
+    A single test case specification.
+
+    DESIGN PRINCIPLES:
+    1. TEXT OR FILE — input_data is always text (synthetic or extracted
+       from user-uploaded files). test_file_path references the actual
+       file when the test uses user-provided data.
+    2. UNIVERSAL — works with any AI service. input_type and output_type
+       tell downstream agents how to adapt the data, not what service to use.
+    3. TAGGED FOR COVERAGE — tags mark which testing dimension this case
+       covers (happy_path, edge_case, etc.) so we can verify completeness.
+    """
+
+    id: str = Field(
+        description="Unique test case ID, e.g., 'tc-001', 'tc-002'"
+    )
+
+    sub_task_ref: str = Field(
+        description=(
+            "Which sub-task this tests — use the EXACT description string "
+            "from UserUnderstandingOutput.sub_tasks[].description"
+        )
+    )
+
+    scenario: str = Field(
+        description=(
+            "Human-readable description of the test scenario. "
+            "Example: 'A standard printed invoice from a US vendor with 3 line items'"
+        )
+    )
+
+    # ── Input specification (canonical text format) ──
+
+    input_type: str = Field(
+        description=(
+            "The nature of the input data. Tells Agent 5 how to present it "
+            "to each service. One of: "
+            "'text' (plain text — chat message, query, document text), "
+            "'structured_data' (JSON/CSV data to process), "
+            "'document_content' (text representation of a document — invoice, contract, receipt), "
+            "'conversation' (multi-turn conversation context), "
+            "'image_description' (description of what an image contains)"
+        )
+    )
+
+    input_data: str = Field(
+        description=(
+            "The actual test input content, always as text. "
+            "For text-based tests: the synthetic input (chat message, query, data). "
+            "For file-based tests: text description of the file content "
+            "(extracted by reading the user's uploaded file). Used as context "
+            "for Agent 7 judging."
+        )
+    )
+
+    input_context: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Optional metadata about the input. Examples: "
+            "{'language': 'en', 'document_format': 'invoice', 'page_count': 1}, "
+            "{'conversation_turns': 3, 'user_sentiment': 'frustrated'}"
+        )
+    )
+
+    # ── User-provided test file (when applicable) ──
+
+    test_file_path: str | None = Field(
+        default=None,
+        description=(
+            "Path to user-uploaded file used as test input. Set when the "
+            "test uses a real file provided by the user (invoice photo, PDF, "
+            "spreadsheet, etc.). Null for synthetic text-based tests. "
+            "Agent 5 sends this file to the AI service being tested."
+        )
+    )
+
+    file_required: bool = Field(
+        default=False,
+        description=(
+            "True when this test case ideally needs a file but none was provided. "
+            "Set by the CLI when sub-tasks have requires_test_files=true but no "
+            "--test-files were given. Agent 5 treats these as skippable for "
+            "file-based APIs."
+        )
+    )
+
+    # ── Expected output ──
+
+    output_type: str = Field(
+        description=(
+            "What kind of output to expect from the AI service. One of: "
+            "'free_text' (natural language response), "
+            "'structured_json' (JSON matching a specific schema), "
+            "'classification' (category label or labels), "
+            "'extraction' (extracted fields from input), "
+            "'action' (action to perform — e.g., create record, send message)"
+        )
+    )
+
+    expected_output: str = Field(
+        description=(
+            "The ground truth / ideal response. For structured outputs, this "
+            "is the expected JSON. For free text, this is an ideal response "
+            "that Agent 7 compares against using the judgement criteria."
+        )
+    )
+
+    # ── Judgement ──
+
+    judgement_criteria: list[JudgementCriterion] = Field(
+        description=(
+            "Specific, weighted criteria for Agent 7 to judge the output. "
+            "Must have at least 2 criteria. Weights should sum to ~1.0."
+        )
+    )
+
+    difficulty: str = Field(
+        description="Test difficulty: 'easy' (happy path), 'medium' (realistic), 'hard' (edge case)"
+    )
+
+    tags: list[str] = Field(
+        description=(
+            "Coverage dimension tags. At least one of: "
+            "'happy_path', 'input_variation', 'edge_case', 'scale', "
+            "'domain_specific', 'error_resilience'. A test case can have "
+            "multiple tags."
+        )
+    )
+
+
+class Agent3Result(BaseModel):
+    """
+    Agent 3's complete output. Contains test cases ready for
+    Agent 5 (Integration) to run against candidate AI services.
+
+    WHY DYNAMIC COUNT?
+    Fixed counts (like 20) undertest complex requests and overtest simple
+    ones. We scale with sub-task count: 5-8 cases per sub-task, with
+    bonus cases when workflow data is available for grounding.
+    """
+
+    test_cases: list[TestCase] = Field(
+        description=(
+            "Complete list of test cases. Target: 5-8 per sub-task. "
+            "Minimum 10 total, maximum 50 total. Each sub-task must be "
+            "covered across multiple difficulty levels and testing dimensions."
+        )
+    )
+
+    generation_notes: str = Field(
+        description=(
+            "How the test cases were generated: reasoning about coverage, "
+            "which dimensions were prioritized, any gaps or limitations. "
+            "For debugging and transparency."
+        )
+    )
+
+    coverage_summary: dict[str, int] = Field(
+        description=(
+            "Number of test cases per sub-task. Keys are the exact sub-task "
+            "description strings from UserUnderstandingOutput. Values are counts. "
+            "Used to verify every sub-task has adequate coverage."
+        )
+    )
+
+    cost_usd: float = Field(
+        default=0.0,
+        description="Total API cost for test generation",
+    )
+
+
+# ============================================================================
+# Agent 4 Input Schema
+# ============================================================================
+
+class Agent4Input(BaseModel):
+    """
+    What gets passed INTO Agent 4. Created by the pipeline orchestrator
+    after Agent 2 produces candidate results.
+
+    Agent 4 takes BOTH Agent 2's candidates AND Agent 1's user understanding.
+    It needs the candidates to screen, and the user understanding to check
+    capability match against what the user actually needs.
+    """
+
+    candidates: Agent2Result = Field(
+        description="Agent 2's full output — the candidate list plus research context"
+    )
+
+    user_understanding: UserUnderstandingOutput = Field(
+        description="Agent 1's final structured output — the parsed user request"
+    )
+
+    trace_id: str = Field(
+        description="UUID for correlating logs across the entire pipeline"
+    )
+
+
+# ============================================================================
+# Agent 4 Output Schemas
+# ============================================================================
+
+class ScreenedCandidate(BaseModel):
+    """
+    A candidate that PASSED screening — verified to have real, publicly
+    accessible API documentation.
+
+    WHY A NEW MODEL (not extending Candidate)?
+    ScreenedCandidate is the contract between Agent 4 and Agent 5. Agent 5
+    needs GUARANTEED enrichment fields (verified docs URL, auth method, data
+    formats) to build test harnesses without guessing. Making these fields
+    non-optional in a separate model enforces this contract at the schema level.
+
+    The enrichment fields give Agent 5 a head start — it knows the auth
+    method, the working docs URL, and what formats to expect BEFORE it
+    starts reading API docs itself.
+    """
+
+    # ── Carried forward from Candidate (Agent 2) ──
+
+    name: str = Field(
+        description="Service/product name, e.g., 'Google Document AI', 'Pinecone'"
+    )
+
+    provider: str = Field(
+        description="Company or organization behind the service"
+    )
+
+    description: str = Field(
+        description="1-2 sentence description of what this service does"
+    )
+
+    pricing_model: str = Field(
+        description=(
+            "How the service charges: 'per-token', 'per-request', 'per-page', "
+            "'monthly', 'usage-based', 'free-tier', or 'freemium'"
+        )
+    )
+
+    pricing_details: str | None = Field(
+        default=None,
+        description="Human-readable pricing info, e.g., '$0.01 per 1K tokens'"
+    )
+
+    claimed_capabilities: list[str] = Field(
+        description="Capabilities claimed by the provider (from Agent 2 research)"
+    )
+
+    relevance_score: float = Field(
+        description="0.0 to 1.0 — Agent 2's confidence score for this candidate"
+    )
+
+    adoption_difficulty: str = Field(
+        description=(
+            "Adoption difficulty from Agent 2: 'easy', 'medium', or 'hard'. "
+            "Carried forward for Agent 8 ranking and Agent 9 reporting."
+        )
+    )
+
+    relevant_subtasks: list[str] = Field(
+        description="Which of the user's sub-task descriptions this candidate covers"
+    )
+
+    source: str = Field(
+        description="Where this candidate was originally found (URL or 'training knowledge')"
+    )
+
+    # ── NEW: Enrichment fields from screening (for Agent 5) ──
+
+    verified_api_docs_url: str = Field(
+        description=(
+            "The URL to API documentation that was CONFIRMED to exist and contain "
+            "real API documentation (endpoints, authentication, SDKs). This URL "
+            "was verified by fetching or searching during screening. Agent 5 uses "
+            "this as its starting point for building test harnesses."
+        )
+    )
+
+    auth_method: str = Field(
+        description=(
+            "How the API authenticates requests, determined from actual API "
+            "documentation found during screening. One of: 'api_key', 'oauth2', "
+            "'bearer_token', 'basic_auth', 'no_auth', 'unknown'. Agent 5 uses "
+            "this to set up test environment authentication."
+        )
+    )
+
+    api_access_method: str = Field(
+        description=(
+            "How a developer gets access to use this API. One of: "
+            "'free_signup' (create account, get key immediately), "
+            "'free_tier' (usage-limited free access), "
+            "'trial' (time-limited trial), "
+            "'sandbox' (test environment available), "
+            "'open' (no signup needed), "
+            "'paid_only' (requires payment upfront). "
+            "Agent 5 uses this to determine if it can build a working test harness."
+        )
+    )
+
+    confirmed_capabilities: list[str] = Field(
+        description=(
+            "Capabilities verified from actual API documentation or developer "
+            "guides found during web fetch/search. These are NOT just the claims "
+            "from Agent 2 repeated — they are capabilities confirmed to exist in "
+            "the API docs. Should map to the user's sub-tasks where possible."
+        )
+    )
+
+    rate_limit_info: str | None = Field(
+        default=None,
+        description=(
+            "Rate limit information found in the API documentation. "
+            "Example: '100 requests/minute on free tier, 1000/minute on paid'. "
+            "Null if no rate limit info was found in docs."
+        )
+    )
+
+    data_format_notes: str = Field(
+        description=(
+            "What input/output formats the API accepts, as determined from "
+            "documentation. Example: 'Accepts JPEG/PNG/PDF via multipart upload, "
+            "returns JSON with extracted fields', 'REST API accepting JSON request "
+            "bodies, returns JSON responses'. Agent 5 uses this to build the test "
+            "harness adapter."
+        )
+    )
+
+    screening_notes: str = Field(
+        description=(
+            "How the screening determination was made — what evidence was found, "
+            "what URL was fetched, what content confirmed API access. Provides an "
+            "audit trail for the pass decision."
+        )
+    )
+
+
+class RejectedCandidate(BaseModel):
+    """
+    A candidate that FAILED screening — no verified public API access,
+    or other disqualifying issue found.
+
+    WHY rejection_category?
+    Structured rejection reasons let downstream systems (API, frontend)
+    present useful feedback without parsing free-text strings. They also
+    enable analytics on WHY candidates fail (e.g., "80% of rejections
+    are enterprise-only services — Research Agent should deprioritize those").
+    """
+
+    name: str = Field(
+        description="Service/product name that was rejected"
+    )
+
+    provider: str = Field(
+        description="Company or organization behind the rejected service"
+    )
+
+    rejection_reason: str = Field(
+        description=(
+            "Human-readable explanation of why this candidate was rejected. "
+            "Should be specific: 'API documentation page returns 404 and web "
+            "search found no alternative developer docs' rather than 'no API'."
+        )
+    )
+
+    rejection_category: str = Field(
+        description=(
+            "Structured rejection reason. One of: "
+            "'no_api_access' (no callable API exists), "
+            "'no_public_docs' (API may exist but docs are not publicly accessible), "
+            "'capability_mismatch' (API exists but doesn't handle the user's use cases), "
+            "'rate_limit_insufficient' (rate limits too low for ~20 test cases), "
+            "'no_free_tier' (requires paid access with no trial/sandbox option), "
+            "'enterprise_only' (only available through enterprise sales process), "
+            "'deprecated' (API is deprecated or being sunset), "
+            "'region_restricted' (API not available in required regions)"
+        )
+    )
+
+
+class Agent4Result(BaseModel):
+    """
+    Agent 4's complete output. Consumed by Agent 5 (Implement Test Env).
+
+    WHY total_candidates_screened?
+    Cross-check field — validated + rejected should sum to this number.
+    If they don't match, a candidate was silently dropped (bug). The
+    validator catches this.
+    """
+
+    validated_candidates: list[ScreenedCandidate] = Field(
+        description=(
+            "Candidates that passed screening — verified to have publicly "
+            "accessible API documentation. Target: 3-5 candidates. Each has "
+            "enrichment fields (auth method, docs URL, data formats) that "
+            "give Agent 5 a head start building test harnesses."
+        )
+    )
+
+    rejected_candidates: list[RejectedCandidate] = Field(
+        description=(
+            "Candidates that failed screening with specific rejection reasons. "
+            "Every candidate from Agent 2 must appear in either validated or "
+            "rejected — none should be silently dropped."
+        )
+    )
+
+    screening_summary: str = Field(
+        description=(
+            "Overview of the screening process: how many candidates were checked, "
+            "what verification method was used (web fetch, web search), and a "
+            "brief assessment of the overall candidate quality."
+        )
+    )
+
+    total_candidates_screened: int = Field(
+        description=(
+            "Total number of candidates that were screened. Must equal "
+            "len(validated_candidates) + len(rejected_candidates). Used as "
+            "a cross-check to catch silently dropped candidates."
+        )
+    )
+
+    cost_usd: float = Field(
+        default=0.0,
+        description="Total API cost including per-candidate verification and web search fees",
+    )
+
+
+# ============================================================================
+# Agent 5 Input/Output Schemas
+# ============================================================================
+# Agent 5 (Implement Test Env) builds a working Python test harness for each
+# validated candidate. It runs N instances in parallel — one per candidate.
+#
+# Each builder agent is an autonomous tool-use loop: it reads the candidate's
+# API docs, writes harness code, runs smoke tests, fixes errors, and repeats
+# until the harness passes structural validation.
+#
+# The harness exposes a standardized `run(input_data) -> dict` interface that
+# Agent 5 (Integration) calls to execute test cases. Every harness must
+# return the SAME dict shape for fair comparison.
+# ============================================================================
+
+
+class Agent5Input(BaseModel):
+    """
+    What gets passed INTO each Agent 5 run.
+
+    Contains the validated candidates from Agent 4, plus context from Agent 1
+    (user understanding) and Agent 3 (test case formats) so the builder agent
+    knows what input/output types to support in the harness.
+    """
+
+    validated_candidates: list[ScreenedCandidate] = Field(
+        description=(
+            "Candidates that passed Agent 4 screening. Each has verified API "
+            "docs URL, auth method, data format notes, and confirmed capabilities. "
+            "Agent 5 builds one test harness per candidate."
+        )
+    )
+
+    user_understanding: UserUnderstandingOutput = Field(
+        description=(
+            "Agent 1's parsed understanding of the user's request. Provides "
+            "context on what the user needs (sub-tasks, domain, technical level) "
+            "so the builder agent can write harnesses that handle the right "
+            "input/output types."
+        )
+    )
+
+    test_cases: Agent3Result = Field(
+        description=(
+            "Agent 3's generated test cases. The builder agent uses this to "
+            "understand what input_types (text, structured_data, document_content) "
+            "and output_types (free_text, structured_json, extraction) the "
+            "harness needs to support."
+        )
+    )
+
+    trace_id: str = Field(
+        description="UUID for log correlation across the entire pipeline"
+    )
+
+    provider_credentials: dict[str, dict[str, str]] | None = Field(
+        default=None,
+        description=(
+            "Centralized provider credentials from the provider registry. "
+            "Maps normalized provider/candidate names to env var dicts. "
+            "Used for live API validation during harness building. "
+            "None if no registry is configured."
+        )
+    )
+
+
+class TestHarness(BaseModel):
+    """
+    A successfully built test harness for one candidate.
+
+    The harness is a Python module with a `run(input_data: dict) -> dict`
+    function that calls the candidate's API and returns standardized results.
+
+    WHY harness_code AND harness_dir?
+    harness_dir is the local filesystem path (for Agent 5 to import/run).
+    harness_code is the actual Python source (for portability — when the
+    harness needs to be shipped to a cloud container or stored in a database,
+    the code travels with the result, not tied to a local path).
+    """
+
+    candidate_name: str = Field(
+        description="Service/product name, e.g., 'Google Document AI'"
+    )
+
+    provider: str = Field(
+        description="Company or organization behind the service"
+    )
+
+    harness_dir: str = Field(
+        description=(
+            "Absolute path to the sandbox directory containing the harness "
+            "code (harness.py, requirements.txt, smoke_test.py). Agent 5 "
+            "uses this to import and run the harness."
+        )
+    )
+
+    entry_file: str = Field(
+        description="Filename of the main harness module, always 'harness.py'"
+    )
+
+    requirements: list[str] = Field(
+        description=(
+            "Python packages the harness needs, e.g., ['requests', "
+            "'google-cloud-documentai']. Agent 5 installs these before "
+            "running tests."
+        )
+    )
+
+    auth_env_vars: list[str] = Field(
+        description=(
+            "Environment variable names the harness reads for authentication, "
+            "e.g., ['GOOGLE_DOCAI_API_KEY']. Agent 5 must ensure these are "
+            "set before running tests. Convention: {PROVIDER}_API_KEY."
+        )
+    )
+
+    auth_method: str = Field(
+        description=(
+            "How the API authenticates, carried from ScreenedCandidate. "
+            "One of: 'api_key', 'oauth2', 'bearer_token', 'basic_auth', "
+            "'no_auth', 'unknown'."
+        )
+    )
+
+    supported_input_types: list[str] = Field(
+        description=(
+            "Input types the harness can handle, matching Agent 3's test case "
+            "input_type values: 'text', 'structured_data', 'document_content', "
+            "'conversation', 'image_description'."
+        )
+    )
+
+    supported_output_types: list[str] = Field(
+        description=(
+            "Output types the harness produces, matching Agent 3's test case "
+            "output_type values: 'free_text', 'structured_json', "
+            "'classification', 'extraction', 'action'."
+        )
+    )
+
+    smoke_test_passed: bool = Field(
+        description=(
+            "True if the structural smoke test passed — harness imports, "
+            "run() exists with correct signature, returns correct dict shape "
+            "with mocked HTTP. This does NOT mean real API calls work."
+        )
+    )
+
+    live_validation_attempted: bool = Field(
+        default=False,
+        description=(
+            "True if a live API call was attempted during building. "
+            "Requires credentials from the provider registry or env vars. "
+            "If False, the harness was only validated structurally."
+        )
+    )
+
+    live_validation_passed: bool | None = Field(
+        default=None,
+        description=(
+            "True if the live API call returned a valid response (even an "
+            "error like 'invalid input' counts — it proves the endpoint "
+            "exists and auth works). False if auth failed or endpoint not "
+            "found. None if live validation was not attempted."
+        )
+    )
+
+    live_validation_notes: str | None = Field(
+        default=None,
+        description=(
+            "Details of the live validation: what was sent, what came back, "
+            "and why it passed or failed. None if not attempted."
+        )
+    )
+
+    validation_notes: str = Field(
+        description=(
+            "What validation was performed and what happened. Includes "
+            "smoke test output, docs verification results, and any issues "
+            "encountered during building."
+        )
+    )
+
+    build_turns: int = Field(
+        description=(
+            "How many agent loop iterations (API calls) it took to build "
+            "this harness. Typical: 4-8. Max: 15."
+        )
+    )
+
+    build_cost_usd: float = Field(
+        description=(
+            "Estimated cost (USD) of building this harness — sum of all "
+            "API call costs during the builder loop."
+        )
+    )
+
+    harness_code: str = Field(
+        description=(
+            "The complete Python source code of harness.py. Stored here "
+            "for portability — when deploying to cloud containers, the code "
+            "travels with the result instead of depending on local paths."
+        )
+    )
+
+    api_knowledge: str | None = Field(
+        default=None,
+        description=(
+            "Comprehensive API understanding from Agent 5's research sub-agent. "
+            "Contains the full api_spec with INPUT_COMPATIBILITY matrix, "
+            "API_LIMITATIONS, ROUTING_TABLE, and DOC_MAP sections. Agent 5 "
+            "reads this directly for test classification — no file I/O or "
+            "re-research needed. None if research phase was skipped."
+        )
+    )
+
+
+class FailedHarness(BaseModel):
+    """
+    A candidate where harness building failed.
+
+    WHY failure_category?
+    Structured failure reasons enable:
+    1. Automated backfill requests to Agent 2 (Agent 5's job)
+    2. Analytics on why builds fail (e.g., "60% fail due to unusable docs")
+    3. Frontend display of actionable failure info
+    """
+
+    candidate_name: str = Field(
+        description="Service/product name that failed"
+    )
+
+    provider: str = Field(
+        description="Company or organization behind the failed service"
+    )
+
+    failure_reason: str = Field(
+        description=(
+            "Human-readable explanation of why the harness could not be built. "
+            "Should be specific: 'API docs at docs.example.com returned 403 "
+            "and no SDK quickstart could be found' rather than 'build failed'."
+        )
+    )
+
+    failure_category: str = Field(
+        description=(
+            "Structured failure reason. One of: "
+            "'docs_unusable' (API docs too vague, inaccessible, or incomplete), "
+            "'auth_blocked' (cannot set up auth without paid account/manual approval), "
+            "'api_incompatible' (API exists but doesn't support needed operations), "
+            "'build_timeout' (exceeded max turns or budget without passing smoke test), "
+            "'dependency_failure' (required packages cannot be installed), "
+            "'unknown' (unexpected failure not fitting other categories)"
+        )
+    )
+
+    partial_code: str | None = Field(
+        default=None,
+        description=(
+            "Last version of the harness code if any was generated before "
+            "failure. Useful for debugging and for manual completion."
+        )
+    )
+
+    turns_attempted: int = Field(
+        description="How many agent loop iterations were tried before giving up"
+    )
+
+
+class Agent5Result(BaseModel):
+    """
+    Agent 5's complete output. Consumed by Agent 5 (Integration).
+
+    WHY total_candidates_attempted?
+    Cross-check field — harnesses + failed_harnesses should sum to this
+    number. If they don't match, a candidate was silently dropped (bug).
+    The validator catches this.
+    """
+
+    harnesses: list[TestHarness] = Field(
+        description=(
+            "Successfully built test harnesses, one per candidate. Each "
+            "harness exposes a standardized run(input_data) -> dict interface "
+            "that Agent 5 calls to execute test cases."
+        )
+    )
+
+    failed_harnesses: list[FailedHarness] = Field(
+        description=(
+            "Candidates where harness building failed. Every validated "
+            "candidate from Agent 4 must appear in either harnesses or "
+            "failed_harnesses — none should be silently dropped."
+        )
+    )
+
+    total_candidates_attempted: int = Field(
+        description=(
+            "Total number of candidates that were attempted. Must equal "
+            "len(harnesses) + len(failed_harnesses). Used as a cross-check "
+            "to catch silently dropped candidates."
+        )
+    )
+
+    total_build_cost_usd: float = Field(
+        description=(
+            "Sum of all build costs across all candidates (both successful "
+            "and failed). Includes API call tokens + web search costs."
+        )
+    )
+
+    build_summary: str = Field(
+        description=(
+            "Overview of the build process: how many succeeded, how many "
+            "failed, common failure reasons, and total time/cost."
+        )
+    )
+
+    # ── Test execution results (merged from Agent 5) ──
+    # These fields are populated when Agent 5 runs test cases after building.
+    # Default values ensure backward compatibility with existing consumers.
+
+    candidate_runs: list["CandidateTestRun"] = Field(
+        default_factory=list,
+        description=(
+            "Test execution results for each successful harness. "
+            "Contains per-test-case results, aggregate metrics, and "
+            "evaluation scores. Empty if test execution was skipped."
+        )
+    )
+
+    failed_test_runs: list["FailedCandidateRun"] = Field(
+        default_factory=list,
+        description=(
+            "Candidates where test execution failed (setup error or "
+            ">50%% error rate). Empty if test execution was skipped."
+        )
+    )
+
+    total_test_cases: int = Field(
+        default=0,
+        description="Number of test cases from Agent 3"
+    )
+
+    total_test_cost_usd: float = Field(
+        default=0.0,
+        description="Sum of all candidate API costs + evaluation costs during testing"
+    )
+
+    test_execution_summary: str = Field(
+        default="",
+        description=(
+            "Summary of test execution: pass rates, costs, incompatible counts. "
+            "Empty string if test execution was skipped."
+        )
+    )
+
+
+# ============================================================================
+# Agent 5 Output Schemas
+# ============================================================================
+
+class CriterionScore(BaseModel):
+    """
+    Result of evaluating one judgement criterion against one test case output.
+
+    WHY BOTH score AND passed?
+    score (0.0-1.0) gives granular quality signal for Agent 7's ranking.
+    passed (bool) gives a binary verdict for the user-facing pass rate metric.
+    Both are needed for different consumers.
+    """
+
+    criterion: str = Field(
+        description="The criterion text from JudgementCriterion"
+    )
+
+    eval_type: str = Field(
+        description=(
+            "How this criterion was evaluated. One of: 'exact_match', "
+            "'semantic_similarity', 'contains_key_info', 'format_compliance', "
+            "'subjective_quality'"
+        )
+    )
+
+    weight: float = Field(
+        description="Importance weight from 0.0 to 1.0, from JudgementCriterion"
+    )
+
+    score: float = Field(
+        description=(
+            "Degree of satisfaction from 0.0 (completely fails) to 1.0 "
+            "(fully satisfies). For mechanical evaluation: binary 0.0 or 1.0. "
+            "For LLM evaluation: continuous scale."
+        )
+    )
+
+    passed: bool = Field(
+        description="True if score >= 0.5. Used for binary pass rate metrics."
+    )
+
+    reasoning: str = Field(
+        description=(
+            "Why this score was given. For mechanical evaluation: 'Exact match: "
+            "expected X, found X in output'. For LLM evaluation: model's "
+            "explanation of its judgment."
+        )
+    )
+
+
+class TestCaseResult(BaseModel):
+    """
+    Complete result of executing and evaluating one test case against one harness.
+
+    Combines execution metrics (latency, cost, tokens) with quality evaluation
+    (criteria scores, weighted score, pass/fail). This is the most granular
+    result unit — Agent 7 uses these for cross-candidate quality analysis.
+    """
+
+    test_case_id: str = Field(
+        description="The test case ID from Agent 3, e.g., 'tc-001'"
+    )
+
+    sub_task_ref: str = Field(
+        description="Which sub-task this tests, carried from TestCase for grouping"
+    )
+
+    input_sent: dict = Field(
+        description=(
+            "Exact input_data dict passed to harness.run(). Recorded for "
+            "debugging and for Agent 7 to see what was actually tested."
+        )
+    )
+
+    output_received: str = Field(
+        description="The harness output['output'] string — what the API returned"
+    )
+
+    raw_response: dict = Field(
+        description=(
+            "The harness output['raw_response'] dict — full API response "
+            "for debugging and deep analysis."
+        )
+    )
+
+    latency_ms: float = Field(
+        description="Round-trip API call time in milliseconds, measured by harness"
+    )
+
+    tokens_used: dict[str, int] | None = Field(
+        default=None,
+        description=(
+            "Token usage if reported by the API: {'input': N, 'output': M}. "
+            "None if the API doesn't report token counts."
+        )
+    )
+
+    cost_usd: float | None = Field(
+        default=None,
+        description=(
+            "Per-call cost in USD if known from the API response. None if "
+            "the API doesn't report costs."
+        )
+    )
+
+    success: bool = Field(
+        description=(
+            "True if the API call succeeded (harness returned success=True). "
+            "False means the API errored — not a quality judgment."
+        )
+    )
+
+    error: str | None = Field(
+        default=None,
+        description="Error message from the harness if success=False, else None"
+    )
+
+    skip_reason: str | None = Field(
+        default=None,
+        description=(
+            "Reason this test was skipped (not executed/evaluated). "
+            "Set when the harness returns INCOMPATIBLE or when file_required=true "
+            "but no file is available. Skipped tests don't count toward error rate."
+        )
+    )
+
+    criteria_scores: list[CriterionScore] = Field(
+        description=(
+            "Per-criterion evaluation results. One CriterionScore per "
+            "JudgementCriterion from the test case. Empty list if the API "
+            "call failed (success=False) — no output to evaluate."
+        )
+    )
+
+    weighted_score: float = Field(
+        description=(
+            "Overall quality score from 0.0 to 1.0, computed as the "
+            "weighted sum of criteria scores. 0.0 if API call failed."
+        )
+    )
+
+    passed: bool = Field(
+        description=(
+            "True if weighted_score >= pass threshold (default 0.5) AND "
+            "success=True. A test case can only pass if the API call "
+            "succeeded AND the output met quality criteria."
+        )
+    )
+
+
+class CandidateTestRun(BaseModel):
+    """
+    Complete test execution and evaluation results for one candidate.
+
+    One instance per successful harness from Agent 5. Contains all individual
+    test results plus aggregate metrics. Agent 7 consumes these for
+    cross-candidate quality analysis.
+    """
+
+    candidate_name: str = Field(
+        description="Service/product name, e.g., 'Klippa', 'Mindee'"
+    )
+
+    provider: str = Field(
+        description="Company or organization behind the service"
+    )
+
+    harness_dir: str = Field(
+        description="Path to the sandbox directory used for execution"
+    )
+
+    status: str = Field(
+        description=(
+            "Execution status. 'completed' = all tests ran and were evaluated. "
+            "'partial' = some tests ran before early abort. "
+            "'failed' = setup failed or >50%% error rate."
+        )
+    )
+
+    test_results: list[TestCaseResult] = Field(
+        description="Individual results for each test case executed"
+    )
+
+    # ── Aggregate metrics ──
+    total_tests: int = Field(
+        description="Total number of test cases attempted"
+    )
+
+    tests_passed: int = Field(
+        description="Test cases where passed=True (API succeeded AND quality met threshold)"
+    )
+
+    tests_failed: int = Field(
+        description="Test cases where passed=False but success=True (quality below threshold)"
+    )
+
+    tests_errored: int = Field(
+        description="Test cases where success=False (API call failed)"
+    )
+
+    tests_skipped: int = Field(
+        default=0,
+        description=(
+            "Test cases skipped due to INCOMPATIBLE input type or missing files. "
+            "These are not errors — they are legitimate API limitations."
+        )
+    )
+
+    success_rate: float = Field(
+        description="Fraction of tests where API call succeeded: (total - errored) / total"
+    )
+
+    pass_rate: float = Field(
+        description=(
+            "Fraction of successful tests that met quality threshold: "
+            "tests_passed / (total - errored). 0.0 if all errored."
+        )
+    )
+
+    avg_latency_ms: float = Field(
+        description="Mean latency across successful test cases"
+    )
+
+    p95_latency_ms: float = Field(
+        description="95th percentile latency across successful test cases"
+    )
+
+    total_cost_usd: float = Field(
+        description="Sum of per-test cost_usd from harness (candidate API costs)"
+    )
+
+    total_tokens: dict[str, int] | None = Field(
+        default=None,
+        description="Aggregated token usage: {'input': N, 'output': M}. None if unavailable."
+    )
+
+    evaluation_cost_usd: float = Field(
+        default=0.0,
+        description="Cost of the LLM evaluation call for this candidate"
+    )
+
+    refinement_cost_usd: float = Field(
+        default=0.0,
+        description="Cost of the harness refinement agent for this candidate"
+    )
+
+    refinement_changes: str = Field(
+        default="none",
+        description=(
+            "Description of changes made during refinement. 'none' if harness "
+            "was already correct. Helps debugging and transparency."
+        )
+    )
+
+    incompatible_test_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Test case IDs marked as genuinely incompatible with this API. "
+            "These are legitimate API limitations, not harness bugs."
+        )
+    )
+
+    recovery_attempted: bool = Field(
+        default=False,
+        description="True if the recovery agent was invoked for this candidate"
+    )
+
+    recovery_cost_usd: float = Field(
+        default=0.0,
+        description="Cost of recovery agent calls, if any"
+    )
+
+    execution_duration_ms: float = Field(
+        default=0.0,
+        description="Wall-clock time for this candidate's entire execution"
+    )
+
+
+class FailedCandidateRun(BaseModel):
+    """
+    A candidate where test execution failed — either setup failure or >50%
+    error rate during execution.
+
+    WHY separate from CandidateTestRun?
+    Failed candidates have different data: no quality metrics, no evaluation.
+    Keeping them separate makes the Agent5Result cleaner for downstream consumers
+    (Agent 7 only processes CandidateTestRun, ignores FailedCandidateRun).
+    """
+
+    candidate_name: str = Field(
+        description="Service/product name that failed"
+    )
+
+    provider: str = Field(
+        description="Company or organization behind the failed service"
+    )
+
+    failure_reason: str = Field(
+        description=(
+            "Human-readable explanation: 'Setup failed: cannot import harness', "
+            "'Error rate 78%% after 9 tests — early abort', etc."
+        )
+    )
+
+    error_rate: float = Field(
+        description="Fraction of tests that returned errors (success=False)"
+    )
+
+    tests_attempted: int = Field(
+        description="How many tests were run before failure/abort"
+    )
+
+    tests_errored: int = Field(
+        description="How many tests returned errors"
+    )
+
+    sample_errors: list[str] = Field(
+        description="First 3 distinct error messages for debugging"
+    )
+
+    recovery_attempted: bool = Field(
+        description="True if the recovery agent was invoked"
+    )
+
+
+# ── LLM Evaluation Structured Output Models ──
+# Used by client.messages.parse() in Agent 5's Phase 3 evaluation call.
+# These are NOT part of the pipeline output — they are intermediate models
+# for structuring the LLM's evaluation response.
+
+class CriterionScoreOutput(BaseModel):
+    """LLM's evaluation of a single criterion."""
+    criterion: str = Field(description="The criterion text being evaluated")
+    score: float = Field(description="Score from 0.0 to 1.0")
+    passed: bool = Field(description="True if score >= 0.5")
+    reasoning: str = Field(description="One sentence explaining the judgment")
+
+
+class TestCaseEvaluation(BaseModel):
+    """LLM's evaluation of all criteria for one test case."""
+    test_case_id: str = Field(description="The test case ID, e.g., 'tc-001'")
+    criteria_scores: list[CriterionScoreOutput] = Field(
+        description="Evaluation of each semantic/subjective criterion"
+    )
+
+
+class EvaluationBatchResult(BaseModel):
+    """LLM's batch evaluation of all test cases for one candidate."""
+    evaluations: list[TestCaseEvaluation] = Field(
+        description="One evaluation per test case that had LLM-evaluated criteria"
+    )

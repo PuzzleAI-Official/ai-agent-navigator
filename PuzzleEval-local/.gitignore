@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Environment
+.env
+.venv/
+
+# Provider API keys (NEVER commit)
+provider_registry.json
+
+# IDE
+.vscode/
+.idea/
+
+# Pipeline run outputs (intermediate agent data, summaries)
+runs/
+
+# Pytest
+.pytest_cache/
+
+# OS
+.DS_Store
+Thumbs.db

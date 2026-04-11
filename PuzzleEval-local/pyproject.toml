@@ -1,0 +1,70 @@
+# ============================================================================
+# PuzzleEval — Project Configuration
+# ============================================================================
+# This file replaces the old setup.py + requirements.txt approach.
+# It tells Python:
+#   1. What this project is called and its version
+#   2. What external libraries it needs (dependencies)
+#   3. How to run it from the command line (scripts)
+#
+# To install this project in development mode, run:
+#   pip install -e .
+#
+# To install with test dependencies:
+#   pip install -e ".[dev]"
+# ============================================================================
+
+[project]
+name = "puzzleeval"
+version = "0.1.0"
+description = "AI agent evaluation platform — find the right AI solution for your needs"
+requires-python = ">=3.11"
+
+# ---------------------------------------------------------------------------
+# Dependencies — these are the external libraries our code imports.
+# When you run `pip install -e .`, pip downloads and installs all of these.
+# ---------------------------------------------------------------------------
+dependencies = [
+    # Anthropic SDK — the official Python client for calling Claude's API.
+    # We use `client.messages.parse()` for structured outputs.
+    "anthropic>=0.88.0",
+
+    # Pydantic — data validation library. We define our input/output schemas
+    # as Pydantic models, which also get auto-converted to JSON Schema for
+    # Claude's structured output feature.
+    "pydantic>=2.0.0",
+
+    # python-docx — reads Microsoft Word (.docx) files. Claude can't natively
+    # read .docx files, so we extract the text ourselves and pass it to Claude.
+    # (Note: Claude CAN natively read PDFs and images — no library needed for those.)
+    "python-docx>=1.1.0",
+]
+
+# Dev dependencies — only needed for running tests, not for production.
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+]
+
+# ---------------------------------------------------------------------------
+# Entry point — this lets you run the CLI by typing `puzzleeval` in terminal.
+# Under the hood, it calls the `main()` function in puzzleeval/cli.py.
+# ---------------------------------------------------------------------------
+[project.scripts]
+puzzleeval = "puzzleeval.cli:main"
+
+# ---------------------------------------------------------------------------
+# Build system — tells pip how to build/install this project.
+# setuptools is the standard, you rarely need to change this.
+# ---------------------------------------------------------------------------
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# TestCase and TestHarness in schemas.py are Pydantic models, not test classes.
+# Suppress the PytestCollectionWarning about them.
+filterwarnings = [
+    "ignore::pytest.PytestCollectionWarning",
+]

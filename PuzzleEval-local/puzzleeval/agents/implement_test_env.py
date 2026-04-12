@@ -1336,6 +1336,7 @@ def _build_single_harness(
     input_data: Agent5Input,
     sandbox_dir: Path,
     logger,
+    progress_callback: "Callable[[str, dict], None] | None" = None,
 ) -> TestHarness | FailedHarness:
     """
     Build a test harness for one candidate using an autonomous tool-use loop
@@ -1642,6 +1643,25 @@ def _build_single_harness(
             "tool_results": [],
             "iterations": iterations_log,
         }
+
+        # Per-turn progress callback — let the frontend show live build progress
+        if progress_callback:
+            # Determine phase from model + flags
+            phase = "researching" if not api_spec_written else "building"
+            if smoke_ever_passed:
+                phase = "validating"
+            # Extract tool names used this turn
+            tool_names = [b.name for b in response.content if b.type == "tool_use"]
+            progress_callback("build_turn", {
+                "candidate_name": candidate.name,
+                "turn": turn + 1,
+                "max_turns": AGENT5_MAX_TURNS,
+                "phase": phase,
+                "model": current_model,
+                "cost_usd": round(call_cost, 4),
+                "tools_used": tool_names,
+            })
+
         for block in response.content:
             if block.type == "text":
                 turn_log["text"] += block.text
@@ -3143,7 +3163,10 @@ def _stage_test_files(
 #
 # ============================================================================
 
-def run_implement_test_env_agent(input_data: Agent5Input) -> Agent5Result:
+def run_implement_test_env_agent(
+    input_data: Agent5Input,
+    progress_callback: "Callable[[str, dict], None] | None" = None,
+) -> Agent5Result:
     """
     Run Agent 5. Takes validated candidates from Agent 4 and builds a test
     harness for each one in parallel.
@@ -3234,8 +3257,12 @@ def run_implement_test_env_agent(input_data: Agent5Input) -> Agent5Result:
                 "sandbox_dir": str(sandbox_dir),
             })
 
+            if progress_callback:
+                progress_callback("harness_started", {"candidate_name": candidate.name})
+
             future = executor.submit(
                 _build_single_harness, client, candidate, input_data, sandbox_dir, logger,
+                progress_callback=progress_callback,
             )
             future_to_index[future] = i
 
@@ -3244,7 +3271,21 @@ def run_implement_test_env_agent(input_data: Agent5Input) -> Agent5Result:
             idx = future_to_index[future]
             candidate_name = candidates[idx].name
             try:
-                results_by_index[idx] = future.result()
+                result = future.result()
+                results_by_index[idx] = result
+                if progress_callback:
+                    if isinstance(result, TestHarness):
+                        progress_callback("harness_completed", {
+                            "candidate_name": candidate_name,
+                            "success": True,
+                            "build_turns": result.build_turns,
+                            "build_cost_usd": result.build_cost_usd,
+                        })
+                    elif isinstance(result, FailedHarness):
+                        progress_callback("harness_failed", {
+                            "candidate_name": candidate_name,
+                            "failure_reason": result.failure_reason,
+                        })
             except Exception as e:
                 # Unexpected exception from thread — graceful degradation
                 logger.error(f"Unexpected error building {candidate_name}", extra={
@@ -3260,6 +3301,11 @@ def run_implement_test_env_agent(input_data: Agent5Input) -> Agent5Result:
                     partial_code=None,
                     turns_attempted=0,
                 )
+                if progress_callback:
+                    progress_callback("harness_failed", {
+                        "candidate_name": candidate_name,
+                        "failure_reason": str(e),
+                    })
 
     # ======================================================================
     # Assemble Agent5Result
@@ -3319,6 +3365,9 @@ def run_implement_test_env_agent(input_data: Agent5Input) -> Agent5Result:
         def _run_tests_for_candidate(harness):
             """Execute all tests for one candidate. Thread-safe — each candidate
             has its own sandbox, credentials, and API provider."""
+            if progress_callback:
+                progress_callback("test_execution_started", {"candidate_name": harness.candidate_name})
+
             sandbox_dir = Path(harness.harness_dir)
             staged_test_cases = _stage_test_files(test_cases, sandbox_dir, logger, input_data.trace_id)
             creds = _resolve_candidate_credentials(
@@ -3432,6 +3481,32 @@ def run_implement_test_env_agent(input_data: Agent5Input) -> Agent5Result:
                     **metrics,
                 },
             )
+
+            if progress_callback:
+                progress_callback("candidate_results_ready", {
+                    "candidate_name": harness.candidate_name,
+                    "provider": harness.provider,
+                    "tests_passed": metrics.get("tests_passed", 0),
+                    "tests_failed": metrics.get("tests_failed", 0),
+                    "pass_rate": metrics.get("pass_rate", 0),
+                    "avg_latency_ms": metrics.get("avg_latency_ms", 0),
+                    "total_cost_usd": metrics.get("total_cost_usd", 0),
+                    "overall_score": sum(tcr.weighted_score for tcr in run.test_results) / max(len(run.test_results), 1),
+                    "test_results": [
+                        {
+                            "test_case_id": tcr.test_case_id,
+                            "passed": tcr.passed,
+                            "weighted_score": tcr.weighted_score,
+                            "latency_ms": tcr.latency_ms,
+                            "criteria_scores": [
+                                {"criterion": cs.criterion, "score": cs.score,
+                                 "passed": cs.passed, "reasoning": cs.reasoning}
+                                for cs in tcr.criteria_scores
+                            ],
+                        }
+                        for tcr in run.test_results
+                    ],
+                })
 
             return run, metrics["total_cost_usd"] + eval_cost
 

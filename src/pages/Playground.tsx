@@ -1,158 +1,75 @@
 import { useState, useRef, useEffect } from "react";
 import { Link, useLocation } from "react-router-dom";
 import { motion, AnimatePresence } from "framer-motion";
-
-type Stage = "describe" | "upload" | "testing" | "results";
-
-interface Attachment {
-  name: string;
-  size: number;
-  type: string;
-}
-
-interface Message {
-  id: number;
-  role: "user" | "assistant";
-  content: string;
-  attachments?: Attachment[];
-}
-
-interface Candidate {
-  name: string;
-  type: string;
-  match: number;
-  status: "pending" | "testing" | "done";
-  performance?: number;
-  speed?: number;
-  cost?: number;
-}
-
-const MOCK_CANDIDATES: Candidate[] = [
-  { name: "GPT-4o", type: "LLM", match: 94, status: "pending" },
-  { name: "Claude 3.5 Sonnet", type: "LLM", match: 91, status: "pending" },
-  { name: "Gemini 2.0 Flash", type: "LLM", match: 87, status: "pending" },
-  { name: "Llama 3.1 70B", type: "LLM", match: 82, status: "pending" },
-  { name: "Mistral Large", type: "LLM", match: 78, status: "pending" },
-];
+import ReactMarkdown from "react-markdown";
+import { usePipelineRun } from "@/hooks/usePipelineRun";
+import { PipelineVisualization } from "@/components/playground/PipelineVisualization";
+import { ActivityFeed } from "@/components/playground/ActivityFeed";
+import { CandidateCard } from "@/components/playground/CandidateCard";
+import { ResultsComparison } from "@/components/playground/ResultsComparison";
+import type { Attachment } from "@/types/pipeline";
 
 const Playground = () => {
   const location = useLocation();
   const initialMessage = (location.state as any)?.initialMessage || "";
-  const [stage, setStage] = useState<Stage>("describe");
-  const [messages, setMessages] = useState<Message[]>([
-    {
-      id: 0,
-      role: "assistant",
-      content:
-        "Welcome to PuzzleAI. Describe the workflow or task you need an AI solution for, and I'll find the best candidates for you.",
-    },
-  ]);
+
+  const {
+    stage,
+    messages,
+    candidates,
+    pipelineProgress,
+    costAccumulator,
+    isLoading,
+    handleSend,
+    handleCancel,
+    activityEntries,
+    pipelineNodes,
+  } = usePipelineRun();
+
   const [input, setInput] = useState("");
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
+  const [activeTab, setActiveTab] = useState<"chat" | "activity">("chat");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const [candidates, setCandidates] = useState<Candidate[]>([]);
-  const [testProgress, setTestProgress] = useState(0);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [hasAutoSent, setHasAutoSent] = useState(false);
 
+  // Auto-scroll chat
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages]);
+    if (activeTab === "chat") {
+      chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    }
+  }, [messages, activeTab]);
 
-  // Simulate test progress
+  // Auto-switch to activity tab when pipeline starts
   useEffect(() => {
-    if (stage !== "testing") return;
-    const interval = setInterval(() => {
-      setTestProgress((prev) => {
-        if (prev >= 100) {
-          clearInterval(interval);
-          // Complete testing
-          setCandidates((c) =>
-            c.map((cand) => ({
-              ...cand,
-              status: "done" as const,
-              performance: Math.floor(Math.random() * 20) + 78,
-              speed: Math.floor(Math.random() * 400) + 100,
-              cost: +(Math.random() * 0.08 + 0.01).toFixed(4),
-            }))
-          );
-          setStage("results");
-          setMessages((m) => [
-            ...m,
-            {
-              id: Date.now(),
-              role: "assistant",
-              content:
-                "Testing complete. All candidates have been evaluated against your workflow. Check the results panel for the full breakdown.",
-            },
-          ]);
-          return 100;
-        }
-        // Update candidate statuses as progress advances
-        const progressStep = prev + 2;
-        setCandidates((c) =>
-          c.map((cand, i) => {
-            const threshold = (i + 1) * 18;
-            if (progressStep >= threshold + 20) {
-              return {
-                ...cand,
-                status: "done" as const,
-                performance: Math.floor(Math.random() * 20) + 78,
-                speed: Math.floor(Math.random() * 400) + 100,
-                cost: +(Math.random() * 0.08 + 0.01).toFixed(4),
-              };
-            }
-            if (progressStep >= threshold) {
-              return { ...cand, status: "testing" as const };
-            }
-            return cand;
-          })
-        );
-        return progressStep;
-      });
-    }, 200);
-    return () => clearInterval(interval);
-  }, [stage]);
+    if (stage === "pipeline" && activityEntries.length > 0) {
+      setActiveTab("activity");
+    }
+  }, [stage, activityEntries.length]);
 
   // Auto-send initial message from homepage
   useEffect(() => {
-    if (initialMessage && !hasAutoSent && stage === "describe") {
+    if (initialMessage && !hasAutoSent && stage === "conversation") {
       setHasAutoSent(true);
-      setInput(initialMessage);
-      // Trigger send after a brief delay
-      setTimeout(() => {
-        const userMsg: Message = { id: Date.now(), role: "user", content: initialMessage };
-        setMessages((m) => [...m, userMsg]);
-        setInput("");
-        setTimeout(() => {
-          setCandidates(MOCK_CANDIDATES);
-          setMessages((m) => [
-            ...m,
-            {
-              id: Date.now(),
-              role: "assistant",
-              content: `Great. I've identified ${MOCK_CANDIDATES.length} candidate AI solutions that match your workflow. You can review them in the right panel and add any specific tools manually.\n\nWhen ready, upload a test sample or describe your test criteria so we can benchmark them.`,
-            },
-          ]);
-          setStage("upload");
-        }, 1200);
-      }, 500);
+      setTimeout(() => handleSend(initialMessage, []), 500);
     }
-  }, [initialMessage, hasAutoSent, stage]);
+  }, [initialMessage, hasAutoSent, stage, handleSend]);
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
-    const newAttachments: Attachment[] = Array.from(files).map((f) => ({
-      name: f.name,
-      size: f.size,
-      type: f.type,
-    }));
-    setAttachments((prev) => [...prev, ...newAttachments]);
+    const newFiles = Array.from(files);
+    setPendingFiles((prev) => [...prev, ...newFiles]);
+    setAttachments((prev) => [
+      ...prev,
+      ...newFiles.map((f) => ({ name: f.name, size: f.size, type: f.type })),
+    ]);
     e.target.value = "";
   };
 
   const removeAttachment = (index: number) => {
+    setPendingFiles((prev) => prev.filter((_, i) => i !== index));
     setAttachments((prev) => prev.filter((_, i) => i !== index));
   };
 
@@ -162,103 +79,63 @@ const Playground = () => {
     return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
   };
 
-  const handleSend = () => {
-    if (!input.trim() && attachments.length === 0) return;
-    const userMsg: Message = { id: Date.now(), role: "user", content: input || (attachments.length > 0 ? `Uploaded ${attachments.length} file(s)` : ""), attachments: attachments.length > 0 ? [...attachments] : undefined };
-    setMessages((m) => [...m, userMsg]);
+  const onSend = () => {
+    if (!input.trim() && pendingFiles.length === 0) return;
+    handleSend(input, pendingFiles);
     setInput("");
+    setPendingFiles([]);
     setAttachments([]);
-
-    if (stage === "describe") {
-      setTimeout(() => {
-        setCandidates(MOCK_CANDIDATES);
-        setMessages((m) => [
-          ...m,
-          {
-            id: Date.now(),
-            role: "assistant",
-            content: `Great. I've identified ${MOCK_CANDIDATES.length} candidate AI solutions that match your workflow. You can review them in the right panel and add any specific tools manually.\n\nWhen ready, upload a test sample or describe your test criteria so we can benchmark them.`,
-          },
-        ]);
-        setStage("upload");
-      }, 1200);
-    } else if (stage === "upload") {
-      setTimeout(() => {
-        setMessages((m) => [
-          ...m,
-          {
-            id: Date.now(),
-            role: "assistant",
-            content:
-              "Understood. Starting benchmark tests now. Each candidate will be evaluated on performance, speed, and cost against your criteria.",
-          },
-        ]);
-        setCandidates((c) => c.map((cand) => ({ ...cand, status: "pending" as const })));
-        setTestProgress(0);
-        setStage("testing");
-      }, 800);
-    } else if (stage === "results") {
-      setTimeout(() => {
-        setMessages((m) => [
-          ...m,
-          {
-            id: Date.now(),
-            role: "assistant",
-            content:
-              "You can re-run tests with different parameters, or select a candidate to proceed with integration. Let me know how you'd like to move forward.",
-          },
-        ]);
-      }, 600);
-    }
   };
 
-  const stageLabels: Record<Stage, string> = {
-    describe: "Describe Workflow",
-    upload: "Define Test Criteria",
-    testing: "Running Tests",
-    results: "Results Ready",
+  // Stage indicator labels
+  const stageKeys = ["conversation", "research", "screening", "testing", "results"];
+  const stageLabels: Record<string, string> = {
+    conversation: "Conversation",
+    research: "Research",
+    screening: "Screening",
+    testing: "Testing",
+    results: "Results",
   };
+
+  const getDisplayStage = (): string => {
+    if (stage === "conversation") return "conversation";
+    if (stage === "results") return "results";
+    const completed = pipelineProgress.agents_completed;
+    if (completed.includes("agent_5")) return "results";
+    if (completed.includes("agent_4")) return "testing";
+    if (completed.includes("agent_2")) return "screening";
+    return "research";
+  };
+  const displayStage = getDisplayStage();
+
+  const showActivityTab = stage !== "conversation" || activityEntries.length > 0;
 
   return (
-    <div className="h-screen flex flex-col bg-[#0f1117] text-[#e0e0e6] font-sans overflow-hidden">
-      {/* Top Toolbar */}
-      <header className="h-12 border-b border-[#1e2028] bg-[#13141b] flex items-center justify-between px-4 shrink-0">
+    <div className="h-screen flex flex-col bg-[#0a0a0b] text-white/95 font-sans overflow-hidden">
+      {/* Header */}
+      <header className="h-12 border-b border-white/[0.06] bg-white/[0.03] backdrop-blur-xl flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-6">
           <Link to="/" className="flex items-center gap-0 mr-4">
-            <span className="font-grotesk font-bold text-[15px] tracking-[-0.03em] text-[#e0e0e6]">
-              puzzle
-            </span>
-            <span className="font-grotesk font-bold text-[15px] tracking-[-0.03em] text-[hsl(215,20%,50%)]">
-              ai
-            </span>
-            <span className="font-grotesk font-bold text-[15px] text-[hsl(215,20%,50%)]">
-              .
-            </span>
+            <span className="font-grotesk font-bold text-[15px] tracking-[-0.03em] text-[#f5f5f7]">puzzle</span>
+            <span className="font-grotesk font-bold text-[15px] tracking-[-0.03em] text-blue-400/70">ai</span>
+            <span className="font-grotesk font-bold text-[15px] text-blue-400/70">.</span>
           </Link>
-
-          {/* Stage indicators */}
           <div className="hidden md:flex items-center gap-1">
-            {(Object.keys(stageLabels) as Stage[]).map((s, i) => {
-              const isActive = s === stage;
-              const isPast =
-                Object.keys(stageLabels).indexOf(s) <
-                Object.keys(stageLabels).indexOf(stage);
+            {stageKeys.map((s, i) => {
+              const isActive = s === displayStage;
+              const isPast = stageKeys.indexOf(s) < stageKeys.indexOf(displayStage);
               return (
                 <div key={s} className="flex items-center gap-1">
                   {i > 0 && (
-                    <div
-                      className={`w-6 h-[1px] ${
-                        isPast ? "bg-[hsl(215,20%,50%)]" : "bg-[#2a2b35]"
-                      }`}
-                    />
+                    <div className={`w-6 h-[1px] ${isPast ? "bg-blue-400/40" : "bg-white/[0.06]"}`} />
                   )}
                   <div
-                    className={`px-3 py-1 text-[11px] font-grotesk font-medium uppercase tracking-[0.08em] transition-all ${
+                    className={`px-3 py-1 rounded-md text-[11px] font-grotesk font-medium uppercase tracking-[0.08em] transition-all ${
                       isActive
-                        ? "bg-[hsl(215,20%,50%)]/15 text-[hsl(215,20%,60%)] border border-[hsl(215,20%,50%)]/30"
+                        ? "bg-blue-500/10 text-blue-300/90 border border-blue-400/20"
                         : isPast
-                        ? "text-[#808090]"
-                        : "text-[#40404d]"
+                        ? "text-white/40"
+                        : "text-white/15"
                     }`}
                   >
                     {stageLabels[s]}
@@ -268,12 +145,29 @@ const Playground = () => {
             })}
           </div>
         </div>
-
         <div className="flex items-center gap-3">
-          <button className="text-[11px] font-grotesk font-medium uppercase tracking-[0.06em] text-[#606070] hover:text-[#a0a0b0] transition-colors px-3 py-1.5">
+          {stage === "pipeline" && (
+            <button
+              onClick={handleCancel}
+              className="text-[11px] font-grotesk font-medium uppercase tracking-[0.06em] text-red-400/90 hover:text-red-300 transition-colors px-3 py-1.5 rounded-md border border-red-400/15 hover:border-red-400/30 hover:bg-red-400/5"
+            >
+              Cancel Run
+            </button>
+          )}
+          {costAccumulator > 0 && (
+            <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/[0.04] border border-white/[0.06]">
+              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="text-white/25">
+                <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.2" />
+                <path d="M8 4.5v7M5.5 6.5h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+              </svg>
+              <span className="text-[11px] font-mono text-white/50">{Math.round(costAccumulator * 20)}</span>
+              <span className="text-[9px] font-grotesk text-white/25 uppercase tracking-[0.04em]">credits used</span>
+            </div>
+          )}
+          <button className="text-[11px] font-grotesk font-medium uppercase tracking-[0.06em] text-white/25 hover:text-white/50 transition-colors px-3 py-1.5">
             History
           </button>
-          <button className="text-[11px] font-grotesk font-medium uppercase tracking-[0.06em] text-[#606070] hover:text-[#a0a0b0] transition-colors px-3 py-1.5">
+          <button className="text-[11px] font-grotesk font-medium uppercase tracking-[0.06em] text-white/25 hover:text-white/50 transition-colors px-3 py-1.5">
             Settings
           </button>
         </div>
@@ -281,70 +175,151 @@ const Playground = () => {
 
       {/* Main content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Left: Chat Panel */}
-        <div className="w-[380px] lg:w-[420px] border-r border-[#1e2028] bg-[#111218] flex flex-col shrink-0">
-          {/* Chat header */}
-          <div className="px-5 py-3 border-b border-[#1e2028] flex items-center justify-between">
-            <span className="font-grotesk font-semibold text-[12px] uppercase tracking-[0.1em] text-[#808090]">
-              AI Assistant
-            </span>
-            <div className="w-2 h-2 bg-[hsl(215,20%,50%)] animate-pulse" style={{ transform: "rotate(45deg)" }} />
-          </div>
-
-          {/* Messages */}
-          <div className="flex-1 overflow-y-auto px-5 py-4 space-y-4 scrollbar-thin">
-            {messages.map((msg) => (
-              <motion.div
-                key={msg.id}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ duration: 0.3 }}
-                className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
+        {/* Left Panel */}
+        <div className="w-[380px] lg:w-[420px] border-r border-white/[0.06] bg-white/[0.02] flex flex-col shrink-0">
+          {/* Tab header */}
+          <div className="px-5 py-2 border-b border-white/[0.06] flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <button
+                onClick={() => setActiveTab("chat")}
+                className={`text-[11px] font-grotesk font-semibold uppercase tracking-[0.1em] px-2 py-1 transition-all ${
+                  activeTab === "chat"
+                    ? "text-white/90 border-b border-blue-400/50"
+                    : "text-white/25 hover:text-white/50"
+                }`}
               >
-                <div
-                  className={`max-w-[85%] px-4 py-3 text-[13px] leading-[1.7] ${
-                    msg.role === "user"
-                      ? "bg-[hsl(215,20%,50%)]/15 text-[#d0d0da] border border-[hsl(215,20%,50%)]/20"
-                      : "bg-[#1a1b24] text-[#b0b0bc] border border-[#22232e]"
+                Chat
+              </button>
+              {showActivityTab && (
+                <motion.button
+                  initial={{ opacity: 0, x: -10 }}
+                  animate={{ opacity: 1, x: 0 }}
+                  onClick={() => setActiveTab("activity")}
+                  className={`text-[11px] font-grotesk font-semibold uppercase tracking-[0.1em] px-2 py-1 transition-all ${
+                    activeTab === "activity"
+                      ? "text-white/90 border-b border-blue-400/50"
+                      : "text-white/25 hover:text-white/50"
                   }`}
                 >
-                  {msg.content}
-                  {msg.attachments && msg.attachments.length > 0 && (
-                    <div className="mt-2 space-y-1">
-                      {msg.attachments.map((att, i) => (
-                        <div key={i} className="flex items-center gap-2 px-2 py-1.5 bg-[#0f1017]/50 border border-[#2a2b35]/50 text-[11px]">
-                          <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 text-[#606070]">
-                            <path d="M9 1H4a1 1 0 00-1 1v12a1 1 0 001 1h8a1 1 0 001-1V5L9 1z" stroke="currentColor" strokeWidth="1.2" />
-                            <path d="M9 1v4h4" stroke="currentColor" strokeWidth="1.2" />
-                          </svg>
-                          <span className="text-[#a0a0b0] truncate">{att.name}</span>
-                          <span className="text-[#40404d] shrink-0">{formatFileSize(att.size)}</span>
-                        </div>
-                      ))}
-                    </div>
+                  Activity
+                  {stage === "pipeline" && (
+                    <span className="ml-1.5 w-1.5 h-1.5 bg-[hsl(220,14%,56%)] rounded-full inline-block animate-pulse" />
                   )}
-                </div>
-              </motion.div>
-            ))}
-            <div ref={chatEndRef} />
+                </motion.button>
+              )}
+            </div>
+            <div className="flex items-center gap-2">
+              {isLoading && (
+                <span className="text-[10px] font-grotesk uppercase tracking-[0.1em] text-blue-400/70 animate-pulse">
+                  Thinking...
+                </span>
+              )}
+              <div className="w-2 h-2 bg-blue-400/60 animate-pulse" style={{ transform: "rotate(45deg)" }} />
+            </div>
           </div>
 
-          {/* Input */}
-          <div className="p-4 border-t border-[#1e2028]">
-            {/* Attachment previews */}
+          {/* Tab content */}
+          {activeTab === "chat" ? (
+            <>
+              {/* Chat Messages */}
+              <div className="flex-1 overflow-y-auto px-5 py-4 space-y-5 scrollbar-thin">
+                {messages.map((msg) => (
+                  <motion.div
+                    key={msg.id}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.3 }}
+                    className={`flex gap-3 ${msg.role === "user" ? "flex-row-reverse" : "flex-row"}`}
+                  >
+                    {/* Avatar */}
+                    <div className={`w-7 h-7 shrink-0 flex items-center justify-center rounded-full mt-0.5 ${
+                      msg.role === "user"
+                        ? "bg-blue-500/15 border border-blue-400/20"
+                        : "bg-white/[0.04] border border-white/[0.08]"
+                    }`}>
+                      {msg.role === "user" ? (
+                        <svg width="12" height="12" viewBox="0 0 16 16" fill="none">
+                          <circle cx="8" cy="5" r="3" stroke="rgba(255,255,255,0.4)" strokeWidth="1.2" />
+                          <path d="M2 14c0-3.3 2.7-6 6-6s6 2.7 6 6" stroke="rgba(255,255,255,0.4)" strokeWidth="1.2" />
+                        </svg>
+                      ) : (
+                        <div className="w-2.5 h-2.5 bg-blue-400/60" style={{ transform: "rotate(45deg)" }} />
+                      )}
+                    </div>
+
+                    {/* Message content */}
+                    <div
+                      className={`max-w-[80%] px-4 py-3 text-[14px] leading-[1.7] ${
+                        msg.role === "user"
+                          ? "bg-blue-500/10 text-white/90 border border-blue-400/15 rounded-2xl rounded-tr-sm"
+                          : "bg-white/[0.04] text-white/80 border border-white/[0.06] rounded-2xl rounded-tl-sm"
+                      }`}
+                    >
+                      {msg.role === "assistant" ? (
+                        <div className="prose prose-invert prose-sm max-w-none [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_code]:bg-[#141416] [&_code]:px-1 [&_code]:py-0.5 [&_code]:text-[12px] [&_code]:text-white/55">
+                          <ReactMarkdown>{msg.content}</ReactMarkdown>
+                        </div>
+                      ) : (
+                        <span className="whitespace-pre-wrap">{msg.content}</span>
+                      )}
+                      {msg.attachments && msg.attachments.length > 0 && (
+                        <div className="mt-2 space-y-1">
+                          {msg.attachments.map((att, i) => (
+                            <div key={i} className="flex items-center gap-2 px-2 py-1.5 bg-[#141416]/50 border border-[#2c2c2e]/50 text-[11px] rounded">
+                              <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 text-white/35">
+                                <path d="M9 1H4a1 1 0 00-1 1v12a1 1 0 001 1h8a1 1 0 001-1V5L9 1z" stroke="currentColor" strokeWidth="1.2" />
+                                <path d="M9 1v4h4" stroke="currentColor" strokeWidth="1.2" />
+                              </svg>
+                              <span className="text-white/55 truncate">{att.name}</span>
+                              <span className="text-[#3a3a3c] shrink-0">{formatFileSize(att.size)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </motion.div>
+                ))}
+
+                {/* Typing indicator */}
+                {isLoading && (
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    className="flex gap-3"
+                  >
+                    <div className="w-7 h-7 shrink-0 flex items-center justify-center rounded-full bg-white/[0.04] border border-white/[0.08]">
+                      <div className="w-2.5 h-2.5 bg-blue-400/60" style={{ transform: "rotate(45deg)" }} />
+                    </div>
+                    <div className="bg-white/[0.04] border border-white/[0.06] rounded-2xl rounded-tl-sm px-4 py-3 flex items-center gap-1.5">
+                      <motion.span animate={{ opacity: [0.2, 0.8, 0.2] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0 }} className="w-1.5 h-1.5 bg-white/50 rounded-full" />
+                      <motion.span animate={{ opacity: [0.2, 0.8, 0.2] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0.2 }} className="w-1.5 h-1.5 bg-white/50 rounded-full" />
+                      <motion.span animate={{ opacity: [0.2, 0.8, 0.2] }} transition={{ duration: 1.2, repeat: Infinity, delay: 0.4 }} className="w-1.5 h-1.5 bg-white/50 rounded-full" />
+                    </div>
+                  </motion.div>
+                )}
+
+                <div ref={chatEndRef} />
+              </div>
+            </>
+          ) : (
+            <ActivityFeed entries={activityEntries} />
+          )}
+
+          {/* Input (always visible) */}
+          <div className="p-4 border-t border-white/[0.06]">
             {attachments.length > 0 && (
               <div className="mb-2 space-y-1">
                 {attachments.map((att, i) => (
-                  <div key={i} className="flex items-center justify-between gap-2 px-3 py-2 bg-[#1a1b24] border border-[#2a2b35] text-[11px]">
+                  <div key={i} className="flex items-center justify-between gap-2 px-3 py-2 bg-white/[0.03] border border-white/[0.06] text-[11px]">
                     <div className="flex items-center gap-2 min-w-0">
-                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 text-[#606070]">
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" className="shrink-0 text-white/35">
                         <path d="M9 1H4a1 1 0 00-1 1v12a1 1 0 001 1h8a1 1 0 001-1V5L9 1z" stroke="currentColor" strokeWidth="1.2" />
                         <path d="M9 1v4h4" stroke="currentColor" strokeWidth="1.2" />
                       </svg>
-                      <span className="text-[#a0a0b0] truncate">{att.name}</span>
-                      <span className="text-[#40404d] shrink-0">{formatFileSize(att.size)}</span>
+                      <span className="text-white/55 truncate">{att.name}</span>
+                      <span className="text-[#3a3a3c] shrink-0">{formatFileSize(att.size)}</span>
                     </div>
-                    <button onClick={() => removeAttachment(i)} className="text-[#50505d] hover:text-[#a0a0b0] transition-colors shrink-0">
+                    <button onClick={() => removeAttachment(i)} className="text-white/20 hover:text-white/55 transition-colors shrink-0">
                       <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
                         <path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" strokeWidth="1.2" />
                       </svg>
@@ -353,17 +328,11 @@ const Playground = () => {
                 ))}
               </div>
             )}
-            <input
-              ref={fileInputRef}
-              type="file"
-              multiple
-              onChange={handleFileSelect}
-              className="hidden"
-            />
-            <div className="flex items-center gap-0 bg-[#1a1b24] border border-[#2a2b35] focus-within:border-[hsl(215,20%,50%)]/40 transition-colors">
+            <input ref={fileInputRef} type="file" multiple onChange={handleFileSelect} className="hidden" />
+            <div className="flex items-center gap-0 rounded-xl bg-white/[0.04] border border-white/[0.08] focus-within:border-blue-400/30 transition-colors">
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="px-3 py-3 text-[#50505d] hover:text-[#a0a0b0] transition-colors shrink-0"
+                className="px-3 py-3 text-white/20 hover:text-white/55 transition-colors shrink-0"
                 title="Attach files"
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
@@ -373,235 +342,96 @@ const Playground = () => {
               <input
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleSend()}
-                placeholder={
-                  stage === "describe"
-                    ? "Describe your workflow..."
-                    : stage === "upload"
-                    ? "Describe test criteria or paste a sample..."
-                    : "Ask a follow-up question..."
-                }
-                className="flex-1 bg-transparent px-2 py-3 text-[13px] text-[#e0e0e6] placeholder:text-[#40404d] outline-none font-sans"
+                onKeyDown={(e) => e.key === "Enter" && !isLoading && onSend()}
+                placeholder={stage === "conversation" ? "Describe your workflow..." : "Ask a follow-up question..."}
+                disabled={isLoading}
+                className="flex-1 bg-transparent px-2 py-3 text-[13px] text-[#f5f5f7] placeholder:text-[#3a3a3c] outline-none font-sans disabled:opacity-50"
               />
               <button
-                onClick={handleSend}
-                className="px-4 py-3 text-[hsl(215,20%,50%)] hover:text-[hsl(215,20%,60%)] transition-colors"
+                onClick={onSend}
+                disabled={isLoading}
+                className="px-4 py-3 text-blue-400/70 hover:text-blue-300/80 transition-colors disabled:opacity-50"
               >
                 <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M14 2L7 9M14 2L10 14L7 9M14 2L2 6L7 9"
-                    stroke="currentColor"
-                    strokeWidth="1.2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
+                  <path d="M14 2L7 9M14 2L10 14L7 9M14 2L2 6L7 9" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
             </div>
-            {stage === "upload" && (
-              <button className="mt-2 w-full py-2 border border-dashed border-[#2a2b35] text-[11px] font-grotesk uppercase tracking-[0.06em] text-[#606070] hover:text-[#a0a0b0] hover:border-[#40404d] transition-all">
-                + Upload test sample
-              </button>
-            )}
           </div>
         </div>
 
-        {/* Right: Results Panel */}
-        <div className="flex-1 bg-[#0f1017] overflow-y-auto">
-          <AnimatePresence mode="wait">
-            {/* Describe stage — waiting */}
-            {stage === "describe" && (
-              <motion.div
-                key="describe"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="h-full flex flex-col items-center justify-center px-8"
-              >
-                <div className="w-16 h-16 border border-[#2a2b35] flex items-center justify-center mb-6">
-                  <div className="w-6 h-6 border border-[#40404d]" style={{ transform: "rotate(45deg)" }} />
-                </div>
-                <h2 className="font-grotesk font-semibold text-[15px] text-[#808090] mb-2">
-                  Waiting for workflow description
-                </h2>
-                <p className="text-[13px] text-[#50505d] max-w-md text-center leading-relaxed">
-                  Tell us about your use case in the chat panel. We'll analyze it and find AI solutions that match your requirements.
-                </p>
-              </motion.div>
-            )}
+        {/* Right Panel */}
+        <div className="flex-1 bg-[#0a0a0b] flex flex-col overflow-hidden">
+          {/* Pipeline Visualization */}
+          <PipelineVisualization nodes={pipelineNodes} visible={stage !== "conversation"} />
 
-            {/* Upload stage — show candidates */}
-            {(stage === "upload" || stage === "testing" || stage === "results") && (
-              <motion.div
-                key="candidates"
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="p-6 lg:p-8"
-              >
-                {/* Section header */}
-                <div className="flex items-center justify-between mb-6">
-                  <div>
-                    <h2 className="font-grotesk font-semibold text-[14px] text-[#c0c0cc] tracking-[-0.01em]">
-                      Candidate AI Solutions
-                    </h2>
-                    <p className="text-[12px] text-[#50505d] mt-1">
-                      {candidates.length} matches found
-                    </p>
+          {/* Scrollable content */}
+          <div className="flex-1 overflow-y-auto">
+            <AnimatePresence mode="wait">
+              {/* Waiting state */}
+              {stage === "conversation" && candidates.length === 0 && (
+                <motion.div
+                  key="waiting"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="h-full flex flex-col items-center justify-center px-8"
+                >
+                  <div className="w-16 h-16 border border-[#2c2c2e] flex items-center justify-center mb-6">
+                    <div className="w-6 h-6 border border-[#3a3a3c]" style={{ transform: "rotate(45deg)" }} />
                   </div>
-                  {stage === "upload" && (
-                    <button className="text-[11px] font-grotesk font-medium uppercase tracking-[0.06em] text-[hsl(215,20%,50%)] hover:text-[hsl(215,20%,60%)] transition-colors px-3 py-1.5 border border-[hsl(215,20%,50%)]/20 hover:border-[hsl(215,20%,50%)]/40">
-                      + Add manually
-                    </button>
-                  )}
-                </div>
+                  <h2 className="font-grotesk font-semibold text-[15px] text-white/35 mb-2">
+                    Waiting for workflow description
+                  </h2>
+                  <p className="text-[13px] text-white/20 max-w-md text-center leading-relaxed">
+                    Tell us about your use case in the chat panel. We'll analyze it and find AI solutions that match your requirements.
+                  </p>
+                </motion.div>
+              )}
 
-                {/* Test progress bar */}
-                {stage === "testing" && (
-                  <div className="mb-6">
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-[11px] font-grotesk uppercase tracking-[0.08em] text-[#606070]">
-                        Testing Progress
-                      </span>
-                      <span className="text-[11px] font-mono text-[hsl(215,20%,50%)]">
-                        {testProgress}%
-                      </span>
+              {/* Pipeline stage — show candidate cards */}
+              {stage === "pipeline" && candidates.length > 0 && (
+                <motion.div
+                  key="candidates"
+                  initial={{ opacity: 0, y: 20 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  className="p-6 lg:p-8"
+                >
+                  <div className="flex items-center justify-between mb-5">
+                    <div>
+                      <h2 className="font-display text-[18px] text-white/90 tracking-[-0.01em]">
+                        Candidates
+                      </h2>
+                      <p className="text-[12px] text-white/25 mt-0.5 font-sans">{candidates.length} discovered</p>
                     </div>
-                    <div className="h-[2px] bg-[#1e2028] w-full">
-                      <motion.div
-                        className="h-full bg-[hsl(215,20%,50%)]"
-                        style={{ width: `${testProgress}%` }}
-                        transition={{ duration: 0.2 }}
-                      />
-                    </div>
+                    {pipelineProgress.current_agent && (
+                      <span className="text-[11px] font-grotesk tracking-[0.04em] text-blue-400/60 animate-pulse">
+                        {pipelineProgress.current_agent}
+                      </span>
+                    )}
                   </div>
-                )}
+                  <div className="space-y-2">
+                    <AnimatePresence>
+                      {candidates.map((cand, i) => (
+                        <CandidateCard key={cand.name} candidate={cand} index={i} />
+                      ))}
+                    </AnimatePresence>
+                  </div>
+                </motion.div>
+              )}
 
-                {/* Candidate cards */}
-                <div className="space-y-3">
-                  {candidates.map((cand, i) => (
-                    <motion.div
-                      key={cand.name}
-                      initial={{ opacity: 0, x: 20 }}
-                      animate={{ opacity: 1, x: 0 }}
-                      transition={{ delay: i * 0.08 }}
-                      className={`border p-4 lg:p-5 transition-all ${
-                        cand.status === "testing"
-                          ? "border-[hsl(215,20%,50%)]/30 bg-[hsl(215,20%,50%)]/[0.03]"
-                          : cand.status === "done"
-                          ? "border-[#22232e] bg-[#13141b]"
-                          : "border-[#1e2028] bg-[#111218]"
-                      }`}
-                    >
-                      <div className="flex items-start justify-between">
-                        <div className="flex items-center gap-3">
-                          {/* Status indicator */}
-                          <div
-                            className={`w-2.5 h-2.5 shrink-0 ${
-                              cand.status === "testing"
-                                ? "bg-[hsl(215,20%,50%)] animate-pulse"
-                                : cand.status === "done"
-                                ? "bg-[hsl(215,25%,60%)]"
-                                : "bg-[#2a2b35]"
-                            }`}
-                            style={{ transform: "rotate(45deg)" }}
-                          />
-                          <div>
-                            <h3 className="font-grotesk font-semibold text-[13px] text-[#d0d0da]">
-                              {cand.name}
-                            </h3>
-                            <span className="text-[11px] text-[#50505d] font-mono">
-                              {cand.type} · {cand.match}% match
-                            </span>
-                          </div>
-                        </div>
-
-                        {cand.status === "testing" && (
-                          <span className="text-[10px] font-grotesk uppercase tracking-[0.1em] text-[hsl(215,20%,50%)] animate-pulse">
-                            Testing...
-                          </span>
-                        )}
-                      </div>
-
-                      {/* Results */}
-                      {cand.status === "done" && cand.performance != null && (
-                        <motion.div
-                          initial={{ opacity: 0, height: 0 }}
-                          animate={{ opacity: 1, height: "auto" }}
-                          transition={{ duration: 0.4 }}
-                          className="mt-4 pt-4 border-t border-[#1e2028]"
-                        >
-                          <div className="grid grid-cols-3 gap-4">
-                            <div>
-                              <span className="text-[10px] font-grotesk uppercase tracking-[0.1em] text-[#50505d] block mb-1">
-                                Performance
-                              </span>
-                              <span className="font-mono text-[18px] font-medium text-[#d0d0da]">
-                                {cand.performance}
-                              </span>
-                              <span className="text-[11px] text-[#40404d] ml-0.5">/100</span>
-                            </div>
-                            <div>
-                              <span className="text-[10px] font-grotesk uppercase tracking-[0.1em] text-[#50505d] block mb-1">
-                                Speed
-                              </span>
-                              <span className="font-mono text-[18px] font-medium text-[#d0d0da]">
-                                {cand.speed}
-                              </span>
-                              <span className="text-[11px] text-[#40404d] ml-0.5">ms</span>
-                            </div>
-                            <div>
-                              <span className="text-[10px] font-grotesk uppercase tracking-[0.1em] text-[#50505d] block mb-1">
-                                Cost
-                              </span>
-                              <span className="font-mono text-[18px] font-medium text-[#d0d0da]">
-                                ${cand.cost}
-                              </span>
-                              <span className="text-[11px] text-[#40404d] ml-0.5">/call</span>
-                            </div>
-                          </div>
-
-                          {/* Performance bar */}
-                          <div className="mt-3 h-[3px] bg-[#1e2028] w-full">
-                            <motion.div
-                              className="h-full bg-gradient-to-r from-[hsl(215,20%,40%)] to-[hsl(215,25%,60%)]"
-                              initial={{ width: 0 }}
-                              animate={{ width: `${cand.performance}%` }}
-                              transition={{ duration: 0.8, delay: 0.2 }}
-                            />
-                          </div>
-                        </motion.div>
-                      )}
-                    </motion.div>
-                  ))}
-                </div>
-
-                {/* Results summary */}
-                {stage === "results" && (
-                  <motion.div
-                    initial={{ opacity: 0, y: 20 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    transition={{ delay: 0.3 }}
-                    className="mt-8 border border-[hsl(215,20%,50%)]/20 bg-[hsl(215,20%,50%)]/[0.03] p-6"
-                  >
-                    <h3 className="font-grotesk font-semibold text-[13px] uppercase tracking-[0.06em] text-[hsl(215,20%,60%)] mb-3">
-                      Recommendation
-                    </h3>
-                    <p className="text-[13px] text-[#a0a0b0] leading-relaxed">
-                      Based on your workflow requirements,{" "}
-                      <span className="text-[#d0d0da] font-medium">
-                        {candidates.sort((a, b) => (b.performance ?? 0) - (a.performance ?? 0))[0]?.name}
-                      </span>{" "}
-                      delivers the best balance of performance and cost. Consider{" "}
-                      <span className="text-[#d0d0da] font-medium">
-                        {candidates.sort((a, b) => (a.speed ?? 999) - (b.speed ?? 999))[0]?.name}
-                      </span>{" "}
-                      if latency is your primary concern.
-                    </p>
-                  </motion.div>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
+              {/* Results stage — side-by-side comparison */}
+              {stage === "results" && candidates.length > 0 && (
+                <motion.div
+                  key="results"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                >
+                  <ResultsComparison candidates={candidates} />
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </div>
         </div>
       </div>
     </div>

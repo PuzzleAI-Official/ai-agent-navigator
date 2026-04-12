@@ -22,3 +22,11 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# API server
+puzzleeval-api/.env
+puzzleeval-api/uploads/
+puzzleeval-api/runs/
+
+# PuzzleEval
+PuzzleEval-local/

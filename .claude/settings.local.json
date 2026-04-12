@@ -6,7 +6,24 @@
       "Bash(git push:*)",
       "Bash(gh api:*)",
       "Bash(where gh:*)",
-      "Bash(git rm:*)"
+      "Bash(git rm:*)",
+      "Bash(python3)",
+      "Bash(pip --version)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"from main import app; print\\('FastAPI app loaded successfully'\\)\")",
+      "Bash(npx tsc:*)",
+      "Bash(python -m uvicorn main:app --port 8001 --host 0.0.0.0)",
+      "Bash(curl -s http://localhost:8001/api/health)",
+      "mcp__Claude_Preview__preview_start",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //PID 34396 //F)",
+      "Bash(taskkill //PID 27016 //F)",
+      "Bash(npm install:*)",
+      "Bash(taskkill //PID 34036 //F)",
+      "Bash(python -c \"from main import app; print\\('OK'\\)\")",
+      "Bash(python -c ':*)",
+      "Bash(xargs grep:*)",
+      "Bash(python -c \"import sys,json; print\\(json.dumps\\(json.load\\(sys.stdin\\), indent=2\\)\\)\")"
     ]
   }
 }

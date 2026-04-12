@@ -146,7 +146,7 @@ export function ActivityFeed({ entries }: Props) {
                   )}
                   {section.cost != null && (
                     <span className="text-[10px] font-mono text-white/30">
-                      {Math.round(section.cost * 20)} credits
+                      {(section.cost * 20).toFixed(2)} credits
                     </span>
                   )}
                 </div>

@@ -160,7 +160,7 @@ const Playground = () => {
                 <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.2" />
                 <path d="M8 4.5v7M5.5 6.5h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
               </svg>
-              <span className="text-[11px] font-mono text-white/50">{Math.round(costAccumulator * 20)}</span>
+              <span className="text-[11px] font-mono text-white/50">{(costAccumulator * 20).toFixed(2)}</span>
               <span className="text-[9px] font-grotesk text-white/25 uppercase tracking-[0.04em]">credits used</span>
             </div>
           )}

@@ -3208,6 +3208,12 @@ def run_implement_test_env_agent(
     )
     candidates = sorted_candidates[:AGENT5_MAX_CANDIDATES]
 
+    # Emit the authoritative selection — this is the ONLY place that decides which candidates get built
+    if progress_callback:
+        progress_callback("candidates_selected", {
+            "selected": [c.name for c in candidates],
+        })
+
     if len(all_candidates) > len(candidates):
         logger.info(
             f"Selected top {len(candidates)} of {len(all_candidates)} candidates by user-fit score",

@@ -330,13 +330,8 @@ async def run_pipeline(state: RunState):
             # based on which candidates actually got harnesses built.
             # The harness_started callbacks will show progress in real-time.
 
-            # Track which candidates Agent 5 actually selects
-            _selected_candidates = set()
-            _selection_emitted = False
-
             # Define progress callback that emits SSE events
             def _agent5_progress(event_type: str, data: dict):
-                nonlocal _selection_emitted
                 name = data.get("candidate_name", "")
 
                 if event_type == "build_turn":
@@ -371,7 +366,7 @@ async def run_pipeline(state: RunState):
 
                     emit("agent_activity", {
                         "agent": "agent_5",
-                        "message": f"{name}: Turn {turn_num}/{max_turns} — {phase_label}{tool_desc} ({round(cost * 20)} credits)",
+                        "message": f"{name}: Turn {turn_num}/{max_turns} — {phase_label}{tool_desc} ({cost * 20:.2f} credits)",
                         "candidate_name": name,
                     })
                     return
@@ -379,25 +374,18 @@ async def run_pipeline(state: RunState):
                 # Structural events — emit both the typed event AND activity
                 emit(event_type, data)
 
-                if event_type == "harness_started":
-                    _selected_candidates.add(name)
-                    # Emit candidates_selected once we know all selected (first batch arrives together)
-                    if not _selection_emitted and len(_selected_candidates) > 0:
-                        # Delay emission slightly — Agent 5 submits all candidates to executor at once,
-                        # so all harness_started events fire in rapid succession before any builds start
-                        import threading
-                        def _emit_selection():
-                            nonlocal _selection_emitted
-                            import time; time.sleep(0.5)  # Wait for all harness_started to fire
-                            if not _selection_emitted:
-                                _selection_emitted = True
-                                emit("candidates_selected", {"selected": list(_selected_candidates)})
-                        threading.Thread(target=_emit_selection, daemon=True).start()
+                if event_type == "candidates_selected":
+                    # Authoritative selection from Agent 5's internal logic
+                    emit("candidates_selected", data)
+                    selected = data.get("selected", [])
+                    emit("agent_activity", {"agent": "agent_5", "message": f"Selected {len(selected)} candidates: {', '.join(selected)}", "status": "info"})
+                    return
+                elif event_type == "harness_started":
                     emit("agent_activity", {"agent": "agent_5", "message": f"Building harness for {name}...", "candidate_name": name})
                 elif event_type == "harness_completed":
                     turns = data.get("build_turns", 0)
                     cost = data.get("build_cost_usd", 0)
-                    emit("agent_activity", {"agent": "agent_5", "message": f"Harness built for {name} ({turns} turns, {round(cost * 20)} credits)", "candidate_name": name, "status": "success"})
+                    emit("agent_activity", {"agent": "agent_5", "message": f"Harness built for {name} ({turns} turns, {cost * 20:.2f} credits)", "candidate_name": name, "status": "success"})
                 elif event_type == "harness_failed":
                     reason = data.get("failure_reason", "")[:80]
                     emit("agent_activity", {"agent": "agent_5", "message": f"Build failed for {name}: {reason}", "candidate_name": name, "status": "failure"})
@@ -485,7 +473,7 @@ async def _emit_mock_agent5_progress(state: RunState, emit):
         turns = h.get("build_turns", 0)
         cost = h.get("build_cost_usd", 0)
         emit("harness_completed", {"candidate_name": name, "success": True, "build_turns": turns, "build_cost_usd": cost})
-        emit("agent_activity", {"agent": "agent_5", "message": f"Harness built for {name} ({turns} turns, {round(cost * 20)} credits)", "candidate_name": name, "status": "success"})
+        emit("agent_activity", {"agent": "agent_5", "message": f"Harness built for {name} ({turns} turns, {cost * 20:.2f} credits)", "candidate_name": name, "status": "success"})
         await asyncio.sleep(0.3)
 
     for fh in state.agent5_result.get("failed_harnesses", []):

@@ -217,7 +217,7 @@ export function CandidateCard({ candidate: c, index }: Props) {
 
         {isBuilt && c.build_turns != null && (
           <div className="mt-2.5 text-[11px] text-white/30 font-mono">
-            {c.build_turns} turns · {Math.round((c.build_cost_usd ?? 0) * 20)} credits
+            {c.build_turns} turns · {((c.build_cost_usd ?? 0) * 20).toFixed(2)} credits
           </div>
         )}
 

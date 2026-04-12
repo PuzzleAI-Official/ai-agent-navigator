@@ -1,6 +1,6 @@
 import type { AgentModes, SSEEventData } from "@/types/pipeline";
 
-const API_BASE = "/api";
+const API_BASE = "/pzapi";
 
 export async function createRun(
   text: string,

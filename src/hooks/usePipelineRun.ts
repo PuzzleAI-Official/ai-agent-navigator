@@ -444,11 +444,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
 
         const response = await apiSendMessage(currentRunId, text, fileIds);
 
-        let assistantContent = response.assistant_message;
-        if (response.clarifying_questions.length > 0) {
-          assistantContent +=
-            "\n\n" + response.clarifying_questions.map((q, i) => `${i + 1}. ${q}`).join("\n");
-        }
+        const assistantContent = response.assistant_message;
 
         setMessages((prev) => [
           ...prev,

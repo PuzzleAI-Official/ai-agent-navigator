@@ -112,11 +112,27 @@ async def real_agent1_turn(state: RunState, user_message: str) -> dict:
         state._agent1_model = result  # Keep Pydantic model for downstream agents
     else:
         clarification = result_dict.get("clarification_needed", {})
-        message = clarification.get("message", "Could you provide more details?") if isinstance(clarification, dict) else str(clarification or "Could you provide more details?")
-        questions = clarification.get("critical_questions", []) if isinstance(clarification, dict) else []
+
+
+        if isinstance(clarification, dict):
+            message = clarification.get("message", "Could you provide more details?")
+            questions = clarification.get("critical_questions", [])
+            optional_prompt = clarification.get("optional_prompt", "")
+        else:
+            message = str(clarification or "Could you provide more details?")
+            questions = []
+            optional_prompt = ""
+
+        # Build full assistant message: main message + questions + optional prompt
+        full_message = message
+        if questions:
+            full_message += "\n\n" + "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions))
+        if optional_prompt:
+            full_message += f"\n\n{optional_prompt}"
+
         response = {
             "is_clear": False,
-            "assistant_message": message,
+            "assistant_message": full_message,
             "clarifying_questions": questions,
         }
 

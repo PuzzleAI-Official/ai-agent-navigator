@@ -7,6 +7,7 @@ import { PipelineVisualization } from "@/components/playground/PipelineVisualiza
 import { ActivityFeed } from "@/components/playground/ActivityFeed";
 import { CandidateCard } from "@/components/playground/CandidateCard";
 import { ResultsComparison } from "@/components/playground/ResultsComparison";
+import { SearchingVisualization } from "@/components/playground/SearchingVisualization";
 import type { Attachment } from "@/types/pipeline";
 
 const Playground = () => {
@@ -386,6 +387,21 @@ const Playground = () => {
                   <p className="text-[13px] text-white/20 max-w-md text-center leading-relaxed">
                     Tell us about your use case in the chat panel. We'll analyze it and find AI solutions that match your requirements.
                   </p>
+                </motion.div>
+              )}
+
+              {/* Pipeline stage — searching visualization (before candidates appear) */}
+              {stage === "pipeline" && candidates.length === 0 && (
+                <motion.div
+                  key="searching"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  className="h-full"
+                >
+                  <SearchingVisualization
+                    message={pipelineProgress.current_agent || "Discovering AI solutions..."}
+                  />
                 </motion.div>
               )}
 

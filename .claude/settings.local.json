@@ -23,7 +23,9 @@
       "Bash(python -c \"from main import app; print\\('OK'\\)\")",
       "Bash(python -c ':*)",
       "Bash(xargs grep:*)",
-      "Bash(python -c \"import sys,json; print\\(json.dumps\\(json.load\\(sys.stdin\\), indent=2\\)\\)\")"
+      "Bash(python -c \"import sys,json; print\\(json.dumps\\(json.load\\(sys.stdin\\), indent=2\\)\\)\")",
+      "WebSearch",
+      "WebFetch(domain:www.svgbackgrounds.com)"
     ]
   }
 }

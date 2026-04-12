@@ -21,6 +21,8 @@ export function CandidateCard({ candidate: c, index }: Props) {
   const isPending = c.harness_status === "pending" && !c.auth_method;
   const isVerifiedOnly = c.auth_method && c.harness_status === "pending";
 
+  const [descExpanded, setDescExpanded] = useState(false);
+
   // Early discovery stage (Agent 2 only) — compact row
   if (isPending) {
     return (
@@ -29,46 +31,58 @@ export function CandidateCard({ candidate: c, index }: Props) {
         animate={{ opacity: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, height: 0, marginBottom: 0 }}
         transition={{ delay: index * 0.04, duration: 0.25 }}
-        className="flex items-center gap-3 px-4 py-3 rounded-lg bg-white/[0.02] border border-white/[0.05] hover:bg-white/[0.04] transition-colors group"
+        className="rounded-xl bg-white/[0.02] border border-white/[0.05] hover:bg-white/[0.04] hover:border-white/[0.08] transition-all group overflow-hidden"
       >
-        {/* Match indicator */}
-        <div className="relative w-9 h-9 shrink-0">
-          <svg viewBox="0 0 36 36" className="w-9 h-9 -rotate-90">
-            <circle cx="18" cy="18" r="15" fill="none" stroke="rgba(255,255,255,0.06)" strokeWidth="2" />
-            <motion.circle
-              cx="18" cy="18" r="15" fill="none"
-              stroke="rgba(96,165,250,0.5)"
-              strokeWidth="2"
-              strokeDasharray={`${c.relevance_score * 94.25} 94.25`}
-              strokeLinecap="round"
-              initial={{ strokeDasharray: "0 94.25" }}
-              animate={{ strokeDasharray: `${c.relevance_score * 94.25} 94.25` }}
-              transition={{ duration: 0.8, delay: index * 0.05 }}
+        <div className="px-4 py-3.5 flex items-start gap-3.5">
+          {/* Provider icon */}
+          <div className="w-5 h-5 shrink-0 mt-0.5">
+            <svg viewBox="0 0 20 20" fill="none" className="w-5 h-5">
+              <path d="M10 2L3 6v8l7 4 7-4V6l-7-4z" stroke="rgba(255,255,255,0.15)" strokeWidth="1.2" strokeLinejoin="round" />
+              <path d="M10 2v8m0 0l7-4m-7 4l-7-4m7 12v-8m7 0v8m-14-8v8" stroke="rgba(255,255,255,0.08)" strokeWidth="0.8" />
+              <circle cx="10" cy="10" r="2" fill="rgba(255,255,255,0.12)" />
+            </svg>
+          </div>
+
+          {/* Name + description */}
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <h3 className="font-grotesk font-semibold text-[13px] text-white/85 truncate">
+                {c.name}
+              </h3>
+              <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded shrink-0 ${
+                c.adoption_difficulty === "easy"
+                  ? "text-emerald-400/50 bg-emerald-400/5 border border-emerald-400/8"
+                  : c.adoption_difficulty === "hard"
+                  ? "text-amber-400/50 bg-amber-400/5 border border-amber-400/8"
+                  : "text-white/25 bg-white/[0.03] border border-white/[0.05]"
+              }`}>
+                {c.adoption_difficulty}
+              </span>
+            </div>
+            <p
+              onClick={(e) => { e.stopPropagation(); if (c.description) setDescExpanded(!descExpanded); }}
+              className={`text-[11px] text-white/30 font-sans mt-0.5 ${
+                descExpanded ? "" : "truncate"
+              } ${c.description ? "cursor-pointer hover:text-white/40" : ""}`}
+            >
+              {c.provider}
+              {c.description && ` · ${c.description}`}
+            </p>
+          </div>
+
+          {/* Scanning indicator */}
+          <div className="flex items-center gap-1.5 shrink-0 mt-1">
+            <motion.div
+              className="w-1 h-1 rounded-full bg-blue-400/40"
+              animate={{ opacity: [0.2, 0.8, 0.2] }}
+              transition={{ duration: 2, repeat: Infinity, delay: index * 0.15 }}
             />
-          </svg>
-          <span className="absolute inset-0 flex items-center justify-center text-[10px] font-mono text-white/60">
-            {Math.round(c.relevance_score * 100)}
-          </span>
+            <span className="text-[9px] text-white/20 font-mono">screening</span>
+          </div>
         </div>
 
-        {/* Name + provider */}
-        <div className="flex-1 min-w-0">
-          <h3 className="font-grotesk font-medium text-[13px] text-white/85 truncate">
-            {c.name}
-          </h3>
-          <span className="text-[11px] text-white/30 font-sans">{c.provider}</span>
-        </div>
-
-        {/* Difficulty badge */}
-        <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded ${
-          c.adoption_difficulty === "easy"
-            ? "text-emerald-400/60 bg-emerald-400/5 border border-emerald-400/10"
-            : c.adoption_difficulty === "hard"
-            ? "text-amber-400/60 bg-amber-400/5 border border-amber-400/10"
-            : "text-white/30 bg-white/[0.03] border border-white/[0.06]"
-        }`}>
-          {c.adoption_difficulty}
-        </span>
+        {/* Subtle bottom accent line */}
+        <div className="h-[1px] bg-gradient-to-r from-transparent via-white/[0.04] to-transparent" />
       </motion.div>
     );
   }
@@ -83,8 +97,8 @@ export function CandidateCard({ candidate: c, index }: Props) {
       className={`rounded-xl overflow-hidden transition-all ${
         isActive
           ? "bg-blue-500/[0.04] border border-blue-400/15"
-          : isDone
-          ? "bg-white/[0.03] border border-white/[0.08]"
+          : isDone || isBuilt
+          ? "bg-emerald-500/[0.04] border border-emerald-400/15"
           : "bg-white/[0.02] border border-white/[0.06]"
       }`}
     >
@@ -240,7 +254,7 @@ export function CandidateCard({ candidate: c, index }: Props) {
               </div>
               <div>
                 <span className="text-[10px] font-grotesk tracking-[0.06em] text-white/35 block mb-1">Cost</span>
-                <span className="font-mono text-[18px] text-white/90">${(c.total_cost_usd ?? 0).toFixed(4)}</span>
+                <span className="font-mono text-[18px] text-white/90">${(c.build_cost_usd ?? 0).toFixed(2)}</span>
               </div>
             </div>
 

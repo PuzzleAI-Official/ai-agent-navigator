@@ -129,7 +129,7 @@ function ResultCard({ candidate: c, rank }: { candidate: PipelineCandidate; rank
           <span className="text-[10px] text-[#48484a]">ms</span>
         </div>
         <div className="text-center">
-          <span className="text-[10px] font-grotesk tracking-[0.06em] text-[#6e6e73] block mb-1">Build Cost</span>
+          <span className="text-[10px] font-grotesk tracking-[0.06em] text-[#6e6e73] block mb-1">Cost</span>
           <span className="font-mono text-[15px] text-[#f5f5f7]">${(c.build_cost_usd ?? 0).toFixed(2)}</span>
         </div>
         <div className="text-center">

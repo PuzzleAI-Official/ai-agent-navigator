@@ -12,9 +12,10 @@ export default defineConfig(({ mode }) => ({
       overlay: false,
     },
     proxy: {
-      "/api": {
+      "/pzapi": {
         target: "http://localhost:8001",
         changeOrigin: true,
+        rewrite: (path: string) => path.replace(/^\/pzapi/, '/api'),
       },
     },
   },

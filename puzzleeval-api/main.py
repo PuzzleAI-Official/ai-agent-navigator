@@ -25,6 +25,7 @@ from routes.runs import router as runs_router
 from routes.chat import router as chat_router
 from routes.files import router as files_router
 from routes.events import router as events_router
+from routes.monitoring import router as monitoring_router  # Phase 2: enterprise-gated stubs
 
 app = FastAPI(title="PuzzleEval API", version="0.1.0")
 
@@ -40,6 +41,7 @@ app.include_router(runs_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
 app.include_router(files_router, prefix="/api")
 app.include_router(events_router, prefix="/api")
+app.include_router(monitoring_router, prefix="/api")  # Phase 2: enterprise-only routes
 
 
 @app.get("/api/health")

@@ -181,6 +181,67 @@ def validate_agent1_output(result: Agent1Result) -> ValidationResult:
     if not r.summary or len(r.summary.strip()) < 10:
         warnings.append("Summary is very short — may not provide enough context for downstream agents")
 
+    # ── Phase 3: WorkflowBlueprint consistency ──
+    # The blueprint is optional (None is valid — Agent 1 may legitimately fail to
+    # produce one, and old saved outputs predate Phase 3). BUT when it IS present,
+    # its internal structure must be consistent or downstream phases will break
+    # (empty step_id -> KeyError, orphan depends_on -> silent skip, etc.).
+    if r.workflow is not None:
+        bp = r.workflow
+        if len(bp.steps) == 0:
+            errors.append("WorkflowBlueprint has zero steps — should be None, not empty")
+        else:
+            # ID uniqueness — Phase 9 harness chaining keys by id.
+            ids_seen = set()
+            for i, step in enumerate(bp.steps):
+                if not step.id.strip():
+                    errors.append(f"WorkflowStep {i} has empty id")
+                elif step.id in ids_seen:
+                    errors.append(f"Duplicate WorkflowStep id '{step.id}' — ids must be unique")
+                else:
+                    ids_seen.add(step.id)
+
+            # Orphan depends_on — each ref must point to an existing step.
+            valid_ids = ids_seen
+            for step in bp.steps:
+                for dep in step.depends_on:
+                    if dep not in valid_ids:
+                        errors.append(
+                            f"WorkflowStep '{step.id}' depends_on '{dep}' which is not a known step id"
+                        )
+
+            # input_from — must be "user" or a valid step id.
+            for step in bp.steps:
+                if step.input_from is None:
+                    continue
+                if step.input_from == "user":
+                    continue
+                if step.input_from not in valid_ids:
+                    errors.append(
+                        f"WorkflowStep '{step.id}' input_from='{step.input_from}' is neither 'user' nor a known step id"
+                    )
+
+            # Capability cross-ref — each step.capability should match a SubTask.capability.
+            # Warn (not error) because tolerating slight wording drift is safer than blocking.
+            subtask_caps = {st.capability.strip().lower() for st in r.sub_tasks}
+            for step in bp.steps:
+                if step.capability.strip().lower() not in subtask_caps:
+                    warnings.append(
+                        f"WorkflowStep '{step.id}' capability '{step.capability}' doesn't match any SubTask.capability "
+                        "— downstream role-based candidate grouping may lose this step"
+                    )
+
+            # Role hygiene — snake_case-ish, non-empty, reasonable length.
+            for step in bp.steps:
+                if not step.role.strip():
+                    errors.append(f"WorkflowStep '{step.id}' has empty role")
+                elif len(step.role) > 40:
+                    warnings.append(f"WorkflowStep '{step.id}' role '{step.role}' is unusually long — prefer concise snake_case tags")
+
+            # Architecture options sanity
+            if not bp.architecture_options:
+                warnings.append("WorkflowBlueprint.architecture_options is empty — at least 'all_in_one' is expected")
+
     return ValidationResult(passed=len(errors) == 0, errors=errors, warnings=warnings)
 
 

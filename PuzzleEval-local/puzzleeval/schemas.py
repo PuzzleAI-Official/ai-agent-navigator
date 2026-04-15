@@ -156,6 +156,139 @@ class Constraints(BaseModel):
     )
 
 
+# ============================================================================
+# Phase 3: WorkflowBlueprint — Agent 1 as director
+# ============================================================================
+# SubTask (above) answers "what capabilities does the user need?".
+# WorkflowBlueprint answers "what's the shape of the user's workflow?" —
+# ordering, data flow, role assignment, architecture options.
+#
+# Downstream phases use this structure:
+#   Phase 4 (Agent 2 dual search) groups candidates by step role
+#   Phase 6 (user selection UI) renders a step-chain diagram
+#   Phase 7 (Agent 5 selection) guarantees ≥1 candidate per step
+#   Phase 9 (workflow-chaining harnesses) wires step[n].run → step[n+1].run
+#
+# Optional — when Agent 1 can't produce a meaningful blueprint (or for old
+# saved runs pre-Phase-3), `workflow=None` triggers today's flat-sub-tasks
+# behavior everywhere downstream.
+# ============================================================================
+
+class WorkflowStep(BaseModel):
+    """One step in the user's workflow. Ordered chain; `depends_on` encodes the DAG."""
+
+    id: str = Field(
+        description=(
+            "Stable ID for this step, e.g. 'step_1'. Used by other steps' "
+            "depends_on, by Phase 4's candidates_by_step grouping, and by "
+            "Phase 9's workflow harness wiring. Must be unique within the blueprint."
+        )
+    )
+
+    role: str = Field(
+        description=(
+            "Short role tag that describes the job this step does. Examples: "
+            "'ocr', 'extract', 'spreadsheet_sync', 'classify', 'chatbot', "
+            "'translate', 'summarize'. Phase 4's search pass uses this to "
+            "group candidates. Prefer snake_case, single concept per role."
+        )
+    )
+
+    description: str = Field(
+        description=(
+            "One-sentence human description of what this step does for the user. "
+            "Rendered in the frontend WorkflowDiagram and the selection UI."
+        )
+    )
+
+    capability: str = Field(
+        description=(
+            "Matches the `capability` string on the corresponding SubTask. "
+            "This is the join key — same string on SubTask.capability and "
+            "WorkflowStep.capability links the two so downstream agents can "
+            "cross-reference search keywords without needing a separate ID field."
+        )
+    )
+
+    input_from: str | None = Field(
+        default=None,
+        description=(
+            "Where this step's input comes from. Either 'user' (first step — "
+            "user provides a file/text/prompt) or another step's id like 'step_1' "
+            "(this step consumes step_1's output). None means standalone."
+        )
+    )
+
+    output_format: str = Field(
+        default="structured_json",
+        description=(
+            "Shape of this step's output. Matches the TestCase.output_type "
+            "enum: 'free_text' | 'structured_json' | 'classification' | "
+            "'extraction' | 'action'. Phase 9's harness uses this to decide "
+            "whether to serialize the output before passing to the next step."
+        )
+    )
+
+    depends_on: list[str] = Field(
+        default_factory=list,
+        description=(
+            "IDs of steps that must complete before this one starts. Encodes "
+            "the DAG. Empty list = no dependencies (step can run first)."
+        )
+    )
+
+    all_in_one_compatible: bool = Field(
+        default=True,
+        description=(
+            "True if a single all-in-one tool could cover this step (almost "
+            "always true — most roles have all-in-one alternatives). Phase 4 "
+            "uses this to decide whether to INCLUDE this step in the all-in-one "
+            "search pass. False only for niche steps (e.g. proprietary "
+            "integration) that no horizontal tool reaches."
+        )
+    )
+
+
+class WorkflowBlueprint(BaseModel):
+    """The ordered shape of the user's workflow.
+
+    Authored by Agent 1 alongside sub_tasks in the same LLM call. Downstream
+    phases branch on `len(steps) == 1` for trivial single-capability requests
+    (e.g., "I need a chatbot") and treat those as today; multi-step blueprints
+    unlock Phase 4's dual search, Phase 6's selection UI, and Phase 9's
+    workflow-chaining harnesses.
+    """
+
+    steps: list[WorkflowStep] = Field(
+        description=(
+            "Ordered list of workflow steps. Order reflects the intended "
+            "execution sequence (but `depends_on` is authoritative for actual "
+            "DAG topology). Minimum 1 step."
+        )
+    )
+
+    architecture_options: list[str] = Field(
+        default_factory=lambda: ["all_in_one", "best_per_step"],
+        description=(
+            "Which architectural approaches make sense for this workflow. "
+            "Almost always both: a single all-in-one tool AND a best-per-step "
+            "composition. The user picks after seeing real candidates. Empty "
+            "or single-element list for edge cases (e.g., workflow has one "
+            "step -- all_in_one IS best_per_step, no distinction)."
+        )
+    )
+
+    notes: str = Field(
+        default="",
+        description=(
+            "Agent 1's reasoning about how the workflow is structured. "
+            "Rendered in the UI tooltip on the WorkflowDiagram so the user "
+            "understands why we decomposed it this way and can correct it "
+            "in the Phase 6 selection UI if needed."
+        )
+    )
+
+
 class UserUnderstandingOutput(BaseModel):
     """
     The FULL structured output when Agent 1 has enough information.
@@ -205,6 +338,24 @@ class UserUnderstandingOutput(BaseModel):
     workflow_summary: str | None = Field(
         default=None,
         description="Summary of the uploaded workflow file, or null if no file"
+    )
+
+    # ── Phase 3: the ordered workflow blueprint ──
+    # Optional so:
+    #   1. Saved artifacts from before Phase 3 still parse (default None).
+    #   2. Agent 1 can legitimately return None for edge cases where the
+    #      workflow structure is genuinely unknowable from the user input.
+    # Downstream phases should branch on `workflow is not None` — when None,
+    # they fall back to the flat `sub_tasks` list (legacy behavior).
+    workflow: WorkflowBlueprint | None = Field(
+        default=None,
+        description=(
+            "The ordered structure of the user's workflow — steps, roles, data "
+            "flow, architecture options. Authored by Agent 1 alongside sub_tasks. "
+            "Downstream phases (Phase 4 dual search, Phase 6 selection UI, "
+            "Phase 9 chained harnesses) consume this. None means the workflow "
+            "couldn't be determined or this output predates Phase 3."
+        )
     )
 
     # NOTE: Test file requirements are now PER SUB-TASK, not global.
@@ -1050,6 +1201,20 @@ class Agent4Result(BaseModel):
         description="Total API cost including per-candidate verification and web search fees",
     )
 
+    web_fetch_blocks: int = Field(
+        default=0,
+        description=(
+            "Number of web_fetch attempts that did not produce usable content "
+            "across all per-candidate verifications. Combines two failure "
+            "surfaces: (1) HTTP-level errors — 403/Cloudflare/429/unavailable "
+            "(Phase 1) — and (2) content-level failures — SPA shells, auth "
+            "walls, soft 404s, marketing pages with no API signals "
+            "(Phase 1.5). Surfaced for observability so the team can spot "
+            "providers whose docs are consistently unreachable or unrenderable. "
+            "See puzzleeval/web_fetch_fallback.py for both classifiers."
+        ),
+    )
+
 
 # ============================================================================
 # Agent 5 Input/Output Schemas
@@ -1267,6 +1432,18 @@ class TestHarness(BaseModel):
         )
     )
 
+    web_fetch_blocks: int = Field(
+        default=0,
+        description=(
+            "Number of web_fetch attempts that did not produce usable content "
+            "during this candidate's build loop. Combines HTTP-level errors "
+            "(Cloudflare/403/429/unavailable — Phase 1) and content-level "
+            "failures (SPA shells, auth walls, soft 404s — Phase 1.5). "
+            "Aggregated into Agent5Result.web_fetch_blocks for run-level "
+            "observability."
+        ),
+    )
+
 
 class FailedHarness(BaseModel):
     """
@@ -1317,6 +1494,18 @@ class FailedHarness(BaseModel):
 
     turns_attempted: int = Field(
         description="How many agent loop iterations were tried before giving up"
+    )
+
+    web_fetch_blocks: int = Field(
+        default=0,
+        description=(
+            "Number of web_fetch attempts that did not produce usable content "
+            "before this build was abandoned. Combines HTTP-level errors "
+            "(Cloudflare/403/429/unavailable — Phase 1) and content-level "
+            "failures (SPA shells, auth walls, soft 404s — Phase 1.5). "
+            "Aggregated into Agent5Result.web_fetch_blocks for run-level "
+            "observability."
+        ),
     )
 
 
@@ -1405,6 +1594,20 @@ class Agent5Result(BaseModel):
             "Summary of test execution: pass rates, costs, incompatible counts. "
             "Empty string if test execution was skipped."
         )
+    )
+
+    web_fetch_blocks: int = Field(
+        default=0,
+        description=(
+            "Number of web_fetch attempts that did not produce usable content "
+            "summed across every candidate's build loop. Combines HTTP-level "
+            "errors (403/Cloudflare/429/unavailable — Phase 1) and "
+            "content-level failures (SPA shells, auth walls, soft 404s — "
+            "Phase 1.5). Surfaced for observability so the team can spot "
+            "providers whose docs are consistently unreachable or "
+            "unrenderable. See puzzleeval/web_fetch_fallback.py for both "
+            "classifiers."
+        ),
     )
 
 

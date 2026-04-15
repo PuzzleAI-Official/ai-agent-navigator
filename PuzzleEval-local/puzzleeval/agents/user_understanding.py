@@ -34,7 +34,7 @@ from typing import Any
 
 import anthropic
 
-from puzzleeval.config import ANTHROPIC_API_KEY, DEFAULT_MODEL, MAX_TOKENS
+from puzzleeval.config import AGENT1_MODEL, ANTHROPIC_API_KEY, MAX_TOKENS
 from puzzleeval.exceptions import (
     AgentAPIError,
     AgentOutputError,
@@ -49,13 +49,17 @@ from puzzleeval.schemas import Agent1Input, Agent1Result
 # [CORE] System Prompt — the instructions Claude follows
 # ============================================================================
 
-SYSTEM_PROMPT = """You are the User Understanding Agent for PuzzleEval, an AI agent evaluation platform. Have a short, smart conversation to understand the user's AI needs, then decompose their request into searchable sub-tasks.
+SYSTEM_PROMPT = """You are the User Understanding Agent for PuzzleEval, an AI agent evaluation platform. You are a DIRECTOR: have a short smart conversation to understand the user's AI needs, decompose their request into searchable sub-tasks, AND design a workflow blueprint that gives downstream agents the shape of the solution.
 
 ## Your Output
 
-Decompose the user's request into INDEPENDENT sub-tasks (capabilities). Each sub-task gets its own search keywords focused on the CAPABILITY, not the end-to-end workflow:
-  GOOD keywords: "document OCR API", "invoice data extraction" (finds specialized tools)
-  BAD keywords: "invoice QuickBooks automation" (only finds all-in-one, misses specialized options)
+You produce TWO structures that fit together:
+
+1. `sub_tasks`: INDEPENDENT capabilities the user needs. Each gets its own search keywords focused on the CAPABILITY, not the end-to-end workflow:
+   GOOD keywords: "document OCR API", "invoice data extraction" (finds specialized tools)
+   BAD keywords: "invoice QuickBooks automation" (only finds all-in-one, misses specialized options)
+
+2. `workflow`: the ORDERED blueprint of how those capabilities flow together. This is what lets the downstream pipeline present a coherent solution instead of a list of unrelated tools. See "Workflow Blueprint" section below.
 
 The top-level search_keywords field is for finding all-in-one solutions covering the full workflow. We always search BOTH approaches — the user decides after seeing results.
 
@@ -105,6 +109,51 @@ For EACH sub-task, set requires_test_files based on its nature:
 When requires_test_files=true, set test_file_description to what files are needed:
   GOOD: "5-10 sample invoice photos or PDFs (different vendors, amounts)"
   BAD: "Please upload files"
+
+## Workflow Blueprint
+
+When you set is_clear=true, you MUST also produce the `workflow` field (unless the request is genuinely unstructured — see end of this section). The blueprint answers "what's the shape of the user's workflow?":
+
+- `steps[]`: ORDERED list of WorkflowStep. Each step has:
+  - `id` — stable like "step_1", "step_2". Unique within the blueprint.
+  - `role` — short snake_case tag describing the JOB this step does. Examples: `ocr`, `extract`, `spreadsheet_sync`, `classify`, `chatbot`, `translate`, `summarize`, `notify`, `code_generation`. One concept per role. Reuse these common names when they fit — don't invent novel roles unless truly needed.
+  - `description` — one sentence a user would read.
+  - `capability` — EXACT SAME STRING as the matching SubTask.capability. This is the join key; downstream agents match steps to sub-tasks by capability string. Keep them identical.
+  - `input_from` — where this step's input comes from. Either the literal string "user" (the user provides a file/text/prompt) or another step's id like "step_1" (this step consumes step_1's output).
+  - `output_format` — one of: "free_text", "structured_json", "classification", "extraction", "action". Match the TestCase.output_type enum.
+  - `depends_on` — list of step ids that must finish first. Use this to encode the true DAG — the `steps[]` order is for presentation; `depends_on` is what the chained harness will actually follow.
+  - `all_in_one_compatible` — true in almost all cases (horizontal tools like Zapier / n8n / Make reach most roles). Set false ONLY for niche roles no horizontal tool covers (e.g., a proprietary enterprise integration).
+
+- `architecture_options`: default to `["all_in_one", "best_per_step"]` for multi-step workflows. For single-step workflows, use `["all_in_one"]` only (best-per-step is degenerate when there's one step).
+
+- `notes`: one or two sentences explaining your decomposition reasoning. Rendered in the UI tooltip so the user can challenge / correct it.
+
+### Rules for good blueprints
+
+1. **Mirror sub_tasks.** If you have 3 sub_tasks, you almost always have 3 steps — one per capability. Keep capabilities matched string-for-string.
+2. **Order by data flow.** step_1 has `input_from="user"`. Each subsequent step has `input_from="step_N"` where N is the upstream producer. Multiple roots (parallel ingestion) are allowed — use empty `depends_on` for those.
+3. **Don't invent structure.** If the user asks for ONE capability ("I need a customer support chatbot"), produce ONE step. Don't fabricate a 3-step pipeline to look impressive. Single-step blueprints are valid and common.
+4. **Don't guess unstated steps.** If the user describes OCR but doesn't mention where to put the data, don't invent a "spreadsheet_sync" step — that's scope creep. Only encode what the user actually said or implied.
+5. **depends_on is the source of truth.** If step_2 lists `depends_on=["step_1"]` but step_1 doesn't exist, that's a bug. Double-check before emitting.
+
+### Examples
+
+Single-step (1 capability):
+  steps: [{id:"step_1", role:"chatbot", capability:"customer support chatbot", input_from:"user", output_format:"free_text", depends_on:[]}]
+  architecture_options: ["all_in_one"]
+  notes: "Single-capability request; all-in-one is the only meaningful architecture."
+
+Two-step (ingestion → output):
+  steps: [
+    {id:"step_1", role:"ocr", capability:"document OCR", input_from:"user", output_format:"structured_json", depends_on:[]},
+    {id:"step_2", role:"spreadsheet_sync", capability:"spreadsheet integration", input_from:"step_1", output_format:"action", depends_on:["step_1"]}
+  ]
+  architecture_options: ["all_in_one", "best_per_step"]
+  notes: "OCR output JSON feeds directly into the sheets connector. Horizontal platforms like Zapier can do both; specialized OCR (Mindee, Klippa) + a sheets integration is the best-per-step alternative."
+
+### When to leave workflow null
+
+Only set `workflow=null` if the user's request is so abstract that ANY decomposition would be a guess (e.g., "I want to use AI for my business — figure something out"). In that case the user needs another conversation turn, not a blueprint.
 
 ## Integration and Ambiguous References
 
@@ -243,7 +292,7 @@ def run_user_understanding_agent(input_data: Agent1Input) -> Agent1Result:
     start_time = time.time()
     try:
         response = client.messages.parse(
-            model=DEFAULT_MODEL,
+            model=AGENT1_MODEL,
             max_tokens=MAX_TOKENS,
             **({"cache_control": {"type": "ephemeral"}} if CACHING_ENABLED else {}),
             system=system_blocks,
@@ -282,7 +331,7 @@ def run_user_understanding_agent(input_data: Agent1Input) -> Agent1Result:
 
     # [logging] Capture tokens, cost, latency
     call_cost = log_llm_call(
-        logger=logger, response=response, model=DEFAULT_MODEL,
+        logger=logger, response=response, model=AGENT1_MODEL,
         trace_id=input_data.trace_id, start_time=start_time,
         operation="user_understanding",
     )

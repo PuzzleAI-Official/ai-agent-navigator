@@ -6,6 +6,9 @@ import time
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException
+
+from services.billing import require_agent_access
 from services.run_manager import RunState
 
 # Path to working_test_6 mock data
@@ -188,6 +191,19 @@ async def run_pipeline(state: RunState):
 
         user_understanding = _get_user_understanding(state)
 
+        # ── Phase 3: surface the WorkflowBlueprint so the frontend can
+        # render the step diagram before Agents 2-5 start producing
+        # candidates. Emitted unconditionally — payload is `None` for
+        # pre-Phase-3 Agent 1 outputs (mock data saved before Phase 3)
+        # so the frontend knows to skip the diagram.
+        workflow_payload = None
+        try:
+            raw_result = (state.agent1_result or {}).get("result", {})
+            workflow_payload = raw_result.get("workflow")
+        except AttributeError:
+            workflow_payload = None
+        emit("workflow_blueprint", {"workflow": workflow_payload})
+
         # ------------------------------------------------------------------
         # Branch A: Agent 2 → Agent 4 (sequential)
         # Branch B: Agent 3 (independent)
@@ -235,6 +251,25 @@ async def run_pipeline(state: RunState):
             _save_json("agent_2_output.json", state.agent2_result)
 
             if state.cancel_requested:
+                return
+
+            # --- Phase 2 billing gate: Agent 4 needs the "testing" feature ──
+            # In default mode (PUZZLEEVAL_BILLING_ENFORCED=0) this is a no-op
+            # that just bumps state.plan_gates_triggered for observability.
+            # In enforced mode it raises HTTPException(402) which we catch
+            # below and translate into an SSE failure event. The legacy
+            # behavior (Agent 4 always runs) is preserved when not enforced.
+            try:
+                require_agent_access(state, "agent_4")
+            except HTTPException as e:
+                emit("agent_blocked", {
+                    "agent": "agent_4",
+                    "reason": e.detail,
+                    "plan": state.plan,
+                    "credits_remaining": state.credits_remaining,
+                })
+                emit("pipeline_failed", {"error": e.detail, "blocked_at": "agent_4"})
+                state.status = "failed"
                 return
 
             # --- Agent 4 (starts immediately after Agent 2, doesn't wait for Agent 3) ---
@@ -324,6 +359,24 @@ async def run_pipeline(state: RunState):
         if state.cancel_requested:
             emit("pipeline_cancelled", {"cancelled_at_agent": "before_build"})
             state.status = "cancelled"
+            emit("done", {})
+            state.event_bus.close()
+            return
+
+        # --- Phase 2 billing gate: Agent 5 needs the "testing" feature ──
+        # Costs 5 credits in enforced mode. Same enforcement / no-op semantics
+        # as the Agent 4 gate above.
+        try:
+            require_agent_access(state, "agent_5")
+        except HTTPException as e:
+            emit("agent_blocked", {
+                "agent": "agent_5",
+                "reason": e.detail,
+                "plan": state.plan,
+                "credits_remaining": state.credits_remaining,
+            })
+            emit("pipeline_failed", {"error": e.detail, "blocked_at": "agent_5"})
+            state.status = "failed"
             emit("done", {})
             state.event_bus.close()
             return

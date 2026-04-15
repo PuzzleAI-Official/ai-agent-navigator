@@ -1,5 +1,31 @@
 export type Stage = "conversation" | "pipeline" | "results";
 
+// ---------------------------------------------------------------------------
+// Phase 3: WorkflowBlueprint — Agent 1 as director
+// ---------------------------------------------------------------------------
+// Mirrors puzzleeval/schemas.py. Agent 1 produces this alongside sub_tasks
+// when is_clear=true; downstream phases branch on `workflow !== null`.
+// The WorkflowDiagram component renders it as a horizontal step chain above
+// the candidate list.
+// ---------------------------------------------------------------------------
+
+export interface WorkflowStep {
+  id: string;                       // "step_1", "step_2" — unique within blueprint
+  role: string;                     // "ocr" | "extract" | "spreadsheet_sync" | ...
+  description: string;              // one-sentence user-facing description
+  capability: string;               // matches SubTask.capability (join key)
+  input_from: string | null;        // "user" | "step_1" | null
+  output_format: string;            // "free_text" | "structured_json" | ...
+  depends_on: string[];             // ids of upstream steps
+  all_in_one_compatible: boolean;
+}
+
+export interface WorkflowBlueprint {
+  steps: WorkflowStep[];            // ordered
+  architecture_options: string[];   // ["all_in_one", "best_per_step"]
+  notes: string;                    // Agent 1's reasoning for UI tooltip
+}
+
 export interface Attachment {
   name: string;
   size: number;
@@ -78,4 +104,32 @@ export interface AgentModes {
   agent3: "mock" | "real";
   agent4: "mock" | "real";
   agent5: "mock" | "real";
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2: Service tier scaffold
+// ---------------------------------------------------------------------------
+// Plan / Quota types mirror puzzleeval-api/models/api_models.py. The QuotaBadge
+// component reads `Quota` from RunStateOut and renders plan + remaining credits.
+// `billing_enforced=false` (the default) means the UI shows credit numbers as
+// advisory only; flipping the backend env flag to enforce makes them blocking.
+// ---------------------------------------------------------------------------
+
+export type Plan = "free" | "paid" | "enterprise";
+
+export interface Quota {
+  plan: Plan;
+  credits_remaining: number | null; // null = unlimited (free or enterprise)
+  credits_consumed: number;
+  tier_features: Record<string, boolean>;
+  billing_enforced: boolean;
+}
+
+export interface RunStateOut {
+  run_id: string;
+  trace_id: string;
+  status: string;
+  stage: string;
+  cost_usd: number;
+  quota: Quota;
 }

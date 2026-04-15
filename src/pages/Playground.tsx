@@ -8,6 +8,8 @@ import { ActivityFeed } from "@/components/playground/ActivityFeed";
 import { CandidateCard } from "@/components/playground/CandidateCard";
 import { ResultsComparison } from "@/components/playground/ResultsComparison";
 import { SearchingVisualization } from "@/components/playground/SearchingVisualization";
+import { QuotaBadge } from "@/components/playground/QuotaBadge";
+import { WorkflowDiagram } from "@/components/playground/WorkflowDiagram";
 import type { Attachment } from "@/types/pipeline";
 
 const Playground = () => {
@@ -25,6 +27,8 @@ const Playground = () => {
     handleCancel,
     activityEntries,
     pipelineNodes,
+    runId,
+    workflow,
   } = usePipelineRun();
 
   const [input, setInput] = useState("");
@@ -147,6 +151,8 @@ const Playground = () => {
           </div>
         </div>
         <div className="flex items-center gap-3">
+          {/* Phase 2: plan + remaining credits. Polls GET /runs/{id} every 5s while a run is active. */}
+          <QuotaBadge runId={runId} active={stage !== "results"} />
           {stage === "pipeline" && (
             <button
               onClick={handleCancel}
@@ -365,6 +371,10 @@ const Playground = () => {
         <div className="flex-1 bg-[#0a0a0b] flex flex-col overflow-hidden">
           {/* Pipeline Visualization */}
           <PipelineVisualization nodes={pipelineNodes} visible={stage !== "conversation"} />
+
+          {/* Phase 3: workflow blueprint from Agent 1 (director). Shown once
+              the pipeline starts and the backend has emitted the blueprint. */}
+          {stage !== "conversation" && workflow && <WorkflowDiagram blueprint={workflow} />}
 
           {/* Scrollable content */}
           <div className="flex-1 overflow-y-auto">

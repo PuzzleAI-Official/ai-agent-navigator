@@ -1,11 +1,17 @@
-import type { AgentModes, SSEEventData } from "@/types/pipeline";
+import type {
+  AgentModes,
+  Plan,
+  RunStateOut,
+  SSEEventData,
+} from "@/types/pipeline";
 
 const API_BASE = "/pzapi";
 
 export async function createRun(
   text: string,
   fileIds: string[] = [],
-  agentModes?: AgentModes
+  agentModes?: AgentModes,
+  plan: Plan = "free"
 ): Promise<{ run_id: string; trace_id: string }> {
   const res = await fetch(`${API_BASE}/runs`, {
     method: "POST",
@@ -20,9 +26,19 @@ export async function createRun(
         agent4: "mock",
         agent5: "mock",
       },
+      plan,
     }),
   });
   if (!res.ok) throw new Error(`Failed to create run: ${res.status}`);
+  return res.json();
+}
+
+// Phase 2: poll the run state to refresh QuotaBadge after gates trigger.
+// Cheap GET; the QuotaBadge calls this on a slow interval (e.g. every 5s
+// while the pipeline is running) to keep "credits remaining" current.
+export async function getRunState(runId: string): Promise<RunStateOut> {
+  const res = await fetch(`${API_BASE}/runs/${runId}`);
+  if (!res.ok) throw new Error(`Failed to get run state: ${res.status}`);
   return res.json();
 }
 
@@ -106,6 +122,8 @@ export function subscribeToEvents(
     "agent_thinking",
     "candidates_selected",
     "report_generating",
+    "agent_blocked",       // Phase 2: emitted when billing gate denies an agent
+    "workflow_blueprint",  // Phase 3: emitted after Agent 1 with the blueprint payload
     "done",
   ];
 

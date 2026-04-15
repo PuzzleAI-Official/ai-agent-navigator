@@ -25,20 +25,36 @@ import json
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from puzzleeval.validators import ValidationResult
 
 
 class AgentRecord(BaseModel):
-    """Record of a single agent's execution within a pipeline run."""
+    """Record of a single agent's execution within a pipeline run.
+
+    The optional ``metadata`` dict carries observability signals that don't
+    fit the structured ``status`` / ``cost`` / ``validation`` slots — for
+    example ``web_fetch_blocks`` (Phase 1 Cloudflare hardening). Populated
+    automatically by ``save_agent_result`` from known fields on the output
+    schema; keep additions documented and key names stable so downstream
+    tooling (dashboards, CI checks) can rely on them.
+    """
     name: str
     status: str             # "success", "failed", "validation_failed"
     duration_ms: float
     cost_usd: float | None = None
     validation: ValidationResult | None = None
     error: str | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+# Output-schema field names that get auto-promoted into AgentRecord.metadata
+# whenever ``save_agent_result`` is called. Stable list — extend deliberately,
+# do not pull in arbitrary fields (keeps pipeline_summary.json readable).
+_AUTO_METADATA_FIELDS: tuple[str, ...] = ("web_fetch_blocks",)
 
 
 class PipelineRun:
@@ -74,7 +90,10 @@ class PipelineRun:
           - {agent_name}_input.json
           - {agent_name}_output.json
 
-        Also records the agent in the summary.
+        Also records the agent in the summary, auto-promoting any fields
+        listed in ``_AUTO_METADATA_FIELDS`` (currently ``web_fetch_blocks``)
+        from the output schema into ``AgentRecord.metadata`` so they appear
+        in ``pipeline_summary.json`` without needing per-agent plumbing.
         """
         # Save input
         input_path = self.run_dir / f"{agent_name}_input.json"
@@ -88,12 +107,20 @@ class PipelineRun:
             output_data.model_dump_json(indent=2), encoding="utf-8"
         )
 
+        # Auto-promote known observability fields into the summary record.
+        metadata: dict[str, Any] = {}
+        for field_name in _AUTO_METADATA_FIELDS:
+            value = getattr(output_data, field_name, None)
+            if value is not None and value != 0:
+                metadata[field_name] = value
+
         # Record in summary
         self.agents.append(AgentRecord(
             name=agent_name,
             status="success",
             duration_ms=duration_ms,
             cost_usd=cost_usd,
+            metadata=metadata,
         ))
 
     def save_validation(
@@ -166,6 +193,23 @@ class PipelineRun:
         else:
             status = "completed"
 
+        # Aggregate agent-level metadata to the run level for quick scanning.
+        # Currently: web_fetch_blocks. Add new keys deliberately to keep this
+        # block small and easy to check in CI.
+        run_metadata: dict[str, Any] = {}
+        for field_name in _AUTO_METADATA_FIELDS:
+            total = sum(r.metadata.get(field_name, 0) for r in self.agents)
+            if total:
+                run_metadata[field_name] = total
+
+        agent_dicts: list[dict[str, Any]] = []
+        for r in self.agents:
+            d = r.model_dump(exclude_none=True)
+            # Drop empty metadata dicts so the summary stays readable.
+            if not d.get("metadata"):
+                d.pop("metadata", None)
+            agent_dicts.append(d)
+
         summary = {
             "trace_id": self.trace_id,
             "started_at": self.started_at.isoformat(),
@@ -174,10 +218,10 @@ class PipelineRun:
             "total_cost_usd": round(total_cost, 6),
             "status": status,
             "failed_at": self.failed_at,
-            "agents": [
-                r.model_dump(exclude_none=True) for r in self.agents
-            ],
+            "agents": agent_dicts,
         }
+        if run_metadata:
+            summary["metadata"] = run_metadata
 
         # Write summary
         summary_path = self.run_dir / "pipeline_summary.json"

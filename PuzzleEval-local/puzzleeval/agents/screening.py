@@ -67,6 +67,7 @@ import anthropic
 from puzzleeval.config import (
     ANTHROPIC_API_KEY,
     DEFAULT_MODEL,
+    ENABLE_FETCH_FALLBACK,
     SCREENING_MODEL,
     WEB_SEARCH_PRICE_PER_SEARCH,
 )
@@ -80,6 +81,12 @@ from puzzleeval.schemas import (
     Agent4Input,
     Agent4Result,
     Candidate,
+)
+from puzzleeval.web_fetch_fallback import (
+    count_actionable_problems,
+    extract_blocked_fetches,
+    extract_unusable_pages,
+    summarize_blocks_for_log,
 )
 
 
@@ -378,14 +385,16 @@ def _verify_single_candidate(
     candidate: Candidate,
     input_data: Agent4Input,
     logger,
-) -> tuple[str, float]:
+) -> tuple[str, float, int]:
     """
     Verify one candidate's API accessibility in an isolated API call.
 
-    Returns a tuple of (text_findings, cost_usd).
+    Returns a tuple of (text_findings, cost_usd, web_fetch_blocks).
     text_findings is PASS/REJECT + enrichment data.
     cost_usd is the total cost of API calls + web searches for this candidate.
-    If the API call itself fails, returns a REJECT finding with 0 cost.
+    web_fetch_blocks is the count of recoverable fetch blocks seen during this
+    verification (Cloudflare/403/429/unavailable). Used for observability.
+    If the API call itself fails, returns a REJECT finding with 0 cost and 0 blocks.
     """
     # ★ CORE: Build the verification request
     candidate_message = _build_candidate_message(candidate, input_data)
@@ -395,6 +404,7 @@ def _verify_single_candidate(
     candidate_label = candidate.name.replace(" ", "_").lower()[:30]
     total_web_searches = 0
     candidate_cost = 0.0
+    candidate_block_count = 0
 
     # ★ CORE: Call Claude with web_fetch + web_search tools (isolated context)
     messages = [{"role": "user", "content": candidate_message}]
@@ -424,6 +434,7 @@ def _verify_single_candidate(
                 f"NOTES: Rate limit error during screening. This is a transient failure, "
                 f"not a definitive rejection. Consider re-running.\n",
                 candidate_cost,
+                candidate_block_count,
             )
         except (anthropic.APIConnectionError, anthropic.APIStatusError) as e:
             logger.warning(f"API error during verification of {candidate.name}", extra={
@@ -437,6 +448,7 @@ def _verify_single_candidate(
                 f"EVIDENCE: API verification failed due to API error — could not fetch docs\n"
                 f"NOTES: API error during screening: {e}. This is a transient failure.\n",
                 candidate_cost,
+                candidate_block_count,
             )
 
         # [logging] Log this call's metrics
@@ -451,6 +463,28 @@ def _verify_single_candidate(
         server_tool_use = getattr(response.usage, "server_tool_use", None)
         if server_tool_use:
             total_web_searches += getattr(server_tool_use, "web_search_requests", 0) or 0
+
+        # [Phase 1 + 1.5 hardening] Detect both HTTP-level blocks and
+        # content-level useless pages. Agent 4 makes a single call per
+        # candidate (no multi-turn loop), so we cannot inject fallback
+        # guidance mid-call — the model has already produced its findings.
+        # We just count both classes of failures for observability so the
+        # team can spot providers whose docs are WAF-gated OR JS-rendered.
+        if ENABLE_FETCH_FALLBACK:
+            blocked = extract_blocked_fetches(response)
+            unusable = extract_unusable_pages(response)
+            actionable = count_actionable_problems(blocked, unusable)
+            if actionable:
+                candidate_block_count += actionable
+                logger.info(
+                    f"Web fetch problems for {candidate.name}",
+                    extra={
+                        "operation": f"screening_fetch_blocks_{candidate_label}",
+                        "trace_id": input_data.trace_id,
+                        "candidate_name": candidate.name,
+                        **summarize_blocks_for_log(blocked, unusable),
+                    },
+                )
 
         # [pause_turn] If the API finished, break out of the loop
         if response.stop_reason != "pause_turn":
@@ -491,6 +525,7 @@ def _verify_single_candidate(
             f"EVIDENCE: Verification produced no output — could not determine API access\n"
             f"NOTES: Empty response from verification call.\n",
             candidate_cost + total_web_searches * WEB_SEARCH_PRICE_PER_SEARCH,
+            candidate_block_count,
         )
 
     # [cost tracking] Add web search fees to this candidate's cost
@@ -500,9 +535,10 @@ def _verify_single_candidate(
         "operation": f"screening_verify_{candidate_label}",
         "trace_id": input_data.trace_id,
         "findings_length": len(findings),
+        "web_fetch_blocks": candidate_block_count,
     })
 
-    return findings, candidate_cost
+    return findings, candidate_cost, candidate_block_count
 
 
 # ============================================================================
@@ -561,6 +597,7 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
     # We use a dict to preserve candidate order in the final output.
     findings_by_index: dict[int, str] = {}
     total_verification_cost = 0.0
+    total_web_fetch_blocks = 0
 
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_VERIFICATIONS) as executor:
         # Submit all verification tasks
@@ -582,9 +619,10 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
             idx = future_to_index[future]
             candidate_name = candidates[idx].name
             try:
-                findings_text, candidate_cost = future.result()
+                findings_text, candidate_cost, candidate_block_count = future.result()
                 findings_by_index[idx] = findings_text
                 total_verification_cost += candidate_cost
+                total_web_fetch_blocks += candidate_block_count
             except Exception as e:
                 # Unexpected exception from thread — graceful degradation
                 logger.error(f"Unexpected error verifying {candidate_name}", extra={
@@ -711,11 +749,16 @@ Structure these findings into the required JSON format. Every candidate must app
     # [cost tracking] Set total cost: all verification costs + structuring cost
     result.cost_usd = round(total_verification_cost + structure_cost, 6)
 
+    # [Phase 1 hardening] Surface aggregate web_fetch block count for observability.
+    # Helps operators spot providers whose docs are consistently WAF/Cloudflare gated.
+    result.web_fetch_blocks = total_web_fetch_blocks
+
     logger.info("Agent 4 completed", extra={
         "operation": "agent_complete",
         "trace_id": input_data.trace_id,
         "validated_count": len(result.validated_candidates),
         "rejected_count": len(result.rejected_candidates),
+        "web_fetch_blocks": total_web_fetch_blocks,
     })
 
     return result

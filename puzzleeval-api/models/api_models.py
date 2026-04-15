@@ -1,5 +1,10 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Literal, Optional
+
+
+# Phase 2: Service tier scaffold. Three plans for now; new ones added in
+# billing.py's matrices automatically become legal here via the Literal union.
+Plan = Literal["free", "paid", "enterprise"]
 
 
 class CreateRunRequest(BaseModel):
@@ -14,6 +19,14 @@ class CreateRunRequest(BaseModel):
             "agent5": "mock",
         },
         description="Per-agent mode: 'mock' (replay saved data, $0) or 'real' (call Claude API)",
+    )
+    plan: Plan = Field(
+        default="free",
+        description=(
+            "User-facing PuzzleAI plan. Drives credit allocation and feature "
+            "gating in services/billing.py. Defaults to 'free' so existing "
+            "callers are unchanged."
+        ),
     )
 
 
@@ -92,6 +105,31 @@ class PipelineProgressOut(BaseModel):
     test_progress: float = 0.0
 
 
+class Quota(BaseModel):
+    """Phase 2: Service-tier snapshot returned with every RunStateOut.
+
+    The frontend renders this as a badge in the playground header so the
+    user always sees their current plan + remaining credits. ``billing_enforced``
+    tells the UI whether to display credit-cost warnings as advisory
+    (enforced=False, the default) or as hard blockers (enforced=True).
+    """
+
+    plan: Plan = "free"
+    credits_remaining: Optional[int] = Field(
+        default=None,
+        description="None = unlimited (free or enterprise). Integer = paid balance.",
+    )
+    credits_consumed: int = 0
+    tier_features: dict[str, bool] = Field(
+        default_factory=dict,
+        description="Feature -> bool from billing.PLAN_FEATURE_MATRIX. UI uses this to disable buttons not in plan.",
+    )
+    billing_enforced: bool = Field(
+        default=False,
+        description="Whether the current PUZZLEEVAL_BILLING_ENFORCED flag is on. UI surfaces credit warnings when True.",
+    )
+
+
 class RunStateOut(BaseModel):
     run_id: str
     trace_id: str
@@ -100,3 +138,4 @@ class RunStateOut(BaseModel):
     candidates: list[CandidateOut] = Field(default_factory=list)
     cost_usd: float = 0.0
     pipeline_progress: PipelineProgressOut = Field(default_factory=PipelineProgressOut)
+    quota: Quota = Field(default_factory=Quota)

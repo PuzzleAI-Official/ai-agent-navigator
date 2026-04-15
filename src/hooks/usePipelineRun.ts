@@ -6,6 +6,7 @@ import type {
   PipelineProgress,
   SSEEventData,
   AgentModes,
+  WorkflowBlueprint,
 } from "@/types/pipeline";
 import type { ActivityEntry, PipelineNodeState } from "@/types/activity";
 import { AGENT_LABELS } from "@/types/activity";
@@ -77,6 +78,10 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
   const [isLoading, setIsLoading] = useState(false);
   const [activityEntries, setActivityEntries] = useState<ActivityEntry[]>([]);
   const [pipelineNodes, setPipelineNodes] = useState<PipelineNodeState[]>([]);
+  // Phase 3: workflow blueprint emitted by Agent 1 — null until the backend
+  // fires `workflow_blueprint`. The WorkflowDiagram reads this and renders
+  // a step chain; when null it renders nothing (legacy pre-Phase-3 flow).
+  const [workflow, setWorkflow] = useState<WorkflowBlueprint | null>(null);
 
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const runIdRef = useRef<string | null>(null);
@@ -104,6 +109,15 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           setStage("pipeline");
           setPipelineNodes([...INITIAL_NODES]);
           break;
+
+        case "workflow_blueprint": {
+          // Phase 3: Agent 1's director output. Payload may be null for
+          // pre-Phase-3 mock artifacts — WorkflowDiagram handles null by
+          // rendering nothing, matching legacy behavior.
+          const bp = data.workflow as WorkflowBlueprint | null | undefined;
+          setWorkflow(bp ?? null);
+          break;
+        }
 
         case "agent_started": {
           const agentId = data.agent as string;
@@ -493,5 +507,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
     handleCancel,
     activityEntries,
     pipelineNodes,
+    runId, // Phase 2: needed by QuotaBadge to poll GET /runs/{id} for current quota
+    workflow, // Phase 3: blueprint from Agent 1, consumed by WorkflowDiagram
   };
 }

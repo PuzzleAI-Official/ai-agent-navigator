@@ -31,6 +31,7 @@ from puzzleeval.config import (
     AGENT6_RATE_LIMIT_BACKOFF,
     AGENT6_TEST_TIMEOUT,
     ANTHROPIC_API_KEY,
+    ENABLE_FETCH_FALLBACK,
     MODEL_PRICING,
     RESEARCH_MODEL,
     WEB_SEARCH_PRICE_PER_SEARCH,
@@ -50,6 +51,14 @@ from puzzleeval.schemas import (
     TestCase,
     TestCaseResult,
     TestHarness,
+)
+from puzzleeval.web_fetch_fallback import (
+    build_fallback_message,
+    count_actionable_problems,
+    extract_blocked_fetches,
+    extract_unusable_pages,
+    maybe_apply_rate_limit_backoff,
+    summarize_blocks_for_log,
 )
 
 
@@ -1385,6 +1394,7 @@ def _build_single_harness(
                 failure_category="dependency_failure",
                 partial_code=None,
                 turns_attempted=0,
+                web_fetch_blocks=0,
             )
 
     # ★ Resolve credentials for the builder loop (used for live validation)
@@ -1420,6 +1430,7 @@ def _build_single_harness(
     MAX_CONSECUTIVE_ERRORS = 2  # Force strategic reassessment after this many
     build_start_time = time.monotonic()  # Wall-clock timeout tracking
     MAX_BUILD_TIME_SECONDS = 480  # 8-minute per-candidate wall-clock limit (research + build + test)
+    candidate_web_fetch_blocks = 0  # Cumulative recoverable web_fetch blocks across turns (Phase 1 hardening)
     smoke_ever_passed = False  # Track smoke test pass across ALL turns
     smoke_passed_at_turn = -1  # Which turn the smoke test first passed
     MAX_TURNS_AFTER_SMOKE = 15  # Allow N turns after smoke for live test + integration test fixes
@@ -1548,6 +1559,7 @@ def _build_single_harness(
                     failure_category="unknown",
                     partial_code=_read_harness_code(sandbox_dir),
                     turns_attempted=turn,
+                    web_fetch_blocks=candidate_web_fetch_blocks,
                 )
             except anthropic.RateLimitError as e:
                 if retry < max_retries:
@@ -1572,6 +1584,7 @@ def _build_single_harness(
                     failure_category="build_timeout",
                     partial_code=_read_harness_code(sandbox_dir),
                     turns_attempted=turn,
+                    web_fetch_blocks=candidate_web_fetch_blocks,
                 )
             except (anthropic.APIConnectionError, anthropic.APIStatusError) as e:
                 logger.warning(f"API error building {candidate.name}", extra={
@@ -1586,6 +1599,7 @@ def _build_single_harness(
                     failure_category="unknown",
                     partial_code=_read_harness_code(sandbox_dir),
                     turns_attempted=turn,
+                    web_fetch_blocks=candidate_web_fetch_blocks,
             )
 
         # [logging] Log this call's metrics
@@ -1827,6 +1841,7 @@ def _build_single_harness(
                     failure_category=_categorize_failure(last_text),
                     partial_code=_read_harness_code(sandbox_dir),
                     turns_attempted=turn + 1,
+                    web_fetch_blocks=candidate_web_fetch_blocks,
                 )
             else:
                 # end_turn without signal — treat as complete if harness exists
@@ -2080,6 +2095,40 @@ def _build_single_harness(
             else:
                 consecutive_errors = 0
 
+            # ── Phase 1 + 1.5 hardening: detect useless web_fetch results ──
+            # Two failure surfaces share one recovery path:
+            #   Phase 1   — HTTP-level errors (403/Cloudflare, 429, 5xx)
+            #   Phase 1.5 — content-level uselessness (SPA shells, auth walls,
+            #               soft 404s, marketing pages with no API signals)
+            # Anthropic's web_fetch can't customize user-agent and can't run JS,
+            # so the recovery for both is the same: PIVOT to web_search snippets,
+            # GitHub SDK repos, alternate URLs, or archive.org. We append unified
+            # guidance to the tool_results so the model sees it next turn.
+            # See puzzleeval/web_fetch_fallback.py for both classifiers.
+            if ENABLE_FETCH_FALLBACK:
+                blocked = extract_blocked_fetches(response)
+                unusable = extract_unusable_pages(response)
+                actionable = count_actionable_problems(blocked, unusable)
+                if actionable:
+                    candidate_web_fetch_blocks += actionable
+                    logger.info(
+                        f"Web fetch problems for {candidate.name} at turn {turn}",
+                        extra={
+                            "operation": "agent5_fetch_blocks",
+                            "trace_id": trace_id,
+                            "candidate_name": candidate.name,
+                            "turn": turn,
+                            **summarize_blocks_for_log(blocked, unusable),
+                        },
+                    )
+                    # Backoff for 429s before next turn (no-op when no rate limit).
+                    maybe_apply_rate_limit_backoff(blocked)
+                    # Append unified guidance as a text block alongside the
+                    # tool_results so the model sees it on its next turn.
+                    guidance = build_fallback_message(blocked, unusable)
+                    if guidance:
+                        tool_results.append({"type": "text", "text": guidance})
+
             # Append assistant response + tool results to conversation
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
@@ -2193,6 +2242,7 @@ def _build_single_harness(
             failure_category="build_timeout",
             partial_code=None,
             turns_attempted=turn,
+            web_fetch_blocks=candidate_web_fetch_blocks,
         )
 
     requirements = _read_requirements(sandbox_dir)
@@ -2209,6 +2259,7 @@ def _build_single_harness(
             failure_category="build_timeout",
             partial_code=harness_code,
             turns_attempted=turn,
+            web_fetch_blocks=candidate_web_fetch_blocks,
         )
 
     auth_env_vars = _extract_env_vars_from_code(harness_code)
@@ -2260,6 +2311,7 @@ def _build_single_harness(
         build_cost_usd=round(accumulated_cost, 4),
         harness_code=harness_code,
         api_knowledge=api_knowledge,
+        web_fetch_blocks=candidate_web_fetch_blocks,
     )
 
 
@@ -3306,6 +3358,7 @@ def run_implement_test_env_agent(
                     failure_category="unknown",
                     partial_code=None,
                     turns_attempted=0,
+                    web_fetch_blocks=0,
                 )
                 if progress_callback:
                     progress_callback("harness_failed", {
@@ -3558,6 +3611,14 @@ def run_implement_test_env_agent(
         except (TypeError, ValueError):
             test_summary = f"{len(candidate_runs)} candidates tested."
 
+    # [Phase 1 hardening] Aggregate per-candidate web_fetch block counts.
+    # Surfaces a run-level signal of how often Cloudflare/WAF blocks slowed
+    # down doc reading, useful for spotting providers we should pre-cache or
+    # access via SDK GitHub repos instead.
+    total_web_fetch_blocks = sum(h.web_fetch_blocks for h in harnesses) + sum(
+        f.web_fetch_blocks for f in failed
+    )
+
     result = Agent5Result(
         harnesses=harnesses,
         failed_harnesses=failed,
@@ -3569,6 +3630,7 @@ def run_implement_test_env_agent(
         total_test_cases=len(test_cases),
         total_test_cost_usd=round(total_test_cost, 4),
         test_execution_summary=test_summary,
+        web_fetch_blocks=total_web_fetch_blocks,
     )
 
     logger.info("Agent 5 completed", extra={
@@ -3579,6 +3641,7 @@ def run_implement_test_env_agent(
         "total_cost": total_cost,
         "tests_run": len(candidate_runs),
         "test_cost": total_test_cost,
+        "web_fetch_blocks": total_web_fetch_blocks,
     })
 
     return result

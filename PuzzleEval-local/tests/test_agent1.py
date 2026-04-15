@@ -19,6 +19,8 @@ from puzzleeval.schemas import (
     InfoStatus,
     SubTask,
     UserUnderstandingOutput,
+    WorkflowBlueprint,
+    WorkflowStep,
 )
 from puzzleeval.file_parsers import parse_csv, parse_txt, parse_file
 from puzzleeval.exceptions import AgentFileParseError
@@ -247,3 +249,130 @@ class TestLogging:
         assert log_data["message"] == "Test message"
         assert log_data["trace_id"] == "test-trace"
         assert log_data["tokens_in"] == 100
+
+
+# ============================================================================
+# Phase 3: WorkflowBlueprint schema
+# ============================================================================
+# The prompt work that teaches Agent 1 to emit blueprints is covered by
+# live behavior in Phase 10 bench runs. These unit tests cover the SCHEMA
+# layer — which is where downstream phases plug in — plus backward-compat
+# with pre-Phase-3 saved outputs.
+# ============================================================================
+
+class TestWorkflowBlueprintSchema:
+
+    def test_single_step_blueprint(self):
+        # "I need a chatbot" case — a 1-step blueprint is legitimate.
+        bp = WorkflowBlueprint(
+            steps=[
+                WorkflowStep(
+                    id="step_1", role="chatbot",
+                    description="Answer customer support questions",
+                    capability="customer support chatbot",
+                    input_from="user", output_format="free_text",
+                    depends_on=[], all_in_one_compatible=True,
+                ),
+            ],
+            architecture_options=["all_in_one"],
+            notes="Single-capability request.",
+        )
+        assert len(bp.steps) == 1
+        assert bp.steps[0].depends_on == []
+        assert bp.architecture_options == ["all_in_one"]
+
+    def test_two_step_blueprint_depends_on_chain(self):
+        # Classic ingestion -> output pattern.
+        bp = WorkflowBlueprint(
+            steps=[
+                WorkflowStep(
+                    id="step_1", role="ocr",
+                    description="OCR invoice photo",
+                    capability="document OCR",
+                    input_from="user", output_format="structured_json",
+                    depends_on=[],
+                ),
+                WorkflowStep(
+                    id="step_2", role="spreadsheet_sync",
+                    description="Append rows to Google Sheets",
+                    capability="spreadsheet integration",
+                    input_from="step_1", output_format="action",
+                    depends_on=["step_1"],
+                ),
+            ],
+        )
+        assert bp.steps[1].input_from == "step_1"
+        assert bp.steps[1].depends_on == ["step_1"]
+
+    def test_architecture_options_default(self):
+        # Default factory should supply both options when none passed.
+        bp = WorkflowBlueprint(
+            steps=[WorkflowStep(
+                id="step_1", role="ocr",
+                description="OCR", capability="document OCR",
+                input_from="user", output_format="structured_json",
+            )],
+        )
+        assert bp.architecture_options == ["all_in_one", "best_per_step"]
+
+    def test_blueprint_json_round_trip(self):
+        bp = WorkflowBlueprint(
+            steps=[
+                WorkflowStep(
+                    id="step_1", role="ocr",
+                    description="x", capability="document OCR",
+                    input_from="user", output_format="structured_json",
+                    depends_on=[],
+                ),
+                WorkflowStep(
+                    id="step_2", role="classify",
+                    description="y", capability="classification",
+                    input_from="step_1", output_format="classification",
+                    depends_on=["step_1"],
+                ),
+            ],
+            notes="round-trip test",
+        )
+        s = bp.model_dump_json()
+        back = WorkflowBlueprint.model_validate_json(s)
+        assert len(back.steps) == 2
+        assert back.steps[1].depends_on == ["step_1"]
+        assert back.notes == "round-trip test"
+
+
+class TestUserUnderstandingOutputBackwardCompat:
+
+    def test_output_without_workflow_still_parses(self):
+        # Pre-Phase-3 saved artifacts have no `workflow` field. Default=None
+        # keeps them parseable; downstream branches on `is not None`.
+        uo = UserUnderstandingOutput.model_validate_json(json.dumps({
+            "summary": "test",
+            "sub_tasks": [{
+                "description": "d", "capability": "c", "search_keywords": ["k"],
+            }],
+            "search_strategy": "both",
+            "domain": "d",
+            "search_keywords": ["k"],
+            "constraints": {},
+            "workflow_summary": None,
+            # NB: no "workflow" field
+        }))
+        assert uo.workflow is None  # defaults to None
+
+    def test_output_with_workflow_present(self):
+        uo = UserUnderstandingOutput(
+            summary="t",
+            sub_tasks=[SubTask(description="d", capability="document OCR", search_keywords=["k"])],
+            domain="d",
+            search_keywords=["k"],
+            constraints=Constraints(),
+            workflow=WorkflowBlueprint(steps=[
+                WorkflowStep(
+                    id="step_1", role="ocr",
+                    description="OCR docs", capability="document OCR",
+                    input_from="user", output_format="structured_json",
+                ),
+            ]),
+        )
+        assert uo.workflow is not None
+        assert uo.workflow.steps[0].capability == "document OCR"

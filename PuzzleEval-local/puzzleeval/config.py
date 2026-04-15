@@ -51,6 +51,25 @@ DEFAULT_MODEL = os.environ.get("PUZZLEEVAL_MODEL", "claude-sonnet-4-6")
 
 
 # ---------------------------------------------------------------------------
+# Agent 1 Model (promoted in Phase 3)
+# ---------------------------------------------------------------------------
+# Before Phase 3, Agent 1 was a parser — extract sub-tasks from user text.
+# Sonnet 4.6 was sufficient. Phase 3 promotes Agent 1 to a DIRECTOR role:
+# decompose the user's demand into an ordered WorkflowBlueprint with
+# step ordering, data flow, role assignment, and architecture options
+# (all-in-one vs best-per-step). This requires real planning reasoning —
+# the kind of task Opus 4.6 is materially better at than Sonnet.
+#
+# Cost impact: Agent 1 runs in ~1-3 turns with ~4K in + ~0.5-1K out per turn.
+# Sonnet -> Opus roughly doubles the Agent 1 cost from ~$0.05 to ~$0.10 per
+# evaluation. At the pipeline scale (~$6 total), this is a ~1% rounding error.
+#
+# Override with: export PUZZLEEVAL_AGENT1_MODEL="claude-sonnet-4-6" to revert.
+# ---------------------------------------------------------------------------
+AGENT1_MODEL = os.environ.get("PUZZLEEVAL_AGENT1_MODEL", "claude-opus-4-6")
+
+
+# ---------------------------------------------------------------------------
 # Research Model (Agent 2)
 # ---------------------------------------------------------------------------
 # Agent 2 uses Sonnet 4.6 for web research. Now the same as DEFAULT_MODEL,
@@ -156,6 +175,27 @@ CACHE_READ_MULTIPLIER = 0.10
 # Used in logging to calculate total cost per Agent 2 run.
 # ---------------------------------------------------------------------------
 WEB_SEARCH_PRICE_PER_SEARCH = 0.01
+
+
+# ---------------------------------------------------------------------------
+# Web Fetch Fallback (Phase 1: Cloudflare hardening)
+# ---------------------------------------------------------------------------
+# Anthropic's server-side web_fetch tool sometimes hits 403/Cloudflare blocks
+# (url_not_accessible) or 429 rate limits (too_many_requests). The model has
+# already seen the error inside its current turn — but we can guide the NEXT
+# turn with a fallback message that suggests web_search alternatives,
+# GitHub SDK lookups, or alternate docs URLs.
+#
+# When True (default): detect blocked fetches per turn, log counts, inject
+# fallback guidance for Agent 5's next turn, and apply a backoff sleep on 429.
+# When False: skip detection entirely (legacy behavior).
+#
+# Used by puzzleeval/web_fetch_fallback.py and Agents 4 / 5.
+# ---------------------------------------------------------------------------
+ENABLE_FETCH_FALLBACK = os.environ.get("PUZZLEEVAL_ENABLE_FETCH_FALLBACK", "1") != "0"
+FETCH_RATE_LIMIT_BACKOFF_SECONDS = int(
+    os.environ.get("PUZZLEEVAL_FETCH_RATE_LIMIT_BACKOFF", "5")
+)
 
 
 # ---------------------------------------------------------------------------

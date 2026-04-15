@@ -21,6 +21,8 @@ from puzzleeval.schemas import (
     SubTask,
     TestCase,
     UserUnderstandingOutput,
+    WorkflowBlueprint,
+    WorkflowStep,
 )
 from puzzleeval.validators import (
     validate_agent1_output,
@@ -488,3 +490,150 @@ class TestAgent3Validator:
         v = validate_agent3_output(result, _make_user_understanding())
         assert v.passed  # warning, not error
         assert any("coverage_summary is empty" in w for w in v.warnings)
+
+
+# ============================================================================
+# Phase 3: WorkflowBlueprint validator
+# ============================================================================
+# These sit inside validate_agent1_output (same function as existing Agent 1
+# checks). Verify that blueprint structural bugs are caught as errors while
+# soft inconsistencies (capability drift) are caught as warnings.
+# ============================================================================
+
+class TestAgent1WorkflowValidator:
+    """validate_agent1_output checks for blueprint consistency when workflow is present."""
+
+    def _result_with_workflow(self, workflow: WorkflowBlueprint | None) -> Agent1Result:
+        return Agent1Result(
+            is_clear=True,
+            result=UserUnderstandingOutput(
+                summary="User needs AI for invoice OCR and spreadsheet sync",
+                sub_tasks=[
+                    SubTask(description="OCR", capability="document OCR",
+                            search_keywords=["invoice OCR API", "document extraction"]),
+                    SubTask(description="Sync", capability="spreadsheet integration",
+                            search_keywords=["Google Sheets API", "spreadsheet automation"]),
+                ],
+                search_strategy="both",
+                domain="accounting",
+                search_keywords=["invoice automation", "OCR to sheets"],
+                constraints=Constraints(),
+                workflow=workflow,
+            ),
+            clarification_needed=None,
+        )
+
+    def test_valid_blueprint_passes(self):
+        # Clean 2-step blueprint with matching capabilities -> no errors.
+        bp = WorkflowBlueprint(
+            steps=[
+                WorkflowStep(
+                    id="step_1", role="ocr",
+                    description="OCR invoice", capability="document OCR",
+                    input_from="user", output_format="structured_json",
+                ),
+                WorkflowStep(
+                    id="step_2", role="spreadsheet_sync",
+                    description="Append rows", capability="spreadsheet integration",
+                    input_from="step_1", output_format="action",
+                    depends_on=["step_1"],
+                ),
+            ],
+        )
+        v = validate_agent1_output(self._result_with_workflow(bp))
+        assert v.passed, f"Expected passed, got errors={v.errors}"
+
+    def test_null_workflow_is_valid(self):
+        # Agent 1 can legitimately emit workflow=None; validator shouldn't complain.
+        v = validate_agent1_output(self._result_with_workflow(None))
+        assert v.passed
+
+    def test_empty_steps_is_error(self):
+        bp = WorkflowBlueprint(steps=[])
+        v = validate_agent1_output(self._result_with_workflow(bp))
+        assert not v.passed
+        assert any("zero steps" in e for e in v.errors)
+
+    def test_duplicate_step_ids_is_error(self):
+        # Two steps sharing the same id breaks Phase 9's harness keying.
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(id="step_1", role="ocr", description="x",
+                         capability="document OCR", input_from="user",
+                         output_format="structured_json"),
+            WorkflowStep(id="step_1", role="classify", description="y",
+                         capability="classification", input_from="step_1",
+                         output_format="classification"),
+        ])
+        v = validate_agent1_output(self._result_with_workflow(bp))
+        assert not v.passed
+        assert any("Duplicate" in e for e in v.errors)
+
+    def test_empty_step_id_is_error(self):
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(id="", role="ocr", description="x",
+                         capability="document OCR", input_from="user",
+                         output_format="structured_json"),
+        ])
+        v = validate_agent1_output(self._result_with_workflow(bp))
+        assert not v.passed
+        assert any("empty id" in e for e in v.errors)
+
+    def test_orphan_depends_on_is_error(self):
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(id="step_1", role="ocr", description="x",
+                         capability="document OCR", input_from="user",
+                         output_format="structured_json",
+                         depends_on=["step_99"]),  # step_99 doesn't exist
+        ])
+        v = validate_agent1_output(self._result_with_workflow(bp))
+        assert not v.passed
+        assert any("step_99" in e for e in v.errors)
+
+    def test_orphan_input_from_is_error(self):
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(id="step_1", role="ocr", description="x",
+                         capability="document OCR",
+                         input_from="step_nonexistent",  # not "user", not a valid id
+                         output_format="structured_json"),
+        ])
+        v = validate_agent1_output(self._result_with_workflow(bp))
+        assert not v.passed
+        assert any("input_from" in e for e in v.errors)
+
+    def test_capability_mismatch_is_warning(self):
+        # Slight capability drift (e.g. "OCR" vs "document OCR") -> warning,
+        # not error. Downstream will still work; we just flag for review.
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(id="step_1", role="ocr", description="x",
+                         capability="OCR",  # SubTask uses "document OCR"
+                         input_from="user", output_format="structured_json"),
+        ])
+        v = validate_agent1_output(self._result_with_workflow(bp))
+        assert v.passed  # not an error
+        assert any("capability" in w.lower() for w in v.warnings)
+
+    def test_empty_role_is_error(self):
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(id="step_1", role="", description="x",
+                         capability="document OCR",
+                         input_from="user", output_format="structured_json"),
+        ])
+        v = validate_agent1_output(self._result_with_workflow(bp))
+        assert not v.passed
+        assert any("empty role" in e for e in v.errors)
+
+    def test_user_input_from_is_valid(self):
+        # "user" is a special valid value for input_from (not a step id).
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(id="step_1", role="chatbot", description="x",
+                         capability="customer support chatbot",
+                         input_from="user", output_format="free_text"),
+        ])
+        result = self._result_with_workflow(bp)
+        # SubTask to match the chatbot capability
+        result.result.sub_tasks = [
+            SubTask(description="d", capability="customer support chatbot",
+                    search_keywords=["k1", "k2"]),
+        ]
+        v = validate_agent1_output(result)
+        assert v.passed

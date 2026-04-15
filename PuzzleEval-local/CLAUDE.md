@@ -24,6 +24,336 @@ For Agent 5 testing, a temporary shim injects all `provider_registry.json` provi
 
 The frontend is being built separately by another person using Lovable. There is no backend API yet — agents are tested via CLI.
 
+### Phase 1 Refinement: Cloudflare / Web Fetch Hardening (2026-04-14)
+
+Anthropic's server-side `web_fetch_20250910` tool gets blocked ~5–10% of the time
+by Cloudflare WAFs, 429 rate limits, or generic 5xx errors. The user-agent that
+the tool sends is fixed by the API — we cannot rotate headers — so the fix is
+DETECT and PIVOT, not impersonate.
+
+**`puzzleeval/web_fetch_fallback.py`** classifies the eight `WebFetchToolResultErrorCode`
+values into recoverable (`url_not_accessible`, `too_many_requests`, `unavailable`)
+and non-recoverable (`invalid_tool_input`, `url_too_long`, etc.). For each
+recoverable block in a model response we:
+
+- Track the count for observability.
+- Apply a 5-second backoff before the next turn if a 429 was seen.
+- (Agent 5 only) Inject a fallback guidance text block into the same user
+  message as the tool_results, telling the model to try `web_search 'site:DOMAIN TOPIC'`,
+  GitHub SDK repos, alternate docs subdomains, or `web.archive.org` snapshots.
+
+**Where wired in:**
+- Agent 4 (`screening.py`): per-candidate count returned as the third tuple element from
+  `_verify_single_candidate`, summed in `run_screening_agent`, surfaced as `Agent4Result.web_fetch_blocks`.
+- Agent 5 (`implement_test_env.py`): `candidate_web_fetch_blocks` accumulated inside
+  `_build_single_harness`, set on every `TestHarness` / `FailedHarness`, summed into
+  `Agent5Result.web_fetch_blocks`.
+- `pipeline.py`: `AgentRecord.metadata` auto-promotes `web_fetch_blocks` from
+  output schemas via `_AUTO_METADATA_FIELDS`. `pipeline_summary.json` now carries
+  per-agent and run-level totals when blocks are non-zero.
+- Agent 2 (`research.py`): no fetches today, no integration needed.
+
+**Toggle:** `PUZZLEEVAL_ENABLE_FETCH_FALLBACK=0` (default `1`/on) — disables detection
+and fallback. `PUZZLEEVAL_FETCH_RATE_LIMIT_BACKOFF=N` (default `5`) — backoff seconds.
+
+**Tests:** `tests/test_web_fetch_fallback.py` (21 cases) — covers detection,
+fallback-message construction, backoff stub, summary aggregation, and the
+`PipelineRun.save_agent_result` / `finalize` integration.
+
+### Phase 1.5 Refinement: Content-Quality Assessment (2026-04-14)
+
+Phase 1 hardens the **HTTP layer** (403, 429, 5xx). Phase 1.5 hardens the
+**content layer**: a fetch can return HTTP 200 and still be useless to the
+agent — JavaScript SPA shells (Next.js, React, Vue, Angular), login walls,
+soft 404s ("page not found" served as 200), or marketing-only landing pages.
+Same recovery path as Phase 1; just a broader trigger surface.
+
+**Design principle:** identify usable pages by **positive signals** —
+endpoint patterns, auth examples, code blocks, prose with API keywords. ANY
+positive signal → page is usable, regardless of how it was rendered. Only
+when zero positive signals fire do we run a secondary classification ("why
+is this empty?") to specialize the recovery message. This avoids hardcoding
+framework markers (Next.js, React) as the primary detector — they evolve
+too fast and miss adjacent failure modes (auth walls, marketing pages)
+entirely.
+
+**`puzzleeval/web_fetch_fallback.py`** gains:
+- `assess_content_quality(text) -> ContentVerdict` — two-stage classifier.
+  Stage 1: scan for endpoint regex (`(GET|POST|...)\s+/...`), auth markers
+  (`Authorization:`, `Bearer `, `X-API-Key:`), code calls (`curl`,
+  `requests.post`, `fetch(`, `axios.`), or ≥500-char prose body containing
+  API keywords (`endpoint`, `authentication`, `parameter`, etc.).
+  Stage 2: classify why empty as `script_rendered` / `auth_wall` /
+  `not_found_soft` / `unknown_useless`.
+- `extract_unusable_pages(response)` — complement to
+  `extract_blocked_fetches`. Scans successful `web_fetch_tool_result`
+  blocks, runs the classifier, returns dicts of `{url, category,
+  tool_use_id}` for any page that comes back unusable.
+- `build_fallback_message(blocked, unusable)` — extended to include
+  category-specific recovery guidance (SPA pivot to deep URLs / openapi
+  search / GitHub SDK; auth-wall pivot to archive.org / GitHub SDK; soft
+  404 pivot to sitemap / search; unknown pivot to broader search).
+- `count_actionable_problems(blocked, unusable)` — sums recoverable HTTP
+  errors + unusable pages into one count. Wired into Agent 4/5's
+  `web_fetch_blocks` field.
+
+**Where wired in:**
+- Agent 4 (`screening.py`): per-turn detection alongside the existing
+  block scan, both folded into `candidate_block_count`.
+- Agent 5 (`implement_test_env.py`): per-turn detection alongside the
+  existing block scan, unified guidance appended to `tool_results`.
+- `Agent4Result.web_fetch_blocks` / `Agent5Result.web_fetch_blocks` /
+  `TestHarness.web_fetch_blocks` / `FailedHarness.web_fetch_blocks`
+  docstrings updated to reflect the expanded semantics ("HTTP error OR
+  content-level failure").
+
+**Toggle:** same `PUZZLEEVAL_ENABLE_FETCH_FALLBACK=0` flag as Phase 1
+disables both classifiers in one switch.
+
+**Tests:** `tests/test_web_fetch_fallback.py` extended to 43 cases —
+adds positive-signal detection (endpoint / auth / code-call / prose),
+secondary classification (4 categories), `extract_unusable_pages`
+behavior, combined Phase 1 + 1.5 guidance messages, and a Stripe-style
+negative-regression case proving rich code-heavy docs do NOT misclassify
+as `script_rendered`.
+
+**Open verification:** end-to-end success rate against real SPA-rendered
+providers will land via the Phase 10 generalizability bench, which is
+spec'd to include 3-4 SPA-rendered vendors (e.g., DocuClipper) so we can
+measure actual recovery-vs-baseline.
+
+### Phase 2 Refinement: Service Tier Scaffold (2026-04-14)
+
+User-facing PuzzleAI plans (Free / Paid / Enterprise) wired through the
+backend with a NO-OP DEFAULT — when `PUZZLEEVAL_BILLING_ENFORCED=0`
+(today), every gate is observability-only; agents run as before. Flipping
+the env var to `1` turns gates into hard `HTTPException(402)` blocks
+without any other code change.
+
+**`puzzleeval-api/services/billing.py`** is the single point of policy:
+- `PLAN_FEATURE_MATRIX` — `free`/`paid`/`enterprise` × `search`/`testing`/`monitoring`
+- `CREDIT_COST_PER_AGENT` — Agents 1-3 free, Agent 4 = 1 credit, Agent 5 = 5 credits
+- `PLAN_STARTING_CREDITS` — `free`/`enterprise` = unlimited; `paid` = 100
+- `require_agent_access(state, agent)` — single gate called from
+  `pipeline_runner.py` before Agent 4 and Agent 5 entries. Raises 402 in
+  enforced mode, increments `state.plan_gates_triggered` in no-op mode.
+- `quota_snapshot(state)` — serializes plan + credits + features for the
+  frontend `Quota` model.
+
+**Where wired in:**
+- `puzzleeval-api/services/run_manager.py` — `RunState` extended with
+  `plan`, `credits_remaining`, `credits_consumed`, `plan_gates_triggered`.
+  `RunManager.create_run(plan="...")` initializes the credit balance
+  via `billing.starting_credits_for(plan)`.
+- `puzzleeval-api/routes/runs.py` — POST `/runs` accepts optional
+  `plan` field; GET `/runs/{id}` returns `Quota` block via
+  `billing.quota_snapshot(state)`.
+- `puzzleeval-api/services/pipeline_runner.py` — Agent 4 and Agent 5
+  entries wrapped with `try/except HTTPException` → emit `agent_blocked`
+  + `pipeline_failed` SSE events on 402; otherwise pipeline runs
+  normally.
+- `puzzleeval-api/routes/monitoring.py` — new stub router with two
+  enterprise-gated endpoints (`/monitoring/{run_id}/status`,
+  `/monitoring/{run_id}/check`). Returns 402 unless `plan == "enterprise"`,
+  regardless of `BILLING_ENFORCED`. Real handlers land in a future phase.
+- `src/components/playground/QuotaBadge.tsx` — header badge that polls
+  `GET /runs/{id}` every 5s while a run is active. Shows `Free · search only`
+  / `Paid · 95 credits` / `Enterprise · unlimited`. Goes red when
+  `billing_enforced=true` AND `credits_remaining<=0`.
+- `src/types/pipeline.ts` — `Plan` and `Quota` types mirror the backend.
+- `src/services/api.ts` — `createRun(..., plan)` plumbs the plan through;
+  new `getRunState(runId)` call backs the badge polling.
+
+**Toggle:** `PUZZLEEVAL_BILLING_ENFORCED=1` flips on enforcement. Default
+`0` keeps every existing call path (CLI + frontend) running unchanged
+while still tracking usage for observability.
+
+**Tests:** `puzzleeval-api/tests/test_billing.py` (19 cases) — covers
+plan/feature matrix lookups, per-agent credit cost, RunState
+extensions, `require_agent_access` in both no-op and enforced modes,
+and `quota_snapshot` serialization. Combined with the 211-case
+PuzzleEval suite: 230 tests passing.
+
+**Frontend verification:** `bun run dev` (Vite on :8080); navigate to
+`/playground`; QuotaBadge renders in the header showing `FREE search only`
+when no run is active. The badge's tooltip reads
+`Plan: Free · search only · Advisory` (advisory = enforcement is off).
+
+**Phase fingerprint:** `metadata.credits_consumed`,
+`metadata.plan_gates_triggered` (will appear in `pipeline_summary.json`
+once `pipeline_runner.py` is migrated to call `pipeline_run.save_agent_result`
+— pre-existing gap noted in the Phase 1.5 wiring discussion;
+fix folded into Phase 2 since we touched these files anyway). Per-call
+billing logs include `{plan, agent, credits_after, credits_consumed_total,
+trace_id}` via `logger.info("billing_gate_passed", ...)`.
+
+**Diagnostic flag:** `PUZZLEEVAL_BILLING_ENFORCED=0|1`. When 0:
+gates record but never raise. When 1: 402 on first failure, pipeline
+emits `agent_blocked` + `pipeline_failed` SSE events, run status
+becomes `failed`.
+
+### Phase 3 Refinement: WorkflowBlueprint + Agent 1 as Director (2026-04-14)
+
+Agent 1 was a parser — extract sub-tasks from user text. Phase 3 promotes
+it to a **director**: decompose the user's demand into an ordered
+`WorkflowBlueprint` with step ordering, data flow, role assignment, and
+architecture options (all-in-one vs best-per-step). Downstream phases
+branch on this structure — Phase 4's dual search groups candidates by
+step role, Phase 6's selection UI renders the step chain, Phase 9's
+workflow harness wires `step_N.run() → step_N+1.run()`.
+
+**Model promotion.** `AGENT1_MODEL` is now **Opus 4.6** (was Sonnet 4.6).
+Override with `PUZZLEEVAL_AGENT1_MODEL=claude-sonnet-4-6` to revert.
+Cost impact: ~$0.10 per evaluation (was ~$0.05) — roughly 1% of the
+pipeline total; negligible at scale. Opus's stronger planning reasoning
+is what lets Agent 1 reliably emit consistent blueprints.
+
+**Schemas (additive).** `puzzleeval/schemas.py` adds:
+- `WorkflowStep` — `id`, `role`, `description`, `capability`, `input_from`,
+  `output_format`, `depends_on[]`, `all_in_one_compatible`. The
+  `capability` field is a string join key matching `SubTask.capability`.
+- `WorkflowBlueprint` — `steps[]`, `architecture_options[]`, `notes`.
+- `UserUnderstandingOutput.workflow: WorkflowBlueprint | None` — optional,
+  default `None`. Pre-Phase-3 saved artifacts still parse; downstream
+  phases branch on `workflow is not None`.
+
+**Prompt extension.** `user_understanding.py`'s `SYSTEM_PROMPT` grows a
+"Workflow Blueprint" section that teaches the director role:
+- Mirror `sub_tasks` (3 sub-tasks → 3 steps, capability strings match).
+- Order by data flow (`input_from="user"` first, then `input_from="step_N"`).
+- Don't invent structure (single-capability requests → 1-step blueprint).
+- `depends_on` is the DAG source of truth; `steps[]` order is presentation.
+- Only emit `workflow=None` when the request is truly unstructurable.
+
+**Validator.** `validators.py`'s `validate_agent1_output` now checks:
+- ID uniqueness (errors on duplicates — breaks Phase 9 harness keying)
+- `depends_on` references (errors on orphans — would silently skip at runtime)
+- `input_from` is either `"user"` or a valid step id
+- `capability` cross-refs at least one SubTask (warning, not error — tolerates
+  slight wording drift)
+- Role non-empty; role length reasonable
+
+**Where wired in:**
+- `puzzleeval-api/services/pipeline_runner.py` — emits new SSE event
+  `workflow_blueprint` after Agent 1 completes. Payload is the blueprint
+  dict or `null`. Frontend handler lives in `usePipelineRun.ts`.
+- `src/types/pipeline.ts` — `WorkflowStep` and `WorkflowBlueprint` types
+  mirror the Python schemas.
+- `src/components/playground/WorkflowDiagram.tsx` — new component. Renders
+  a horizontal step chain with arrows, role/description cards, architecture
+  badges, and Agent 1's notes in an italic tooltip below. Returns null when
+  `blueprint === null` (pre-Phase-3 fallback).
+- `src/pages/Playground.tsx` — renders `<WorkflowDiagram blueprint={workflow}>`
+  above the candidate list when `stage !== "conversation"`.
+
+**Toggle:** none — schema-only. Phase 3 cannot be disabled because
+downstream phases (4, 6, 7, 9) consume the blueprint. If Agent 1 fails to
+produce a blueprint (`workflow=None`), downstream branches to legacy
+flat-sub-tasks behavior automatically.
+
+**Tests:** `tests/test_agent1.py` adds 6 schema cases (single-step,
+multi-step, default architecture_options, JSON round-trip, backward-compat
+with/without workflow). `tests/test_validators.py` adds 10 validator cases
+(valid blueprint, null blueprint, empty steps, duplicate ids, empty id,
+orphan depends_on, orphan input_from, capability drift → warning, empty
+role, "user" input_from valid). Combined: 227 PuzzleEval + 19 billing =
+**246 tests passing**.
+
+**Frontend verification:** end-to-end drive in preview — drove mock
+pipeline through 2 conversation turns → `workflow_blueprint` SSE event
+fired → `WorkflowDiagram` rendered showing 2-step workflow ("ocr" →
+"accounting_sync") with arrow, architecture badges, and Agent 1 notes.
+Screenshot captured. TypeScript + Vite production build both clean.
+
+**Phase fingerprint:** `agent_1_output.json.result.workflow.steps` length
+`> 0` on new runs; missing/null on pre-Phase-3 artifacts. Frontend reads
+via `workflow_blueprint` SSE payload.
+
+**Diagnostic flag:** schema-only — no flag. Revert with
+`PUZZLEEVAL_AGENT1_MODEL=claude-sonnet-4-6` if the new Opus prompt
+produces worse blueprints than expected (unlikely, but a safety lever).
+
+## Diagnostic Conventions (Phase Fingerprints + Flag Matrix)
+
+We're shipping 10 phases of refinement without per-phase live testing —
+the user explicitly chose to do live runs only at the end. To make fault
+attribution tractable in that "one big live run" model, every phase from
+Phase 1 onward MUST satisfy two diagnostic conventions.
+
+### Convention 1: Phase Fingerprint
+
+Every phase leaves a unique, queryable signal in the run output so an
+operator can answer "did Phase N activate on this run?" with `grep`,
+not by reading source. Fingerprints live in either:
+- `pipeline_summary.json` under `metadata.<key>` (preferred for run-level
+  aggregates — auto-promoted from agent results via
+  `_AUTO_METADATA_FIELDS` in `puzzleeval/pipeline.py`), or
+- the per-agent JSON output (e.g., `agent_2_output.json.candidates_by_step`)
+  when the signal is naturally per-agent.
+
+Fingerprint table (filled in as each phase ships):
+
+| Phase | Signal | Where to find it |
+|-------|--------|------------------|
+| 1 + 1.5 | `web_fetch_blocks` (HTTP errors + content-level failures combined) | `pipeline_summary.json:metadata.web_fetch_blocks`; per-call breakdown in stderr logs as `web_fetch_blocks_by_code` / `web_fetch_unusable_by_category` |
+| 2     | `credits_consumed`, `plan_gates_triggered` on `RunState`; per-call logs as `billing_gate_passed` / `billing_gate_triggered`; `Quota.credits_consumed` in `RunStateOut` | `RunState` fields + stderr logs; `pipeline_summary.json` rollup pending the pipeline_runner refactor noted above |
+| 3     | `agent_1_output.json.result.workflow.steps[]` length > 0 (missing/null = pre-Phase-3 or unstructurable request); `workflow_blueprint` SSE event fires once after Agent 1 with the full payload | per-agent JSON + live SSE |
+| 4     | `agent_2_output.json.candidates_by_step` keys | per-agent JSON (planned) |
+| 5     | distribution of `pricing_breakdown.confidence` on `agent_4_output.json.validated_candidates` | per-agent JSON (planned) |
+| 6     | `metadata.user_selected_candidates_count`, `metadata.user_added_candidates_count`, `metadata.selection_required_emitted_at` | `pipeline_summary.json:metadata.*` (planned) |
+| 7     | `metadata.agent5_selection_reasons` dict | `pipeline_summary.json:metadata.*` (planned) |
+| 8     | `metadata.openapi_specs_found`, `metadata.docs_pages_traversed` | `pipeline_summary.json:metadata.*` (planned) |
+| 9     | `agent_5_output.json.workflow_runs` length (0 = single-step legacy path) | per-agent JSON (planned) |
+| 10    | bench/results/{timestamp}.json regression diff vs cassette baseline | `bench/` directory (planned) |
+
+When implementing a phase, add its row to this table in the same commit
+that adds the signal. If a phase doesn't have a natural fingerprint
+(pure schema additions can fall into this trap), invent one — even a
+boolean `metadata.phase_N_active=True` is enough.
+
+### Convention 2: Diagnostic Flag Matrix
+
+Every phase ships behind a feature flag so operators can binary-search
+by flipping flags off one at a time. Schema-only changes (Phase 3) can't
+be flag-disabled because downstream depends on the field existing —
+those rows are documented as "schema-only" so the operator knows not
+to look for a flag.
+
+Diagnostic flag table (filled in as each phase ships):
+
+| Phase | Env var | Default | Disable behavior |
+|-------|---------|---------|-----------------|
+| 1 + 1.5 | `PUZZLEEVAL_ENABLE_FETCH_FALLBACK` | `1` | Skip detection; agents see raw web_fetch errors and useless pages with no recovery guidance |
+| 1 (sub) | `PUZZLEEVAL_FETCH_RATE_LIMIT_BACKOFF` | `5` (seconds) | Set to `0` to disable backoff sleep on 429 |
+| 2     | `PUZZLEEVAL_BILLING_ENFORCED` | `0` | When `0`: track usage but don't block. When `1`: 402 on insufficient credits or feature-not-in-plan |
+| 3     | `PUZZLEEVAL_AGENT1_MODEL` (soft) | `claude-opus-4-6` | Revert to `claude-sonnet-4-6` if Opus blueprint quality regresses. Schema itself cannot be disabled — downstream consumes `WorkflowBlueprint`. |
+| 4     | `PUZZLEEVAL_DUAL_SEARCH_ENABLED` (planned) | `1` | When `0`: Agent 2 reverts to single-pass search (no per-step grouping) |
+| 5     | `PUZZLEEVAL_PRICING_RESEARCH_ENABLED` (planned) | `1` | When `0`: Agent 4 skips pricing extraction; field stays None |
+| 6     | `PUZZLEEVAL_USER_SELECTION_ENABLED` (planned) | `1` | When `0`: pipeline auto-runs through Agent 4/5 (today's behavior) |
+| 7     | `PUZZLEEVAL_SMART_SELECTION_ENABLED` (planned) | `1` | When `0`: Agent 5 reverts to relevance-only sort |
+| 8     | `PUZZLEEVAL_OPENAPI_HUNT_ENABLED` (planned) | `1` | When `0`: Agent 5 uses today's narrative-only research |
+| 9     | `PUZZLEEVAL_WORKFLOW_HARNESS_ENABLED` (planned) | `1` | When `0`: per-candidate harness path even with multi-step blueprint |
+
+Standard debugging procedure when something breaks at the end:
+1. Check `pipeline_summary.json:metadata` against the fingerprint table —
+   which phases activated?
+2. Check the per-agent JSON outputs for the per-agent fingerprints
+   (workflow blueprint, candidates_by_step, pricing breakdown, etc.).
+3. If a fingerprint that should be there is missing → inspect that phase's
+   code path; the phase didn't fire when it should have.
+4. If all expected fingerprints are present but behavior is wrong → flip
+   flags off in reverse phase order (`9 → 8 → 7 ...`) until behavior
+   recovers; the last-flipped flag is the culprit.
+5. If the behavior is wrong even with all toggleable flags off →
+   schema-level change in Phase 3 introduced something downstream
+   misinterprets; bisect via git over the schema commits.
+
+This procedure is mechanical for ~80% of failure modes. The remaining
+~20% (cross-phase emergent interactions, behavior regressions in agent
+reasoning that don't change observable signals) still require AI-assisted
+diagnosis from logs + traces. The conventions above don't eliminate that
+need — they minimize how often it's the only available tool.
+
 ## The 9-Agent Pipeline
 
 See `ARCHITECTURE.md` for the full spec. Summary:
@@ -67,6 +397,7 @@ PuzzleEval/
 │   ├── logging_setup.py         # Structured JSON logging shared by ALL agents
 │   ├── pipeline.py              # PipelineRun — saves intermediate outputs, generates summary
 │   ├── validators.py            # Output quality validators per agent (catch silent failures)
+│   ├── web_fetch_fallback.py    # Phase 1 hardening: detect Cloudflare/429/blocked fetches, inject fallback guidance for Agent 5
 │   ├── schemas.py               # Pydantic models for Agents 1, 2, 3, 4, and 5
 │   ├── file_parsers.py          # PDF/image (native Claude), DOCX/CSV/TXT (Python extraction)
 │   ├── provider_registry.py     # Centralized API key management for live validation

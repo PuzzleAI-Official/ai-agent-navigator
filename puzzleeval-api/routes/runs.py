@@ -8,8 +8,10 @@ from models.api_models import (
     CreateRunRequest,
     CreateRunResponse,
     PipelineProgressOut,
+    Quota,
     RunStateOut,
 )
+from services.billing import quota_snapshot
 from services.run_manager import run_manager
 from services.pipeline_runner import run_pipeline
 
@@ -18,7 +20,9 @@ router = APIRouter()
 
 @router.post("/runs", response_model=CreateRunResponse)
 async def create_run(req: CreateRunRequest):
-    state = run_manager.create_run(req.text, req.agent_modes)
+    # Phase 2: pass plan through to RunManager so the right credit balance
+    # gets initialized via billing.starting_credits_for(plan).
+    state = run_manager.create_run(req.text, req.agent_modes, plan=req.plan)
     return CreateRunResponse(run_id=state.run_id, trace_id=state.trace_id)
 
 
@@ -44,6 +48,7 @@ async def get_run(run_id: str):
         status=state.status,
         stage=stage_map.get(state.status, "conversation"),
         cost_usd=state.total_cost_usd,
+        quota=Quota(**quota_snapshot(state)),
     )
 
 

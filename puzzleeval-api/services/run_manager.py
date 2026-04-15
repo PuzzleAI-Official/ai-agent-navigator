@@ -38,6 +38,18 @@ class RunState:
     # Cost tracking
     total_cost_usd: float = 0.0
 
+    # ── Phase 2: Service tier scaffold ──
+    # ``plan`` selects the user-facing tier (free / paid / enterprise).
+    # ``credits_remaining`` is the in-memory ledger for paid-tier credit
+    # gating; None means unlimited (free or enterprise — see billing.py).
+    # ``credits_consumed`` and ``plan_gates_triggered`` are the run-level
+    # observability counters that surface in pipeline_summary.json metadata.
+    # All four are no-ops when PUZZLEEVAL_BILLING_ENFORCED=0 (the default).
+    plan: str = "free"
+    credits_remaining: Optional[int] = None
+    credits_consumed: int = 0
+    plan_gates_triggered: int = 0
+
     # SSE
     event_bus: EventBus = field(default_factory=EventBus)
 
@@ -51,13 +63,23 @@ class RunManager:
     def __init__(self):
         self._runs: dict[str, RunState] = {}
 
-    def create_run(self, text: str, agent_modes: dict[str, str] | None = None) -> RunState:
+    def create_run(
+        self,
+        text: str,
+        agent_modes: dict[str, str] | None = None,
+        plan: str = "free",
+    ) -> RunState:
         run_id = str(uuid.uuid4())[:8]
         trace_id = str(uuid.uuid4())
+        # Lazy import: billing imports run_manager via TYPE_CHECKING to avoid
+        # the cycle. Importing here at call time keeps the module graph clean.
+        from services.billing import starting_credits_for
         state = RunState(
             run_id=run_id,
             trace_id=trace_id,
             user_text=text,
+            plan=plan,
+            credits_remaining=starting_credits_for(plan),
         )
         if agent_modes:
             state.agent_modes = agent_modes

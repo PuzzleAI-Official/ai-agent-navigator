@@ -57,6 +57,42 @@ class AgentRecord(BaseModel):
 _AUTO_METADATA_FIELDS: tuple[str, ...] = ("web_fetch_blocks",)
 
 
+# Derived-metadata extractors. Each callable receives the output model and
+# returns (key, value) tuples to write into AgentRecord.metadata, or ()
+# when the field isn't relevant for this output. Keep each extractor
+# side-effect free and cheap. New phases add entries here to surface
+# phase-specific fingerprints without touching call sites.
+def _agent2_coverage_metadata(output: BaseModel) -> tuple[tuple[str, Any], ...]:
+    """
+    Phase 4: Agent 2 dual search fingerprint — how many candidates claim
+    coverage, how many scopes they collectively cover, and whether every
+    candidate has a non-empty covers_step_ids set. Silent on non-Agent-2
+    outputs (returns ()).
+    """
+    candidates = getattr(output, "candidates", None)
+    if candidates is None:
+        return ()
+    any_populated = any(
+        bool(getattr(c, "covers_step_ids", frozenset())) for c in candidates
+    )
+    if not any_populated:
+        return ()  # Legacy flat flow — skip the Phase 4 block entirely.
+    all_populated = all(
+        bool(getattr(c, "covers_step_ids", frozenset())) for c in candidates
+    )
+    all_scopes: set[str] = set()
+    for c in candidates:
+        all_scopes.update(getattr(c, "covers_step_ids", frozenset()))
+    return (
+        ("phase4_dual_search_active", True),
+        ("phase4_scopes_covered_count", len(all_scopes)),
+        ("phase4_coverage_populated_all", all_populated),
+    )
+
+
+_DERIVED_METADATA_EXTRACTORS: tuple = (_agent2_coverage_metadata,)
+
+
 class PipelineRun:
     """
     Manages a single pipeline run — saves intermediate outputs and
@@ -113,6 +149,18 @@ class PipelineRun:
             value = getattr(output_data, field_name, None)
             if value is not None and value != 0:
                 metadata[field_name] = value
+
+        # Derived fingerprints — richer signals that aren't just a scalar
+        # field on the output model. Each extractor is silent for outputs
+        # it doesn't apply to. Keeps phase-specific fingerprints close to
+        # their schemas without bloating the call sites.
+        for extractor in _DERIVED_METADATA_EXTRACTORS:
+            try:
+                for key, value in extractor(output_data):
+                    metadata[key] = value
+            except Exception:
+                # Never let a fingerprint helper break save_agent_result.
+                continue
 
         # Record in summary
         self.agents.append(AgentRecord(
@@ -201,6 +249,27 @@ class PipelineRun:
             total = sum(r.metadata.get(field_name, 0) for r in self.agents)
             if total:
                 run_metadata[field_name] = total
+
+        # Derived fingerprints — promote any that landed on at least one
+        # agent. Booleans promote as OR; ints promote as max (the last /
+        # highest agent wins). This keeps pipeline_summary.json queryable
+        # for "did Phase N fire on this run?" without a shape-per-phase.
+        for key in (
+            "phase4_dual_search_active",
+            "phase4_scopes_covered_count",
+            "phase4_coverage_populated_all",
+        ):
+            values = [
+                r.metadata[key] for r in self.agents if key in r.metadata
+            ]
+            if not values:
+                continue
+            if isinstance(values[0], bool):
+                run_metadata[key] = any(values)
+            elif isinstance(values[0], int):
+                run_metadata[key] = max(values)
+            else:
+                run_metadata[key] = values[-1]
 
         agent_dicts: list[dict[str, Any]] = []
         for r in self.agents:

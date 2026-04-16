@@ -1,4 +1,4 @@
-export type Stage = "conversation" | "pipeline" | "results";
+export type Stage = "conversation" | "pipeline" | "selection" | "results";
 
 // ---------------------------------------------------------------------------
 // Phase 3: WorkflowBlueprint — Agent 1 as director
@@ -16,7 +16,8 @@ export interface WorkflowStep {
   capability: string;               // matches SubTask.capability (join key)
   input_from: string | null;        // "user" | "step_1" | null
   output_format: string;            // "free_text" | "structured_json" | ...
-  depends_on: string[];             // ids of upstream steps
+  depends_on: string[];             // ids of upstream steps — DAG authoritative
+  parallel_group?: string | null;   // UI hint: sibling steps in one fan-out cluster
   all_in_one_compatible: boolean;
 }
 
@@ -55,6 +56,42 @@ export interface TestResult {
   criteria_scores: CriterionScore[];
 }
 
+// Phase 4: every candidate carries a coverage set over blueprint step IDs.
+// Values are "claimed" by Agent 2 dual search; Phase 6.5 upgrades confirmed
+// scopes to "verified" or drops them from covers_step_ids.
+export type CoverageConfidence = "claimed" | "verified";
+
+// ---------------------------------------------------------------------------
+// Phase 5: PricingBreakdown — structured pricing (populated by Phase 6.5)
+// ---------------------------------------------------------------------------
+// Mirrors puzzleeval/schemas.py::PricingBreakdown + PricingTier. Agent 2
+// never fills this — Phase 6.5's 4B extraction step populates it during
+// deep-verify. Every field is optional-ish so the UI renders gracefully
+// before 6.5 ships (pricing_breakdown = null everywhere today).
+// ---------------------------------------------------------------------------
+
+export type PricingConfidence = "high" | "medium" | "low";
+
+export interface PricingTier {
+  name: string;
+  monthly_cost_usd: number;
+  included_units?: number | null;
+  unit_name?: string | null;
+  overage_cost_per_unit_usd?: number | null;
+  notes?: string | null;
+}
+
+export interface PricingBreakdown {
+  tiers: PricingTier[];
+  free_tier_monthly_units?: number | null;
+  pay_as_you_go: boolean;
+  billing_granularity: string;              // "monthly" | "per_call" | "annual_commit" | "hybrid"
+  per_scope_unit_cost: Record<string, number>;  // keyed by step_id; empty when pricing is uniform
+  sources: string[];
+  confidence: PricingConfidence;
+  notes?: string | null;
+}
+
 export interface PipelineCandidate {
   name: string;
   provider: string;
@@ -62,6 +99,11 @@ export interface PipelineCandidate {
   relevance_score: number;
   adoption_difficulty: "easy" | "medium" | "hard";
   claimed_capabilities: string[];
+  // Phase 4: dual-search coverage
+  covers_step_ids: string[];                                  // blueprint step IDs this candidate claims to cover
+  coverage_confidence: Record<string, CoverageConfidence>;    // keyed by step_id; all "claimed" until Phase 6.5
+  // Phase 5: structured pricing (populated by Phase 6.5's 4B extraction)
+  pricing_breakdown?: PricingBreakdown | null;                // null until Phase 6.5 deep-verifies this candidate
   // Agent 4 enrichment
   confirmed_capabilities: string[];
   auth_method?: string;
@@ -125,6 +167,26 @@ export interface Quota {
   billing_enforced: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// Phase 9: Per-scope test execution
+// ---------------------------------------------------------------------------
+
+export interface ScopeTestRun {
+  scope_id: string;
+  scope_role: string;
+  candidate_results: Array<{
+    candidate_name: string;
+    provider: string;
+    pass_rate: number;
+    tests_passed: number;
+    tests_failed: number;
+    tests_errored: number;
+    avg_latency_ms: number;
+    total_cost_usd: number;
+  }>;
+  test_case_count: number;
+}
+
 export interface RunStateOut {
   run_id: string;
   trace_id: string;
@@ -133,3 +195,39 @@ export interface RunStateOut {
   cost_usd: number;
   quota: Quota;
 }
+
+// ---------------------------------------------------------------------------
+// Phase 6: User candidate selection types
+// ---------------------------------------------------------------------------
+
+export interface UserAddedCandidate {
+  name: string;
+  provider: string;
+  api_docs_url?: string | null;
+  notes?: string | null;
+  covers_step_ids: string[];
+  source?: string;
+}
+
+export interface SelectCandidatesRequest {
+  scope_picks: Record<string, string[]>;    // scope_id -> candidate names
+  add: UserAddedCandidate[];
+}
+
+export interface SelectCandidatesResponse {
+  accepted_count: number;
+  scope_coverage: Record<string, number>;   // scope_id -> count picked
+}
+
+// Phase 6.5 forward-compat: rejection entries shown by RejectionSummary
+// after deep-verify. Null-safe scaffold — no data flows until Phase 6.5.
+export interface RejectionEntry {
+  name: string;
+  provider: string;
+  scope_id: string;
+  reason: "docs_unreachable" | "enterprise_only" | "deprecated" | "no_api" | "coverage_removed_at_scope" | "verify_error";
+  attempt_notes: string;
+}
+
+// Phase 9 convenience alias used by ResultsComparison
+export type ScopeCandidateResult = ScopeTestRun["candidate_results"][number];

@@ -233,7 +233,25 @@ class WorkflowStep(BaseModel):
         default_factory=list,
         description=(
             "IDs of steps that must complete before this one starts. Encodes "
-            "the DAG. Empty list = no dependencies (step can run first)."
+            "the DAG. Empty list = no dependencies (step can run first). "
+            "Two steps whose `depends_on` lists don't reference each other "
+            "are implicitly parallel — the runtime can execute them "
+            "concurrently. Cycles are forbidden; the Agent 1 validator "
+            "rejects them as errors."
+        )
+    )
+
+    parallel_group: str | None = Field(
+        default=None,
+        description=(
+            "Optional tag that clusters this step with siblings in the same "
+            "intentional fan-out (e.g. three enrichment steps that all read "
+            "step_1's output). Purely a layout hint for the frontend "
+            "WorkflowDiagram — steps sharing the same non-null tag render "
+            "side-by-side in one visual group. DAG semantics are still "
+            "governed entirely by `depends_on`; `parallel_group` never "
+            "changes execution order. Leave null for linear chains and "
+            "single-step blueprints."
         )
     )
 
@@ -285,6 +303,171 @@ class WorkflowBlueprint(BaseModel):
             "Rendered in the UI tooltip on the WorkflowDiagram so the user "
             "understands why we decomposed it this way and can correct it "
             "in the Phase 6 selection UI if needed."
+        )
+    )
+
+
+# ============================================================================
+# Test Plan — Agent 1 as test director
+# ============================================================================
+# Agent 1 designs the test plan alongside the workflow. Instead of Agent 3/3F
+# independently guessing what tests to generate, they execute THIS plan.
+# Each scope gets an explicit spec: what mode (file/synthetic), what input
+# shape, what output shape, and example data so downstream steps get
+# correctly-shaped test inputs.
+# ============================================================================
+
+
+class ScopeTestSpec(BaseModel):
+    """Per-scope test specification authored by Agent 1."""
+
+    scope_id: str = Field(
+        description="Matches WorkflowStep.id — the scope this spec is for"
+    )
+
+    test_mode: str = Field(
+        description=(
+            "How to generate test cases for this scope. One of: "
+            "'file_based' (requires user-uploaded files — Agent 3F), "
+            "'synthetic_text' (Agent 3 generates text-based test data), "
+            "'synthetic_structured' (Agent 3 generates structured JSON test data). "
+            "Determined by Agent 1 based on the sub-task nature and whether "
+            "this scope processes files or structured data."
+        )
+    )
+
+    input_type: str = Field(
+        description=(
+            "The input_type that test cases for this scope MUST use. "
+            "One of: 'text', 'structured_data', 'document_content', "
+            "'conversation', 'image_description'. Agent 3/3F must set "
+            "this on every test case for this scope."
+        )
+    )
+
+    output_type: str = Field(
+        description=(
+            "The output_type that test cases for this scope MUST use. "
+            "Matches the WorkflowStep.output_format for this scope. "
+            "One of: 'free_text', 'structured_json', 'classification', "
+            "'extraction', 'action'."
+        )
+    )
+
+    input_description: str = Field(
+        description=(
+            "Human-readable description of what a good test input looks "
+            "like for this scope. Example: 'A photo or PDF of a real "
+            "invoice with vendor name, line items, amounts, and dates.'"
+        )
+    )
+
+    expected_output_description: str = Field(
+        description=(
+            "Human-readable description of the ideal output. Example: "
+            "'Structured JSON with vendor_name, line_items[], total, "
+            "tax, date fields extracted accurately.'"
+        )
+    )
+
+    sample_input: str = Field(
+        description=(
+            "ONE concrete example of what input_data should look like. "
+            "For file-based: a text description of the file content. "
+            "For downstream steps: a simulated upstream output. "
+            "Agent 3 uses this as a template for generating variations."
+        )
+    )
+
+    sample_output: str = Field(
+        description=(
+            "ONE concrete example of expected_output. Agent 3 uses this "
+            "to understand the shape and content of ideal responses."
+        )
+    )
+
+    test_count_target: int = Field(
+        default=7,
+        description=(
+            "How many test cases to generate for this scope. "
+            "Default 7 (middle of 5-8 range). Agent 1 may increase for "
+            "complex scopes or decrease for simple ones."
+        )
+    )
+
+    upstream_output_shape: str | None = Field(
+        default=None,
+        description=(
+            "For downstream steps (input_from != 'user'): describes the "
+            "shape of the upstream step's output so Agent 3 can generate "
+            "test inputs that SIMULATE what the upstream step produces. "
+            "Example: '{\"vendor_name\": \"...\", \"line_items\": [...], "
+            "\"total\": 0.00}'. Null for root steps (input_from='user')."
+        )
+    )
+
+    requires_user_files: bool = Field(
+        default=False,
+        description=(
+            "True when this scope ideally tests with real user files "
+            "(OCR, document parsing, image analysis). Matches "
+            "SubTask.requires_test_files. When true and files are "
+            "provided, Agent 3F runs for this scope. When true but no "
+            "files provided, Agent 3 generates synthetic proxies with "
+            "file_required=True flagged."
+        )
+    )
+
+    file_description: str | None = Field(
+        default=None,
+        description=(
+            "When requires_user_files is True, describes what files the "
+            "user should provide. Example: '5-10 sample invoice photos "
+            "or PDFs (different vendors, amounts)'. Null when False."
+        )
+    )
+
+    evaluation_focus: list[str] = Field(
+        default_factory=lambda: ["accuracy", "completeness"],
+        description=(
+            "What the judgement criteria should emphasize for this scope. "
+            "Examples: 'accuracy' (correct extraction), 'completeness' "
+            "(all fields present), 'format_compliance' (valid JSON), "
+            "'latency' (response time matters), 'error_handling' "
+            "(graceful degradation on bad input)."
+        )
+    )
+
+
+class TestPlan(BaseModel):
+    """
+    Agent 1's centralized test plan. Consumed by Agent 3/3F.
+
+    Instead of Agent 3/3F independently guessing what tests to generate,
+    they execute THIS plan. The plan ensures:
+    1. Every scope gets the right test mode (file vs synthetic)
+    2. Input/output types match the workflow architecture exactly
+    3. Downstream steps get test inputs shaped like upstream outputs
+    4. Test count allocation is proportional to scope complexity
+    5. Evaluation criteria are scope-appropriate
+    """
+
+    scope_specs: list[ScopeTestSpec] = Field(
+        description=(
+            "One spec per scope in the workflow. Order matches "
+            "WorkflowBlueprint.steps order."
+        )
+    )
+
+    total_test_target: int = Field(
+        description="Sum of all scope_specs[].test_count_target."
+    )
+
+    notes: str = Field(
+        default="",
+        description=(
+            "Agent 1's reasoning about the test strategy — why certain "
+            "scopes get more tests, what evaluation dimensions matter most."
         )
     )
 
@@ -355,6 +538,19 @@ class UserUnderstandingOutput(BaseModel):
             "Downstream phases (Phase 4 dual search, Phase 6 selection UI, "
             "Phase 9 chained harnesses) consume this. None means the workflow "
             "couldn't be determined or this output predates Phase 3."
+        )
+    )
+
+    # ── Test Plan: Agent 1 as test director ──
+    # Agent 1 specifies per-scope test specs so Agent 3/3F execute a plan
+    # instead of guessing independently. Optional for backward compat.
+    test_plan: TestPlan | None = Field(
+        default=None,
+        description=(
+            "Per-scope test specifications authored by Agent 1 alongside "
+            "the workflow blueprint. Agent 3/3F consume this to generate "
+            "correctly-shaped test data for each scope. None means Agent "
+            "3/3F fall back to independent generation (pre-TestPlan behavior)."
         )
     )
 
@@ -514,6 +710,221 @@ class Agent2Input(BaseModel):
 
 
 # ============================================================================
+# Phase 5: PricingBreakdown — structured pricing (populated by Phase 6.5)
+# ============================================================================
+# Agent 2's loose `pricing_model` / `pricing_details` strings are fine for
+# surveying the landscape but useless for "how much will this actually cost
+# me per month for X volume?" — that question needs structured tiers,
+# overage costs, and per-scope-unit rates when the provider charges
+# differently across scopes (e.g. OCR per page vs sync per event).
+#
+# Phase 6.5's 4B extraction populates this during deep-verify, at the
+# same time it extracts endpoints — no separate research call. For
+# candidates that never reach deep-verify (rejected, or user never picked
+# them), pricing_breakdown stays None and downstream falls back to the
+# legacy pricing_model / pricing_details strings.
+#
+# The `sources` field is load-bearing: the UI surfaces it so users can
+# verify pricing themselves, and Phase 6.5's 4B prompt is instructed to
+# only populate a tier when it has a source URL backing it.
+# ============================================================================
+
+
+class PricingTier(BaseModel):
+    """One pricing tier. Tiers are ordered cheapest-first in a PricingBreakdown."""
+
+    name: str = Field(
+        description='Human-readable tier name, e.g. "Free", "Starter", "Pro", "Enterprise"'
+    )
+
+    monthly_cost_usd: float = Field(
+        description=(
+            "Flat monthly base cost in USD for this tier (0 for free / "
+            "pay-as-you-go tiers). Does NOT include per-unit overage."
+        )
+    )
+
+    included_units: int | None = Field(
+        default=None,
+        description=(
+            "Units included in the monthly base cost. Null when the tier "
+            "is pure pay-as-you-go (no included allowance)."
+        ),
+    )
+
+    unit_name: str | None = Field(
+        default=None,
+        description=(
+            'The unit being metered: "pages", "calls", "tokens", "events", '
+            '"documents". Null when the tier is flat-rate with no metering.'
+        ),
+    )
+
+    overage_cost_per_unit_usd: float | None = Field(
+        default=None,
+        description=(
+            "Cost per unit once included_units is exhausted (or per unit "
+            "from zero for pay-as-you-go tiers). Null when the tier has "
+            "no overage / hard-cap behavior."
+        ),
+    )
+
+    notes: str | None = Field(
+        default=None,
+        description=(
+            "Freeform caveats: annual-only pricing, regional discounts, "
+            "volume commitments. Rendered in the UI tier tooltip."
+        ),
+    )
+
+
+class PricingBreakdown(BaseModel):
+    """
+    Structured pricing for a candidate. Populated by Phase 6.5's 4B
+    extraction turn-phase; null for candidates never deep-verified.
+    """
+
+    tiers: list[PricingTier] = Field(
+        description=(
+            "Pricing tiers, ordered CHEAPEST FIRST. Must have at least one "
+            "entry — a candidate that offers only 'enterprise contact sales' "
+            "should be REJECTED in Phase 6.5 as enterprise_only, not have an "
+            "empty tier list here."
+        )
+    )
+
+    free_tier_monthly_units: int | None = Field(
+        default=None,
+        description=(
+            "If the candidate has a genuinely free tier (no trial, no "
+            "credit card, self-service signup), the monthly unit allowance "
+            "of that tier. Null when no free tier exists. Redundant with "
+            "tiers[0].included_units when tiers[0].monthly_cost_usd == 0, "
+            "but callout'd as a top-level field because Phase 7's selection "
+            "scoring uses it as a fast yes/no signal."
+        ),
+    )
+
+    pay_as_you_go: bool = Field(
+        default=False,
+        description=(
+            "True when the candidate supports true pay-as-you-go with no "
+            "monthly minimum (paying only for what you use). Different from "
+            "free-tier — a paid tier at $0 base + $0.01/call IS pay-as-you-go."
+        ),
+    )
+
+    billing_granularity: str = Field(
+        default="monthly",
+        description=(
+            "How the provider bills: 'monthly' (most common), 'per_call' "
+            "(pure PAYG with no statement cycle), 'annual_commit' (requires "
+            "up-front year), 'hybrid' (mix of monthly + per-call overage)."
+        ),
+    )
+
+    per_scope_unit_cost: dict[str, float] = Field(
+        default_factory=dict,
+        description=(
+            "Per-scope-id unit cost when the provider charges DIFFERENTLY "
+            "across the scopes this candidate covers. Example: Zapier "
+            "covering OCR scope at $0.10/page and sync scope at $0.005/event "
+            "would set {'step_1': 0.10, 'step_2': 0.005}. Empty dict = "
+            "uniform pricing (fall back to tiers[*].overage_cost_per_unit_usd). "
+            "Keys must be a subset of Candidate.covers_step_ids — validator "
+            "catches drift."
+        ),
+    )
+
+    sources: list[str] = Field(
+        description=(
+            "Canonical URLs that back this pricing. Must have at least one "
+            "entry — usually the provider's /pricing page, sometimes the "
+            "API docs page when pricing is inlined. Surfaced in the UI so "
+            "users can sanity-check the numbers themselves."
+        )
+    )
+
+    confidence: str = Field(
+        default="medium",
+        description=(
+            "Extractor's confidence in the accuracy of the parsed tiers. "
+            'Values: "high" (pricing page parsed cleanly with explicit tier '
+            'table), "medium" (tiers inferred from marketing copy or partial '
+            'docs), "low" (couldn\'t find a pricing page; numbers are guesses '
+            "from roundup articles). A run with many 'low' entries is a "
+            "signal that Phase 6.5's 4B pricing hunt is underperforming."
+        ),
+    )
+
+    notes: str | None = Field(
+        default=None,
+        description=(
+            "Freeform caveats affecting overall pricing: volume commits, "
+            "annual-only discounts, region-specific pricing, hidden fees."
+        ),
+    )
+
+
+# ============================================================================
+# Phase 6: UserAddedCandidate — candidates submitted via the SelectionPanel
+# ============================================================================
+# After Agent 2 produces the candidate pool and the pipeline pauses, the
+# user can optionally add providers that Agent 2 didn't surface — usually
+# tools the user already knows, private/niche APIs, or in-house services.
+# The `covers_step_ids` are explicit (user declares which scopes they
+# want this provider tested at). source="user_provided" so downstream
+# logs can distinguish search-found from user-added candidates.
+# ============================================================================
+
+class UserAddedCandidate(BaseModel):
+    """A user-supplied candidate submitted during the Phase 6 pause."""
+
+    name: str = Field(
+        description="Service/product name, e.g. 'MyInternalOCR', 'Acme Doc API'"
+    )
+
+    provider: str = Field(
+        description="Company or organization behind the service"
+    )
+
+    api_docs_url: str | None = Field(
+        default=None,
+        description=(
+            "Optional URL to API docs. When provided, Phase 6.5's deep-verify "
+            "loop starts here. When null, Phase 6.5 does its own discovery "
+            "pass via web_search."
+        ),
+    )
+
+    notes: str | None = Field(
+        default=None,
+        description=(
+            "Free-form user note. Surfaced in the UI tooltip so downstream "
+            "agents know what the user had in mind."
+        ),
+    )
+
+    covers_step_ids: list[str] = Field(
+        description=(
+            "Blueprint step IDs this provider covers — REQUIRED. At least "
+            "one scope must be specified. Every ID must correspond to a "
+            "step in the current blueprint; the select-candidates route "
+            "validates this."
+        )
+    )
+
+    source: str = Field(
+        default="user_provided",
+        description=(
+            "Provenance tag. Always 'user_provided' for UserAddedCandidate; "
+            "kept as a field so the Candidate record emitted by "
+            "inject_user_candidates carries it through unchanged."
+        ),
+    )
+
+
+# ============================================================================
 # Agent 2 Output Schemas
 # ============================================================================
 
@@ -636,6 +1047,58 @@ class Candidate(BaseModel):
             "Use 'training knowledge' only if the candidate was known to the "
             "model without web search confirmation."
         )
+    )
+
+    # ── Phase 4: arbitrary-coverage scope sets ──
+    # These two fields are the contract between Agent 2 (dual search) and
+    # Phase 7 (per-scope top-K selection) / Phase 6.5 (deep verify). They
+    # replace the old concept of "workflow_role" / simple-grouping — every
+    # candidate is just a coverage SET, arbitrary in shape.
+    covers_step_ids: frozenset[str] = Field(
+        default_factory=frozenset,
+        description=(
+            "Blueprint step IDs this candidate CLAIMS to cover. Populated "
+            "by Agent 2 from search snippets — specialists surfaced in a "
+            "per-scope search default to {that_one_step_id}; all-in-ones "
+            "surfaced in the horizontal survey get their full claimed "
+            "coverage (e.g. {'step_1', 'step_2', 'step_3'}). Coverage is "
+            "ARBITRARY — no special multi-step category — a provider may "
+            "cover 1, 2, or all N scopes and competes equally at every "
+            "scope it claims. Dedup happens by candidate name: a tool "
+            "surfaced in multiple searches merges its claimed scope sets. "
+            "Empty frozenset for legacy flat flow (no blueprint, or dual "
+            "search disabled). Phase 6.5's Agent 4 deep-verify is "
+            "AUTHORITATIVE — it can remove unverifiable scopes from this "
+            "set and upgrade verified ones in coverage_confidence."
+        ),
+    )
+    coverage_confidence: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-scope-id confidence tag. Values: 'claimed' (Agent 2's "
+            "initial guess from search snippets) or 'verified' (Phase "
+            "6.5 confirmed from docs). Keys align with covers_step_ids. "
+            "All Agent 2 output is 'claimed'; the UI shows a small "
+            "unverified dot next to such scopes so the user sees what "
+            "still has to be validated. Empty dict mirrors empty "
+            "covers_step_ids (legacy flat flow)."
+        ),
+    )
+
+    # ── Phase 5: structured pricing (populated by Phase 6.5's 4B extraction) ──
+    # Agent 2 never fills this — it's None until Phase 6.5 deep-verifies the
+    # candidate. The legacy `pricing_model` / `pricing_details` strings above
+    # remain authoritative for candidates that never reach deep-verify.
+    pricing_breakdown: PricingBreakdown | None = Field(
+        default=None,
+        description=(
+            "Structured pricing populated by Phase 6.5's 4B extraction. "
+            "None for Agent 2 output and for any candidate that never "
+            "reaches deep-verify (rejected, or user never picked them). "
+            "When present, takes precedence over pricing_model / "
+            "pricing_details for per-scope cost summaries and monthly "
+            "budget estimates."
+        ),
     )
 
 
@@ -797,6 +1260,17 @@ class TestCase(BaseModel):
         )
     )
 
+    scope_id: str | None = Field(
+        default=None,
+        description=(
+            "When a TestPlan exists, the scope (WorkflowStep.id) this test "
+            "case targets. Populated by Agent 3 from ScopeTestSpec.scope_id. "
+            "When set, scope_routing.group_tests_by_scope uses this as a "
+            "deterministic primary key instead of fuzzy sub_task_ref matching. "
+            "None for pre-TestPlan test cases (legacy flow)."
+        ),
+    )
+
     scenario: str = Field(
         description=(
             "Human-readable description of the test scenario. "
@@ -854,8 +1328,9 @@ class TestCase(BaseModel):
         description=(
             "True when this test case ideally needs a file but none was provided. "
             "Set by the CLI when sub-tasks have requires_test_files=true but no "
-            "--test-files were given. Agent 5 treats these as skippable for "
-            "file-based APIs."
+            "--test-files were given. Agent 5 runs these with text input_data "
+            "as fallback — if the API returns INCOMPATIBLE, the result is "
+            "recorded as a normal failure (not skipped)."
         )
     )
 
@@ -1109,6 +1584,49 @@ class ScreenedCandidate(BaseModel):
         )
     )
 
+    # ── Phase 6.5: deep-verify enrichments ──
+    api_spec_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path to api_spec.txt produced by Phase 6.5 deep-verify. "
+            "Agent 5 reads this at build time instead of re-researching. "
+            "None for candidates not deep-verified (rejected or never selected)."
+        ),
+    )
+
+    covers_step_ids: frozenset[str] = Field(
+        default_factory=frozenset,
+        description=(
+            "Blueprint step IDs this candidate covers. Phase 6.5 OVERWRITES "
+            "with verified truth — scopes that couldn't be verified in 4C "
+            "are REMOVED from this set. Empty frozenset for legacy flow."
+        ),
+    )
+
+    coverage_confidence: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Per-scope confidence: 'claimed' (from Agent 2) or 'verified' "
+            "(confirmed by Phase 6.5's 4C). Keys align with covers_step_ids."
+        ),
+    )
+
+    # ── Phase 5: structured pricing (populated by Phase 6.5's 4B extraction) ──
+    # When Phase 6.5 lands, 4B extracts pricing at the same time as endpoints
+    # (same provider domain, often same page). Until 6.5 is live this stays
+    # None on every ScreenedCandidate — the field exists so consumers don't
+    # have to null-check against a missing attribute, only against a None
+    # value.
+    pricing_breakdown: PricingBreakdown | None = Field(
+        default=None,
+        description=(
+            "Structured pricing. Populated by Phase 6.5's 4B extraction "
+            "turn-phase at the same time as endpoints. None when the "
+            "pricing page couldn't be found or parsed, when Phase 6.5 "
+            "hasn't shipped yet, or when the candidate predates Phase 5."
+        ),
+    )
+
 
 class RejectedCandidate(BaseModel):
     """
@@ -1150,6 +1668,23 @@ class RejectedCandidate(BaseModel):
             "'deprecated' (API is deprecated or being sunset), "
             "'region_restricted' (API not available in required regions)"
         )
+    )
+
+
+class FailedToVerify(BaseModel):
+    """Phase 6.5: a candidate that failed deep-verify for a specific scope."""
+    name: str = Field(description="Service/product name that failed verification")
+    provider: str = Field(description="Company behind the service")
+    scope_id: str = Field(description="Which scope slot this verification attempt was for")
+    reason: str = Field(
+        description=(
+            "Rejection category. One of: 'docs_unreachable', 'enterprise_only', "
+            "'deprecated', 'no_api', 'coverage_removed_at_scope', 'verify_error'"
+        )
+    )
+    attempt_notes: str = Field(
+        default="",
+        description="Agent 4's trail of search attempts for audit trail"
     )
 
 
@@ -1212,6 +1747,23 @@ class Agent4Result(BaseModel):
             "(Phase 1.5). Surfaced for observability so the team can spot "
             "providers whose docs are consistently unreachable or unrenderable. "
             "See puzzleeval/web_fetch_fallback.py for both classifiers."
+        ),
+    )
+
+    failed_to_verify: list[FailedToVerify] = Field(
+        default_factory=list,
+        description=(
+            "Phase 6.5: candidates that failed deep-verify, with per-scope "
+            "rejection reasons. Empty for legacy shallow verification."
+        ),
+    )
+
+    scope_selections: dict[str, list[str]] = Field(
+        default_factory=dict,
+        description=(
+            "Phase 7: per-scope verified candidate mapping that Phase 9 "
+            "consumes. Keys are scope/step IDs, values are lists of "
+            "candidate names selected for that scope. Empty for legacy flow."
         ),
     )
 
@@ -1509,6 +2061,20 @@ class FailedHarness(BaseModel):
     )
 
 
+class ScopeTestRun(BaseModel):
+    """Phase 9: test results for one scope in a multi-scope workflow."""
+    scope_id: str = Field(description="e.g. 'step_1'")
+    scope_role: str = Field(description="e.g. 'ocr' — from WorkflowStep.role")
+    candidate_results: list["CandidateTestRun"] = Field(
+        default_factory=list,
+        description="Ordered by aggregate score descending at this scope"
+    )
+    test_case_count: int = Field(
+        default=0,
+        description="How many Agent 3/3F test cases ran at this scope"
+    )
+
+
 class Agent5Result(BaseModel):
     """
     Agent 5's complete output. Consumed by Agent 5 (Integration).
@@ -1607,6 +2173,17 @@ class Agent5Result(BaseModel):
             "providers whose docs are consistently unreachable or "
             "unrenderable. See puzzleeval/web_fetch_fallback.py for both "
             "classifiers."
+        ),
+    )
+
+    scope_runs: list[ScopeTestRun] = Field(
+        default_factory=list,
+        description=(
+            "Phase 9: one entry per scope that had at least one candidate "
+            "tested. A 1-scope workflow produces 1 ScopeTestRun whose "
+            "candidate_results matches the legacy candidate_runs list. "
+            "Multi-scope workflows produce N entries. Empty for legacy "
+            "flow (pre-Phase-9 outputs)."
         ),
     )
 
@@ -1733,8 +2310,10 @@ class TestCaseResult(BaseModel):
         default=None,
         description=(
             "Reason this test was skipped (not executed/evaluated). "
-            "Set when the harness returns INCOMPATIBLE or when file_required=true "
-            "but no file is available. Skipped tests don't count toward error rate."
+            "Set when the harness returns INCOMPATIBLE for a non-file_required "
+            "test. file_required tests with no file are NOT skipped — they are "
+            "run with text input_data as fallback and recorded as normal "
+            "failures if the API cannot handle text-only input."
         )
     )
 

@@ -147,6 +147,19 @@ def is_unlimited(state: "RunState") -> bool:
     return state.credits_remaining is None
 
 
+# Phase 7: per-scope cap on how many candidates get deep-verified + tested.
+PLAN_SCOPE_CANDIDATES_CAP = {
+    "free": 3,
+    "paid": 5,
+    "enterprise": 10,
+}
+
+
+def scope_candidates_cap(plan: str) -> int:
+    """Return the max candidates per scope for the given plan."""
+    return PLAN_SCOPE_CANDIDATES_CAP.get(plan, PLAN_SCOPE_CANDIDATES_CAP["free"])
+
+
 # ---------------------------------------------------------------------------
 # Public API — gating
 # ---------------------------------------------------------------------------

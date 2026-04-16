@@ -8,6 +8,8 @@ from typing import Any
 
 from fastapi import HTTPException
 
+from datetime import datetime, timezone
+
 from services.billing import require_agent_access
 from services.run_manager import RunState
 
@@ -197,12 +199,51 @@ async def run_pipeline(state: RunState):
         # pre-Phase-3 Agent 1 outputs (mock data saved before Phase 3)
         # so the frontend knows to skip the diagram.
         workflow_payload = None
+        test_plan_payload = None
         try:
             raw_result = (state.agent1_result or {}).get("result", {})
             workflow_payload = raw_result.get("workflow")
+            test_plan_payload = raw_result.get("test_plan")
         except AttributeError:
             workflow_payload = None
-        emit("workflow_blueprint", {"workflow": workflow_payload})
+            test_plan_payload = None
+        emit("workflow_blueprint", {
+            "workflow": workflow_payload,
+            "test_plan": test_plan_payload,
+        })
+
+        # ── Architecture summary in chat ──
+        # After Agent 1 finishes, show a brief summary of the designed
+        # architecture + test plan in the chat so the user sees "here's
+        # what I'm about to build and test" before research starts.
+        # This is a non-blocking UX improvement — not a pause.
+        if workflow_payload:
+            steps = workflow_payload.get("steps", [])
+            arch_lines = []
+            for s in steps:
+                role = s.get("role", "?")
+                desc = s.get("description", "")
+                arch_lines.append(f"**{s.get('id', '?')}** ({role}): {desc}")
+            arch_summary = "\n".join(arch_lines)
+
+            test_plan_summary = ""
+            if test_plan_payload:
+                specs = test_plan_payload.get("scope_specs", [])
+                tp_lines = []
+                for spec in specs:
+                    mode = spec.get("test_mode", "?")
+                    count = spec.get("test_count_target", "?")
+                    tp_lines.append(f"- {spec.get('scope_id', '?')}: {mode}, {count} tests")
+                test_plan_summary = "\n\n**Test Plan:**\n" + "\n".join(tp_lines)
+
+            emit("agent_activity", {
+                "agent": "agent_1",
+                "message": (
+                    f"Workflow designed with {len(steps)} scope(s):\n{arch_summary}"
+                    f"{test_plan_summary}"
+                ),
+                "status": "success",
+            })
 
         # ------------------------------------------------------------------
         # Branch A: Agent 2 → Agent 4 (sequential)
@@ -235,6 +276,20 @@ async def run_pipeline(state: RunState):
 
             # Emit Agent 2 completion
             candidates = state.agent2_result.get("candidates", [])
+            # Phase 4: dual-search coverage fields travel with every
+            # candidate payload so the frontend can build the per-scope
+            # CandidateCard view and the CoverageMatrix. Frozenset
+            # serializes as a list via Pydantic's model_dump; cast defensively
+            # in case the registry shim passes through a plain list/set.
+            def _coerce_coverage(raw) -> list[str]:
+                if raw is None:
+                    return []
+                if isinstance(raw, (list, tuple)):
+                    return sorted({str(x) for x in raw})
+                if isinstance(raw, (set, frozenset)):
+                    return sorted({str(x) for x in raw})
+                return []
+
             emit("candidates_found", {"candidates": [
                 {
                     "name": c.get("name", ""),
@@ -243,6 +298,8 @@ async def run_pipeline(state: RunState):
                     "relevance_score": c.get("relevance_score", 0),
                     "adoption_difficulty": c.get("adoption_difficulty", "medium"),
                     "claimed_capabilities": c.get("claimed_capabilities", []),
+                    "covers_step_ids": _coerce_coverage(c.get("covers_step_ids")),
+                    "coverage_confidence": c.get("coverage_confidence") or {},
                 }
                 for c in candidates
             ]})
@@ -252,6 +309,158 @@ async def run_pipeline(state: RunState):
 
             if state.cancel_requested:
                 return
+
+            # ── Phase 7: compute programmatic per-scope top-K defaults ──
+            # This provides the DEFAULT picks the SelectionPanel shows.
+            # User picks (Phase 6) OVERRIDE these. When Phase 6 is
+            # disabled (--no-interactive / flag off), these ARE the final
+            # picks that go to deep-verify.
+            from puzzleeval.selection import select_scope_candidate_pairs
+            from puzzleeval.schemas import Candidate as CandidateModel
+            from services.billing import scope_candidates_cap
+
+            bp_steps_for_selection = []
+            try:
+                raw_result = (state.agent1_result or {}).get("result", {})
+                raw_workflow = raw_result.get("workflow")
+                if raw_workflow:
+                    bp_steps_for_selection = [s.get("id", "") for s in raw_workflow.get("steps", [])]
+            except (AttributeError, TypeError):
+                pass
+
+            if bp_steps_for_selection and candidates:
+                # Build Candidate models for scoring
+                scoring_candidates = []
+                for c_dict in candidates:
+                    try:
+                        scoring_candidates.append(CandidateModel(**c_dict))
+                    except Exception:
+                        continue
+
+                programmatic_picks = select_scope_candidate_pairs(
+                    candidates=scoring_candidates,
+                    blueprint_step_ids=bp_steps_for_selection,
+                    cap_per_scope=scope_candidates_cap(state.plan),
+                )
+                emit("agent_activity", {
+                    "agent": "pipeline",
+                    "message": f"Phase 7: computed default per-scope selections ({sum(len(v) for v in programmatic_picks.values())} total picks across {len(programmatic_picks)} scopes)",
+                    "status": "info",
+                })
+            else:
+                programmatic_picks = {}
+
+            # ── Phase 6: pause for user candidate selection ──
+            # After Agent 2 emits its ranked pool and BEFORE Agent 4 screens,
+            # the pipeline pauses and waits for the user to:
+            #   1. Pick which candidates to test at each scope (keep/remove)
+            #   2. Optionally add custom providers with explicit covers_step_ids
+            #
+            # The pause emits `selection_required` SSE → frontend shows
+            # SelectionPanel → user POSTs to /runs/{id}/select-candidates →
+            # route handler sets state.selection_ready → we resume here.
+            #
+            # When PUZZLEEVAL_USER_SELECTION_ENABLED=0, the pause is skipped
+            # and all Agent 2 candidates proceed to Agent 4 (today's behavior).
+            from puzzleeval.config import USER_SELECTION_ENABLED
+            if USER_SELECTION_ENABLED and candidates:
+                # Group candidates by scope for the SelectionPanel
+                bp_steps = []
+                try:
+                    raw_result = (state.agent1_result or {}).get("result", {})
+                    raw_workflow = raw_result.get("workflow")
+                    if raw_workflow:
+                        bp_steps = raw_workflow.get("steps", [])
+                except (AttributeError, TypeError):
+                    pass
+
+                per_scope_candidates: dict[str, list[str]] = {}
+                for step in bp_steps:
+                    step_id = step.get("id", "")
+                    per_scope_candidates[step_id] = [
+                        c.get("name", "")
+                        for c in candidates
+                        if step_id in (_coerce_coverage(c.get("covers_step_ids")))
+                    ]
+
+                emit("selection_required", {
+                    "per_scope_candidates": per_scope_candidates,
+                    "default_picks": programmatic_picks,
+                    "total_candidates": len(candidates),
+                })
+                state.status = "awaiting_candidate_selection"
+                state.selection_required_emitted_at = datetime.now(timezone.utc).isoformat()
+                emit("agent_activity", {
+                    "agent": "pipeline",
+                    "message": "Waiting for candidate selection...",
+                    "status": "progress",
+                })
+
+                # Await selection OR cancellation — whichever fires first.
+                selection_task = asyncio.ensure_future(state.selection_ready.wait())
+                cancel_task = asyncio.ensure_future(state.cancel_event.wait())
+                done, pending = await asyncio.wait(
+                    [selection_task, cancel_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for t in pending:
+                    t.cancel()
+
+                if state.cancel_requested:
+                    return
+
+                # Apply the user's per-scope picks + user-added candidates.
+                from puzzleeval.agents.research import apply_scope_picks
+                from puzzleeval.schemas import Agent2Result, UserAddedCandidate
+
+                a2_model = Agent2Result(**state.agent2_result)
+                user_added = [
+                    UserAddedCandidate(**ua) for ua in state.user_added_candidates
+                ] if state.user_added_candidates else None
+
+                a2_model = apply_scope_picks(
+                    a2_model,
+                    scope_picks=state.user_scope_picks,
+                    user_added=user_added,
+                )
+                state.agent2_result = a2_model.model_dump()
+                state.user_selection_applied = True
+                state.status = "pipeline_running"
+
+                # Re-emit candidates_found with the filtered set so the
+                # frontend updates the candidate list to reflect picks.
+                filtered_candidates = state.agent2_result.get("candidates", [])
+                emit("candidates_found", {"candidates": [
+                    {
+                        "name": c.get("name", ""),
+                        "provider": c.get("provider", ""),
+                        "description": c.get("description", ""),
+                        "relevance_score": c.get("relevance_score", 0),
+                        "adoption_difficulty": c.get("adoption_difficulty", "medium"),
+                        "claimed_capabilities": c.get("claimed_capabilities", []),
+                        "covers_step_ids": _coerce_coverage(c.get("covers_step_ids")),
+                        "coverage_confidence": c.get("coverage_confidence") or {},
+                    }
+                    for c in filtered_candidates
+                ]})
+                emit("agent_activity", {
+                    "agent": "pipeline",
+                    "message": f"Selection applied — {len(filtered_candidates)} candidates proceeding to screening",
+                    "status": "success",
+                })
+            elif programmatic_picks and bp_steps_for_selection:
+                # Phase 6 disabled but Phase 7 computed picks → apply
+                # programmatic top-K as the selection (auto-run path).
+                from puzzleeval.agents.research import apply_scope_picks
+                from puzzleeval.schemas import Agent2Result as A2R
+                a2_model = A2R(**state.agent2_result)
+                a2_model = apply_scope_picks(a2_model, scope_picks=programmatic_picks)
+                state.agent2_result = a2_model.model_dump()
+                emit("agent_activity", {
+                    "agent": "pipeline",
+                    "message": f"Phase 7 auto-selection — {len(a2_model.candidates)} candidates proceeding",
+                    "status": "info",
+                })
 
             # --- Phase 2 billing gate: Agent 4 needs the "testing" feature ──
             # In default mode (PUZZLEEVAL_BILLING_ENFORCED=0) this is a no-op
@@ -324,6 +533,52 @@ async def run_pipeline(state: RunState):
             })
             emit("agent_completed", {"agent": "agent_4", "cost_usd": state.agent4_result.get("cost_usd", 0)})
             _save_json("agent_4_output.json", state.agent4_result)
+
+            # ── Phase 6.5: emit per-candidate deep-verify results ──
+            # These SSE events are consumed by the frontend's
+            # RejectionSummary (candidate_rejected) and CoverageBadge
+            # upgrade (candidate_verified). The events carry per-scope
+            # detail so the UI can render precisely which scopes passed
+            # and which were dropped.
+            from puzzleeval.config import AGENT4_DEEP_VERIFY_ENABLED
+            if AGENT4_DEEP_VERIFY_ENABLED:
+                for vc in validated:
+                    verified_scopes = list(vc.get("covers_step_ids", []))
+                    for sid in verified_scopes:
+                        emit("candidate_verified", {
+                            "candidate_name": vc.get("name", ""),
+                            "scope_id": sid,
+                            "provider": vc.get("provider", ""),
+                            "pricing_breakdown": vc.get("pricing_breakdown"),
+                        })
+
+                failed_list = state.agent4_result.get("failed_to_verify", [])
+                for ftv in failed_list:
+                    emit("candidate_rejected", {
+                        "candidate_name": ftv.get("name", ""),
+                        "scope_id": ftv.get("scope_id", ""),
+                        "reason": ftv.get("reason", "verify_error"),
+                        "provider": ftv.get("provider", ""),
+                        "attempt_notes": ftv.get("attempt_notes", ""),
+                    })
+
+                # Scope-level summary
+                scope_verified: dict[str, int] = {}
+                scope_rejected: dict[str, int] = {}
+                for vc in validated:
+                    for sid in vc.get("covers_step_ids", []):
+                        scope_verified[sid] = scope_verified.get(sid, 0) + 1
+                for ftv in failed_list:
+                    sid = ftv.get("scope_id", "")
+                    if sid:
+                        scope_rejected[sid] = scope_rejected.get(sid, 0) + 1
+                all_scope_ids = set(scope_verified) | set(scope_rejected)
+                for sid in sorted(all_scope_ids):
+                    emit("scope_verified_complete", {
+                        "scope_id": sid,
+                        "verified_count": scope_verified.get(sid, 0),
+                        "rejected_count": scope_rejected.get(sid, 0),
+                    })
 
         async def _branch_b_test_generation():
             """Agent 3/3F — runs independently of Agent 2→4."""
@@ -638,7 +893,7 @@ def _emit_agent5_results(state: RunState, emit):
 async def _run_real_agent2(state: RunState, user_understanding):
     """Run real Agent 2 (Research). Returns (dict, model) tuple."""
     from puzzleeval.schemas import Agent2Input
-    from puzzleeval.agents.research import run_research_agent, inject_registry_candidates
+    from puzzleeval.agents.research import run_research_agent
 
     agent2_input = Agent2Input(
         user_understanding=user_understanding,
@@ -647,32 +902,137 @@ async def _run_real_agent2(state: RunState, user_understanding):
 
     result = await asyncio.to_thread(run_research_agent, agent2_input)
 
-    # CRITICAL: Apply the registry candidate injection shim (same as CLI line 356)
-    result = inject_registry_candidates(result)
+    # Phase 6: the legacy `inject_registry_candidates` testing shim is
+    # retired here. Users now add specific providers via the SelectionPanel
+    # (flowing through inject_user_candidates) or via the CLI interactive
+    # prompt. Automated runs that need specific providers should POST to
+    # /runs/{id}/select-candidates with the desired `add` list.
 
     result_dict = result.model_dump()
     return result_dict, result
 
 
 async def _run_real_agent3(state: RunState, user_understanding):
-    """Run real Agent 3/3F (Test Generation). Returns (dict, model) tuple."""
-    from puzzleeval.schemas import Agent3Input
+    """Run real Agent 3/3F (Test Generation). Returns (dict, model) tuple.
+
+    Mixed-mode routing:
+      1. If Agent 1 produced a TestPlan → route by scope_spec.test_mode
+      2. Otherwise → route by sub_task.requires_test_files
+      3. Both agents produce Agent3Result → merge
+    """
+    from puzzleeval.schemas import (
+        Agent3Input, Agent3Result, UserUnderstandingOutput,
+        SubTask, Constraints,
+    )
     from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
     from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
 
     test_file_paths = [f.get("path") for f in state.uploaded_files if f.get("path")]
+    has_files = bool(test_file_paths)
 
-    agent3_input = Agent3Input(
-        user_understanding=user_understanding,
-        trace_id=state.trace_id,
-        test_file_paths=test_file_paths if test_file_paths else None,
-    )
+    # Determine file vs text sub-tasks using TestPlan or requires_test_files
+    all_subtasks = user_understanding.sub_tasks
+    test_plan = getattr(user_understanding, "test_plan", None)
 
-    # Route to file mode if test files provided
-    if test_file_paths:
-        result = await asyncio.to_thread(run_file_tests_agent, agent3_input)
+    file_subtasks = []
+    text_subtasks = []
+
+    if test_plan and test_plan.scope_specs:
+        # TestPlan routing — more precise than requires_test_files
+        file_scope_ids = {
+            s.scope_id for s in test_plan.scope_specs
+            if s.test_mode == "file_based"
+        }
+        blueprint = getattr(user_understanding, "workflow", None)
+        scope_caps = {}
+        if blueprint and blueprint.steps:
+            scope_caps = {
+                s.capability.strip().lower(): s.id
+                for s in blueprint.steps
+            }
+        for st in all_subtasks:
+            scope_id = scope_caps.get(st.capability.strip().lower(), "")
+            if scope_id in file_scope_ids:
+                file_subtasks.append(st)
+            else:
+                text_subtasks.append(st)
     else:
-        result = await asyncio.to_thread(run_synthetic_tests_agent, agent3_input)
+        file_subtasks = [st for st in all_subtasks if st.requires_test_files]
+        text_subtasks = [st for st in all_subtasks if not st.requires_test_files]
+
+    # Helper to build filtered UserUnderstandingOutput
+    def _filter_uo(subtasks_to_keep):
+        keep_descs = {st.description for st in subtasks_to_keep}
+        filtered = [st for st in all_subtasks if st.description in keep_descs]
+        return UserUnderstandingOutput(
+            summary=user_understanding.summary,
+            sub_tasks=filtered,
+            search_strategy=getattr(user_understanding, "search_strategy", "both"),
+            domain=user_understanding.domain,
+            search_keywords=user_understanding.search_keywords,
+            constraints=user_understanding.constraints,
+            workflow_summary=getattr(user_understanding, "workflow_summary", None),
+            workflow=getattr(user_understanding, "workflow", None),
+            test_plan=test_plan,
+        )
+
+    file_result = None
+    text_result = None
+
+    # Agent 3F: file-based sub-tasks (only when files provided)
+    if file_subtasks and has_files:
+        file_uo = _filter_uo(file_subtasks)
+        a3f_input = Agent3Input(
+            user_understanding=file_uo,
+            trace_id=state.trace_id,
+            test_file_paths=test_file_paths,
+        )
+        file_result = await asyncio.to_thread(run_file_tests_agent, a3f_input)
+
+    # Agent 3: synthetic sub-tasks (+ file sub-tasks when no files provided)
+    synth_subtasks = list(text_subtasks)
+    if not has_files and file_subtasks:
+        synth_subtasks.extend(file_subtasks)
+
+    if synth_subtasks:
+        synth_uo = _filter_uo(synth_subtasks)
+        a3_input = Agent3Input(
+            user_understanding=synth_uo,
+            trace_id=state.trace_id,
+        )
+        text_result = await asyncio.to_thread(run_synthetic_tests_agent, a3_input)
+
+        # Wire file_required flag for degraded file sub-tasks
+        if not has_files and file_subtasks and text_result:
+            file_caps = {st.capability.lower() for st in file_subtasks}
+            for tc in text_result.test_cases:
+                ref = tc.sub_task_ref.lower()
+                if any(cap in ref or ref in cap for cap in file_caps):
+                    tc.file_required = True
+
+    # Merge results
+    if file_result and text_result:
+        merged_cases = file_result.test_cases + text_result.test_cases
+        merged_coverage = dict(file_result.coverage_summary)
+        merged_coverage.update(text_result.coverage_summary)
+        result = Agent3Result(
+            test_cases=merged_cases,
+            generation_notes=(
+                f"Mixed-mode: {len(file_result.test_cases)} file-based + "
+                f"{len(text_result.test_cases)} synthetic."
+            ),
+            coverage_summary=merged_coverage,
+            cost_usd=file_result.cost_usd + text_result.cost_usd,
+        )
+    elif file_result:
+        result = file_result
+    elif text_result:
+        result = text_result
+    else:
+        result = Agent3Result(
+            test_cases=[], generation_notes="No test cases generated.",
+            coverage_summary={}, cost_usd=0.0,
+        )
 
     result_dict = result.model_dump()
     return result_dict, result

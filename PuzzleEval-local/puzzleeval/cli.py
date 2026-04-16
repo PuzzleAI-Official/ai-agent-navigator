@@ -42,7 +42,11 @@ from puzzleeval.validators import (
     validate_agent5_output,
 )
 from puzzleeval.agents.user_understanding import run_user_understanding_agent
-from puzzleeval.agents.research import run_research_agent, inject_registry_candidates
+from puzzleeval.agents.research import (
+    run_research_agent,
+    apply_scope_picks,
+    inject_user_candidates,
+)
 from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
 from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
 from puzzleeval.agents.screening import run_screening_agent
@@ -52,6 +56,197 @@ from puzzleeval.agents.implement_test_env import run_implement_test_env_agent
 # Max conversation turns before forcing a result.
 # The agent should decide to stop earlier on its own in most cases.
 MAX_TURNS = 4
+
+
+def _filter_user_understanding(uo, subtasks_to_keep):
+    """
+    Create a copy of UserUnderstandingOutput with only the specified sub-tasks.
+
+    Used by the mixed-mode test generation to give Agent 3F only the file
+    sub-tasks and Agent 3 only the text sub-tasks. Each agent generates
+    test cases scoped to its sub-tasks, then results merge.
+    """
+    from puzzleeval.schemas import UserUnderstandingOutput, Constraints
+    keep_descs = {st.description for st in subtasks_to_keep}
+    filtered_subtasks = [st for st in uo.sub_tasks if st.description in keep_descs]
+    # Keep everything else intact (summary, domain, keywords, constraints, workflow)
+    return UserUnderstandingOutput(
+        summary=uo.summary,
+        sub_tasks=filtered_subtasks,
+        search_strategy=uo.search_strategy,
+        domain=uo.domain,
+        search_keywords=uo.search_keywords,
+        constraints=uo.constraints,
+        workflow_summary=uo.workflow_summary,
+        workflow=uo.workflow,
+    )
+
+
+def _merge_agent3_results(file_result, text_result):
+    """
+    Merge Agent 3F (file-based) and Agent 3 (synthetic) results into
+    one Agent3Result. Handles cases where either or both are None.
+    """
+    from puzzleeval.schemas import Agent3Result
+
+    if file_result and text_result:
+        merged_cases = file_result.test_cases + text_result.test_cases
+        merged_coverage = dict(file_result.coverage_summary)
+        merged_coverage.update(text_result.coverage_summary)
+        merged_notes = (
+            f"Mixed-mode generation: {len(file_result.test_cases)} file-based "
+            f"+ {len(text_result.test_cases)} synthetic. "
+            f"File: {file_result.generation_notes[:100]}... "
+            f"Synthetic: {text_result.generation_notes[:100]}..."
+        )
+        return Agent3Result(
+            test_cases=merged_cases,
+            generation_notes=merged_notes,
+            coverage_summary=merged_coverage,
+            cost_usd=file_result.cost_usd + text_result.cost_usd,
+        )
+    elif file_result:
+        return file_result
+    elif text_result:
+        return text_result
+    else:
+        # Should never happen — at least one agent always runs
+        return Agent3Result(
+            test_cases=[],
+            generation_notes="No test cases generated (no sub-tasks).",
+            coverage_summary={},
+            cost_usd=0.0,
+        )
+
+
+def _cli_user_selection_pause(
+    a2_result,
+    blueprint,
+    no_interactive: bool,
+    logger,
+    trace_id: str,
+):
+    """
+    Phase 6: CLI-side pause for per-scope candidate picking. Mirrors the
+    API's SelectionPanel flow but runs against stdin/stderr.
+
+    Behavior:
+      - `--no-interactive` OR `PUZZLEEVAL_USER_SELECTION_ENABLED=0` → pure
+        pass-through (every Agent 2 candidate tested at every scope it
+        claimed — legacy behavior).
+      - No blueprint / 0-scope blueprint → pass-through (nothing to pick
+        per-scope).
+      - No candidates → pass-through (no picks possible).
+      - Otherwise: prints the Agent 2 candidate pool grouped by scope, then
+        prompts for each scope:
+            [y] keep all   [n] drop all   [i1,i3,i5] keep these indices
+        Submits the user's picks via apply_scope_picks.
+
+    Registry-based auto-add is GONE (Phase 6 retires the shim). Users who
+    want registry providers in automated runs add them via the API's
+    SelectionPanel UI or via a scripted select-candidates POST; the CLI
+    now treats every run as "the user has full manual control over which
+    candidates get tested."
+
+    Returns a NEW Agent2Result. Never mutates the input.
+    """
+    from puzzleeval.config import USER_SELECTION_ENABLED
+
+    if not USER_SELECTION_ENABLED or no_interactive:
+        logger.info("Phase 6 user selection skipped (flag off or --no-interactive)", extra={
+            "operation": "phase_6_skip", "trace_id": trace_id,
+        })
+        return apply_scope_picks(a2_result)  # pass-through
+
+    if not blueprint or not getattr(blueprint, "steps", None):
+        logger.info("Phase 6 skipped — no multi-scope blueprint", extra={
+            "operation": "phase_6_skip", "trace_id": trace_id,
+        })
+        return apply_scope_picks(a2_result)
+
+    if not a2_result.candidates:
+        logger.warning("Phase 6 skipped — no Agent 2 candidates to pick from", extra={
+            "operation": "phase_6_skip", "trace_id": trace_id,
+        })
+        return apply_scope_picks(a2_result)
+
+    # Group candidates by scope for display
+    print("\n" + "=" * 60, file=sys.stderr)
+    print("Phase 6: Candidate Selection (per scope)", file=sys.stderr)
+    print("=" * 60, file=sys.stderr)
+    print(file=sys.stderr)
+
+    scope_picks: dict[str, list[str]] = {}
+    for step in blueprint.steps:
+        candidates_here = [
+            c for c in a2_result.candidates
+            if step.id in c.covers_step_ids
+        ]
+        print(
+            f"  Scope {step.id} ({step.role}): "
+            f"{len(candidates_here)} candidate(s) claiming coverage",
+            file=sys.stderr,
+        )
+        if not candidates_here:
+            print("    (no candidates cover this scope)", file=sys.stderr)
+            scope_picks[step.id] = []
+            continue
+        for idx, c in enumerate(candidates_here, 1):
+            print(
+                f"    [{idx}] {c.name:<30} ({c.provider})  "
+                f"relevance={c.relevance_score:.2f}",
+                file=sys.stderr,
+            )
+        prompt = (
+            f"  Pick for {step.id}: [y]=keep all, [n]=drop all, "
+            f"comma-separated indices (e.g. 1,3): "
+        )
+        try:
+            response = input(prompt).strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print("\n  No input — keeping all candidates at this scope.", file=sys.stderr)
+            response = "y"
+        scope_picks[step.id] = _parse_scope_response(response, candidates_here)
+        print(
+            f"  → Kept {len(scope_picks[step.id])} candidate(s) at {step.id}",
+            file=sys.stderr,
+        )
+        print(file=sys.stderr)
+
+    # Summarize the decision
+    total_unique_picks = len({
+        name for names in scope_picks.values() for name in names
+    })
+    print(f"Summary: {total_unique_picks} unique candidates across all scopes",
+          file=sys.stderr)
+    print("=" * 60 + "\n", file=sys.stderr)
+
+    logger.info("Phase 6 user selection applied", extra={
+        "operation": "phase_6_applied", "trace_id": trace_id,
+        "scope_picks": {k: len(v) for k, v in scope_picks.items()},
+        "total_unique_picks": total_unique_picks,
+    })
+
+    return apply_scope_picks(a2_result, scope_picks=scope_picks)
+
+
+def _parse_scope_response(response: str, candidates_here) -> list[str]:
+    """Map a CLI response ('y' / 'n' / '1,3,5') to the kept candidate names."""
+    if not response or response == "y":
+        return [c.name for c in candidates_here]
+    if response == "n":
+        return []
+    try:
+        indices = [int(x.strip()) for x in response.split(",") if x.strip()]
+    except ValueError:
+        # Unparseable — default to keep all so the user doesn't accidentally
+        # drop everything with a typo.
+        return [c.name for c in candidates_here]
+    kept: list[str] = []
+    for i in indices:
+        if 1 <= i <= len(candidates_here):
+            kept.append(candidates_here[i - 1].name)
+    return kept
 
 
 def _print_validation(agent_name: str, validation, logger, trace_id: str):
@@ -353,7 +548,15 @@ Examples:
                     )
                     a2_start = time.time()
                     a2_result = run_research_agent(agent2_input)
-                    a2_result = inject_registry_candidates(a2_result)
+                    # Phase 6: prompt the user for per-scope candidate picks.
+                    # In --no-interactive mode this is a pure pass-through.
+                    a2_result = _cli_user_selection_pause(
+                        a2_result,
+                        blueprint=result.result.workflow,
+                        no_interactive=args.no_interactive,
+                        logger=logger,
+                        trace_id=trace_id,
+                    )
                     a2_duration = round((time.time() - a2_start) * 1000, 2)
 
                     pipeline_run.save_agent_result(
@@ -389,46 +592,115 @@ Examples:
                     return a2_result, a4_result
 
                 def _run_test_generation():
-                    """Branch B: Agent 3F (with files) or Agent 3 (text-only)."""
-                    a3_start = time.time()
+                    """Branch B: mixed-mode test generation.
 
-                    # Decision: if --test-files provided, go to Agent 3F for ALL
-                    # sub-tasks. Don't split into text/file — the user provided
-                    # files, they want file-based testing.
-                    if test_file_paths:
+                    Routing priority:
+                      1. If Agent 1 produced a TestPlan → route by scope_spec.test_mode
+                         (file_based → 3F, synthetic_* → Agent 3)
+                      2. Otherwise → route by sub_task.requires_test_files
+                      3. Both agents produce Agent3Result → merge
+
+                    Both agents produce Agent3Result. When both run, we merge
+                    their test_cases + coverage_summary into one Agent3Result.
+                    """
+                    a3_start = time.time()
+                    all_subtasks = result.result.sub_tasks
+
+                    # Determine file vs text sub-tasks.
+                    # TestPlan takes priority when available — its per-scope
+                    # test_mode is more precise than requires_test_files.
+                    test_plan = getattr(result.result, "test_plan", None)
+                    if test_plan and test_plan.scope_specs:
+                        file_scope_ids = {
+                            s.scope_id for s in test_plan.scope_specs
+                            if s.test_mode == "file_based"
+                        }
+                        # Map scope_id back to sub-tasks via capability
+                        blueprint = result.result.workflow
+                        scope_caps = {}
+                        if blueprint:
+                            scope_caps = {
+                                s.capability.strip().lower(): s.id
+                                for s in blueprint.steps
+                            }
+                        file_subtasks = []
+                        text_subtasks = []
+                        for st in all_subtasks:
+                            scope_id = scope_caps.get(st.capability.strip().lower(), "")
+                            if scope_id in file_scope_ids:
+                                file_subtasks.append(st)
+                            else:
+                                text_subtasks.append(st)
+                        print(f"  TestPlan routing: {len(file_subtasks)} file-based, {len(text_subtasks)} synthetic", file=sys.stderr)
+                    else:
+                        file_subtasks = [st for st in all_subtasks if st.requires_test_files]
+                        text_subtasks = [st for st in all_subtasks if not st.requires_test_files]
+
+                    a3_file_result = None
+                    a3_text_result = None
+
+                    # ── Agent 3F: file-based sub-tasks (only when files provided) ──
+                    if test_file_paths and file_subtasks:
                         print("\n" + "=" * 60, file=sys.stderr)
-                        print("Starting Agent 3F (File-Based Tests)...", file=sys.stderr)
+                        print(f"Starting Agent 3F (File-Based Tests) for {len(file_subtasks)} file sub-task(s)...", file=sys.stderr)
                         print(f"Reading {len(test_file_paths)} user-provided file(s).", file=sys.stderr)
                         print("=" * 60 + "\n", file=sys.stderr)
 
-                        a3_input = Agent3Input(
-                            user_understanding=result.result,
+                        # Build a filtered UserUnderstandingOutput with ONLY file sub-tasks
+                        # so Agent 3F focuses on generating ground truth from the files.
+                        file_uo = _filter_user_understanding(result.result, file_subtasks)
+
+                        a3f_input = Agent3Input(
+                            user_understanding=file_uo,
                             trace_id=trace_id,
                             test_file_paths=test_file_paths,
                         )
-                        a3_result = run_file_tests_agent(a3_input)
-                    else:
-                        # No files — Agent 3 synthetic text
+                        a3_file_result = run_file_tests_agent(a3f_input)
+                        print(f"  Agent 3F: {len(a3_file_result.test_cases)} file-based test cases", file=sys.stderr)
+
+                    # ── Agent 3: synthetic text sub-tasks ──
+                    # Always runs when there are text sub-tasks. Also runs for
+                    # file sub-tasks when no files were provided (degraded mode).
+                    synth_subtasks = list(text_subtasks)
+                    if not test_file_paths and file_subtasks:
+                        # No files provided but some sub-tasks need them —
+                        # Agent 3 generates synthetic text proxies.
+                        synth_subtasks.extend(file_subtasks)
+                        missing_subs = [st.description for st in file_subtasks]
+                        print(
+                            f"\n  NOTE: {len(file_subtasks)} sub-task(s) require test files but none provided:\n"
+                            + "".join(f"    - {d}\n" for d in missing_subs)
+                            + "  Generating synthetic text tests instead. Pass --test-files for better results.\n",
+                            file=sys.stderr,
+                        )
+
+                    if synth_subtasks:
                         print("\n" + "=" * 60, file=sys.stderr)
-                        print("Starting Agent 3 (Synthetic Tests)...", file=sys.stderr)
+                        print(f"Starting Agent 3 (Synthetic Tests) for {len(synth_subtasks)} text sub-task(s)...", file=sys.stderr)
                         print("=" * 60 + "\n", file=sys.stderr)
 
-                        # Warn if file sub-tasks exist
-                        file_subtasks = [st for st in result.result.sub_tasks if st.requires_test_files]
-                        if file_subtasks:
-                            missing_subs = [st.description for st in file_subtasks]
-                            print(
-                                f"\n  WARNING: {len(file_subtasks)} sub-task(s) require test files but none provided:\n"
-                                + "".join(f"    - {d}\n" for d in missing_subs)
-                                + "  Pass --test-files for better evaluation results.\n",
-                                file=sys.stderr,
-                            )
+                        synth_uo = _filter_user_understanding(result.result, synth_subtasks)
 
                         a3_input = Agent3Input(
-                            user_understanding=result.result,
+                            user_understanding=synth_uo,
                             trace_id=trace_id,
                         )
-                        a3_result = run_synthetic_tests_agent(a3_input)
+                        a3_text_result = run_synthetic_tests_agent(a3_input)
+                        print(f"  Agent 3: {len(a3_text_result.test_cases)} synthetic test cases", file=sys.stderr)
+
+                        # Wire file_required flag for sub-tasks that need files
+                        # but were given synthetic proxies instead.
+                        if not test_file_paths and file_subtasks:
+                            file_caps = {st.capability.lower() for st in file_subtasks}
+                            file_descs = {st.description.lower() for st in file_subtasks}
+                            for tc in a3_text_result.test_cases:
+                                ref = tc.sub_task_ref.lower()
+                                if any(cap in ref or ref in cap for cap in file_caps) or \
+                                   any(desc in ref or ref in desc for desc in file_descs):
+                                    tc.file_required = True
+
+                    # ── Merge results ──
+                    a3_result = _merge_agent3_results(a3_file_result, a3_text_result)
 
                     a3_duration = round((time.time() - a3_start) * 1000, 2)
                     pipeline_run.save_agent_result(
@@ -533,7 +805,14 @@ Examples:
                 )
                 agent2_start = time.time()
                 agent2_result = run_research_agent(agent2_input)
-                agent2_result = inject_registry_candidates(agent2_result)
+                # Phase 6: prompt for per-scope picks (no-op in --no-interactive).
+                agent2_result = _cli_user_selection_pause(
+                    agent2_result,
+                    blueprint=result.result.workflow,
+                    no_interactive=args.no_interactive,
+                    logger=logger,
+                    trace_id=trace_id,
+                )
                 agent2_duration = round((time.time() - agent2_start) * 1000, 2)
 
                 pipeline_run.save_agent_result(
@@ -596,74 +875,60 @@ Examples:
             agent3_start = time.time()
             final_result = None
 
-            # ── Run Agent 3 for text-only sub-tasks ──
-            if text_subtasks:
-                print("\n" + "=" * 60, file=sys.stderr)
-                print("Starting Agent 3 (Synthetic Tests) for text-based sub-tasks...", file=sys.stderr)
-                print("This may take 1-3 minutes.", file=sys.stderr)
-                print("=" * 60 + "\n", file=sys.stderr)
+            # ── Mixed-mode routing (same logic as --agent5 path) ──
+            a3_file_result = None
+            a3_text_result = None
 
-                agent3_input = Agent3Input(
-                    user_understanding=result.result,
-                    trace_id=trace_id,
-                )
-                text_result = run_synthetic_tests_agent(agent3_input)
-                final_result = text_result
-
-            # ── Warn if file-based sub-tasks exist but no files provided ──
-            if file_subtasks and not test_file_paths:
-                missing_subs = [st.description for st in file_subtasks]
-                print(
-                    f"\n  WARNING: {len(file_subtasks)} sub-task(s) require test files but none provided:\n"
-                    + "".join(f"    - {d}\n" for d in missing_subs)
-                    + "  Pass --test-files for better evaluation results.\n",
-                    file=sys.stderr,
-                )
-
-            # ── Run Agent 3F for file-based sub-tasks ──
+            # Agent 3F: file sub-tasks (only when files provided)
             if file_subtasks and test_file_paths:
                 print("\n" + "=" * 60, file=sys.stderr)
-                print("Starting Agent 3F (File-Based Tests) for file sub-tasks...", file=sys.stderr)
+                print(f"Starting Agent 3F (File-Based Tests) for {len(file_subtasks)} file sub-task(s)...", file=sys.stderr)
                 print(f"Reading {len(test_file_paths)} user-provided file(s).", file=sys.stderr)
-                print("This may take 1-3 minutes.", file=sys.stderr)
                 print("=" * 60 + "\n", file=sys.stderr)
 
-                agent3f_input = Agent3Input(
-                    user_understanding=result.result,
+                file_uo = _filter_user_understanding(result.result, file_subtasks)
+                a3f_input = Agent3Input(
+                    user_understanding=file_uo,
                     trace_id=trace_id,
                     test_file_paths=test_file_paths,
                 )
-                file_result = run_file_tests_agent(agent3f_input)
+                a3_file_result = run_file_tests_agent(a3f_input)
 
-                if final_result is not None:
-                    # Merge: combine test cases from both agents
-                    merged_cases = final_result.test_cases + file_result.test_cases
-                    merged_coverage = {**final_result.coverage_summary, **file_result.coverage_summary}
-                    merged_notes = (
-                        f"Text-based: {final_result.generation_notes}\n"
-                        f"File-based: {file_result.generation_notes}"
-                    )
-                    final_result = Agent3Result(
-                        test_cases=merged_cases,
-                        generation_notes=merged_notes,
-                        coverage_summary=merged_coverage,
-                    )
-                else:
-                    final_result = file_result
-            elif file_subtasks and not test_file_paths:
-                # File sub-tasks exist but no files provided — run Agent 3 as fallback
+            # Agent 3: synthetic text sub-tasks
+            synth_subtasks = list(text_subtasks)
+            if not test_file_paths and file_subtasks:
+                synth_subtasks.extend(file_subtasks)
+                missing_subs = [st.description for st in file_subtasks]
+                print(
+                    f"\n  NOTE: {len(file_subtasks)} sub-task(s) require test files but none provided:\n"
+                    + "".join(f"    - {d}\n" for d in missing_subs)
+                    + "  Generating synthetic text tests instead.\n",
+                    file=sys.stderr,
+                )
+
+            if synth_subtasks:
                 print("\n" + "=" * 60, file=sys.stderr)
-                print("Starting Agent 3 (Synthetic Tests)...", file=sys.stderr)
-                print("  NOTE: File-based sub-tasks present but no --test-files provided.", file=sys.stderr)
-                print("  Generating text-only synthetic data.", file=sys.stderr)
+                print(f"Starting Agent 3 (Synthetic Tests) for {len(synth_subtasks)} text sub-task(s)...", file=sys.stderr)
                 print("=" * 60 + "\n", file=sys.stderr)
 
-                if final_result is None:
-                    agent3_input = Agent3Input(
-                        user_understanding=result.result,
-                        trace_id=trace_id,
-                    )
-                    final_result = run_synthetic_tests_agent(agent3_input)
+                synth_uo = _filter_user_understanding(result.result, synth_subtasks)
+                a3_input = Agent3Input(
+                    user_understanding=synth_uo,
+                    trace_id=trace_id,
+                )
+                a3_text_result = run_synthetic_tests_agent(a3_input)
+
+                # Wire file_required flag for degraded file sub-tasks
+                if not test_file_paths and file_subtasks:
+                    file_caps = {st.capability.lower() for st in file_subtasks}
+                    file_descs = {st.description.lower() for st in file_subtasks}
+                    for tc in a3_text_result.test_cases:
+                        ref = tc.sub_task_ref.lower()
+                        if any(cap in ref or ref in cap for cap in file_caps) or \
+                           any(desc in ref or ref in desc for desc in file_descs):
+                            tc.file_required = True
+
+            final_result = _merge_agent3_results(a3_file_result, a3_text_result)
 
             agent3_duration = round((time.time() - agent3_start) * 1000, 2)
 

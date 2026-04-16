@@ -122,6 +122,41 @@ Choose what kind of output the AI service should produce:
 - "extraction" — extracted fields/data from input
 - "action" — an action to perform
 
+## Architecture Alignment (CRITICAL for multi-scope workflows)
+
+When sub-tasks include `[Architecture]` annotations:
+- `output_format` tells you EXACTLY what output_type to use for that sub-task's test cases. Use it directly:
+  - output_format=structured_json → output_type="structured_json"
+  - output_format=free_text → output_type="free_text"
+  - output_format=classification → output_type="classification"
+  - output_format=extraction → output_type="extraction"
+  - output_format=action → output_type="action"
+- `input_source` tells you what feeds this step:
+  - "user provides input directly" → input_type matches the sub-task's nature (text, document_content, conversation, etc.)
+  - "receives output from step_N" → input_type should be "structured_data" or "text" depending on step_N's output_format. The test case input_data should SIMULATE what the upstream step would produce (e.g., if step_1 is OCR with output_format=structured_json, then step_2's input_data should be a realistic JSON object with extracted invoice fields, NOT a raw invoice image)
+- `requires_test_files=True` means the sub-task ideally tests with real files. When generating synthetic tests for a file-based sub-task, use input_type="document_content" and write realistic text representations of what the file would contain.
+- `step_id` is the scope identifier. Set sub_task_ref to the sub-task's EXACT description string (as before), but be aware this test case will be routed to candidates covering that step_id during Phase 9 testing.
+
+DO NOT override these architectural constraints with your own judgment about what the output type should be. Agent 1 designed the workflow; Agent 3 generates tests that MATCH the design.
+
+## Generative / Non-Text Output Domains (Image / Audio / Video Generation)
+
+When a sub-task involves GENERATING non-text output (images, audio, video, code artifacts):
+- input_type: always "text" (the generation prompt IS text)
+- output_type: use "action" (the API performs generation and returns a result reference)
+- input_data: write a REALISTIC, detailed generation prompt. Examples:
+  - Image: "A watercolor painting of a golden retriever puppy playing in autumn leaves, soft lighting, warm color palette, high detail"
+  - Audio: "Generate a 30-second jazz piano loop at 120 BPM in C major, suitable for a coffee shop ambiance"
+  - Code: "Write a Python function that implements binary search on a sorted list, with type hints and docstring"
+- expected_output: DESCRIBE the ideal result in text form (since the output itself is non-textual):
+  - Image: "JSON response with image_url field pointing to a generated image showing a golden retriever puppy in an autumn scene with warm watercolor style"
+  - Audio: "JSON response with audio_url field, 30-second duration, jazz piano genre"
+  - Code: "A Python function named binary_search with correct type hints, O(log n) complexity"
+- judgement_criteria: use these eval_types:
+  - "contains_key_info" — API returned a valid result reference (URL, base64, file path)
+  - "format_compliance" — response structure matches the API's documented format
+  - "subjective_quality" — the generated content matches the prompt's intent (for LLM judge evaluation of the text description of the output)
+
 ## Judgement Criteria Rules
 
 Each test case must have 2-5 weighted criteria. Rules:
@@ -162,6 +197,90 @@ GENERATION_MAX_TOKENS = 16384
 # any workflow data to ground the synthetic content.
 # ============================================================================
 
+def _format_test_plan(test_plan) -> str:
+    """
+    Render Agent 1's TestPlan as authoritative per-scope generation specs.
+
+    When present, this OVERRIDES the general architecture annotations —
+    Agent 3 follows these specs exactly instead of guessing.
+    """
+    if not test_plan or not getattr(test_plan, "scope_specs", None):
+        return ""
+
+    lines = [
+        "## TEST PLAN (AUTHORITATIVE — from Agent 1)",
+        "",
+        "Agent 1 designed these per-scope test specifications. Follow them EXACTLY.",
+        f"Total target: {test_plan.total_test_target} test cases.",
+        "",
+    ]
+
+    for spec in test_plan.scope_specs:
+        lines.append(f"### Scope: {spec.scope_id}")
+        lines.append(f"  test_mode: {spec.test_mode}")
+        lines.append(f"  input_type: {spec.input_type} (USE THIS — do not override)")
+        lines.append(f"  output_type: {spec.output_type} (USE THIS — do not override)")
+        lines.append(f"  test_count_target: {spec.test_count_target}")
+        lines.append(f"  requires_user_files: {spec.requires_user_files}")
+        lines.append(f"  evaluation_focus: {', '.join(spec.evaluation_focus)}")
+        lines.append(f"  input_description: {spec.input_description}")
+        lines.append(f"  expected_output_description: {spec.expected_output_description}")
+        lines.append(f"")
+        lines.append(f"  SAMPLE INPUT (use as template for variations):")
+        lines.append(f"  {spec.sample_input}")
+        lines.append(f"")
+        lines.append(f"  SAMPLE OUTPUT (use as template for expected_output):")
+        lines.append(f"  {spec.sample_output}")
+
+        if spec.upstream_output_shape:
+            lines.append(f"")
+            lines.append(f"  UPSTREAM OUTPUT SHAPE (this scope receives data shaped like this):")
+            lines.append(f"  {spec.upstream_output_shape}")
+            lines.append(f"  Your input_data for this scope MUST match this shape — simulate upstream output.")
+
+        if spec.file_description:
+            lines.append(f"  File description: {spec.file_description}")
+        lines.append("")
+
+    if test_plan.notes:
+        lines.append(f"Test plan notes: {test_plan.notes}")
+
+    return "\n".join(lines)
+
+
+def _format_workflow_architecture(workflow) -> str:
+    """
+    Render the workflow DAG as a compact architecture summary for Agent 3.
+
+    Shows the data flow between steps so Agent 3 knows:
+    - What each step produces (output_format)
+    - What feeds each step (input_from)
+    - The dependency chain (what runs before what)
+
+    Returns empty string when no workflow exists (single-scope / legacy).
+    """
+    if not workflow or not getattr(workflow, "steps", None):
+        return ""
+    lines = ["## Workflow Architecture (from Agent 1)"]
+    lines.append("Data flows through these steps in order. Test cases for each step must")
+    lines.append("match its expected input/output format.\n")
+    for step in workflow.steps:
+        deps = f" (after {', '.join(step.depends_on)})" if step.depends_on else " (first step)"
+        lines.append(
+            f"  {step.id} [{step.role}]{deps}\n"
+            f"    Input: {step.input_from or 'user'} -> Output: {step.output_format}\n"
+            f"    \"{step.description}\""
+        )
+    lines.append("")
+    lines.append(
+        "For downstream steps (input_from != user), your test case input_data should "
+        "SIMULATE what the upstream step would produce. Example: if step_1 is OCR "
+        "producing structured_json, then step_2's test cases should use a realistic "
+        "JSON object with extracted fields as input_data, NOT a raw document."
+    )
+    return "\n".join(lines)
+
+
 def _build_generation_message(user_understanding: UserUnderstandingOutput) -> str:
     """
     Convert Agent 1's structured output into a test generation request.
@@ -174,14 +293,44 @@ def _build_generation_message(user_understanding: UserUnderstandingOutput) -> st
     - Calculated target case count
     """
     # ── CORE: Build the sub-tasks section ──
+    # When Agent 1 produced a workflow blueprint, enrich each sub-task
+    # with the corresponding step's architectural constraints so Agent 3
+    # generates tests with the EXACT input/output types the architecture
+    # expects. Without this, Agent 3 guesses independently and may
+    # produce tests misaligned with the workflow design.
+    blueprint = user_understanding.workflow
+    step_by_cap: dict[str, "WorkflowStep"] = {}
+    if blueprint and blueprint.steps:
+        from puzzleeval.schemas import WorkflowStep
+        for step in blueprint.steps:
+            step_by_cap[step.capability.strip().lower()] = step
+
     subtask_lines = []
     for i, st in enumerate(user_understanding.sub_tasks, 1):
-        subtask_lines.append(
-            f"{i}. {st.description}\n"
-            f"   Capability: {st.capability}\n"
-            f"   Search keywords: {', '.join(st.search_keywords)}"
-        )
-    subtasks_text = "\n".join(subtask_lines)
+        lines = [
+            f"{i}. {st.description}",
+            f"   Capability: {st.capability}",
+            f"   Search keywords: {', '.join(st.search_keywords)}",
+        ]
+
+        # Match this sub-task to a workflow step via capability
+        matched_step = step_by_cap.get(st.capability.strip().lower())
+        if matched_step:
+            lines.append(f"   [Architecture] step_id={matched_step.id}, role={matched_step.role}")
+            lines.append(f"   [Architecture] output_format={matched_step.output_format}")
+            input_desc = (
+                "user provides input directly"
+                if matched_step.input_from == "user" or matched_step.input_from is None
+                else f"receives output from {matched_step.input_from}"
+            )
+            lines.append(f"   [Architecture] input_source={input_desc}")
+            if st.requires_test_files:
+                lines.append(f"   [Architecture] requires_test_files=True (file-based input)")
+            else:
+                lines.append(f"   [Architecture] requires_test_files=False (text/synthetic input)")
+
+        subtask_lines.append("\n".join(lines))
+    subtasks_text = "\n\n".join(subtask_lines)
 
     # ── Calculate target test case count ──
     num_subtasks = len(user_understanding.sub_tasks)
@@ -199,6 +348,13 @@ def _build_generation_message(user_understanding: UserUnderstandingOutput) -> st
         if constraints.integration_requirements
         else "None specified"
     )
+
+    # ── Test Plan integration ──
+    # When Agent 1 produced a test_plan, include it as the primary
+    # instruction for what to generate. This replaces independent guessing
+    # with directed execution. When no test_plan exists, fall back to the
+    # architecture annotations + general instructions.
+    test_plan_section = _format_test_plan(user_understanding.test_plan)
 
     # ── CORE: Assemble the full message ──
     message = f"""## What the User Needs
@@ -218,10 +374,16 @@ def _build_generation_message(user_understanding: UserUnderstandingOutput) -> st
 ## Workflow Context
 {user_understanding.workflow_summary or "No workflow document provided."}
 
+{_format_workflow_architecture(user_understanding.workflow)}
+
+{test_plan_section}
+
 ## Target
 Generate approximately {target_total} test cases total ({base_per_subtask + workflow_bonus} per sub-task).
 Ensure every sub-task is covered across all 6 testing dimensions.
-Use IDs starting from tc-001."""
+Use IDs starting from tc-001.
+
+IMPORTANT: When a Test Plan is provided above, it is AUTHORITATIVE — follow the per-scope specs exactly (input_type, output_type, sample_input shape, test_count_target). When [Architecture] annotations appear but no Test Plan, use them to set output_type and design input_data that matches the workflow's data flow."""
 
     return message
 

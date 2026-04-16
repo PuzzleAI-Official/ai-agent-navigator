@@ -10,6 +10,9 @@ import { ResultsComparison } from "@/components/playground/ResultsComparison";
 import { SearchingVisualization } from "@/components/playground/SearchingVisualization";
 import { QuotaBadge } from "@/components/playground/QuotaBadge";
 import { WorkflowDiagram } from "@/components/playground/WorkflowDiagram";
+import { CoverageMatrix } from "@/components/playground/CoverageMatrix";
+import { SelectionPanel } from "@/components/playground/SelectionPanel";
+import { RejectionSummary } from "@/components/playground/RejectionSummary";
 import type { Attachment } from "@/types/pipeline";
 
 const Playground = () => {
@@ -29,6 +32,12 @@ const Playground = () => {
     pipelineNodes,
     runId,
     workflow,
+    // Phase 6: selection state
+    perScopeCandidates,
+    isSelectionSubmitting,
+    submitSelection,
+    // Phase 6.5 forward-compat
+    rejections,
   } = usePipelineRun();
 
   const [input, setInput] = useState("");
@@ -93,10 +102,11 @@ const Playground = () => {
   };
 
   // Stage indicator labels
-  const stageKeys = ["conversation", "research", "screening", "testing", "results"];
+  const stageKeys = ["conversation", "research", "selection", "screening", "testing", "results"];
   const stageLabels: Record<string, string> = {
     conversation: "Conversation",
     research: "Research",
+    selection: "Selection",
     screening: "Screening",
     testing: "Testing",
     results: "Results",
@@ -104,6 +114,7 @@ const Playground = () => {
 
   const getDisplayStage = (): string => {
     if (stage === "conversation") return "conversation";
+    if (stage === "selection") return "selection";   // Phase 6
     if (stage === "results") return "results";
     const completed = pipelineProgress.agents_completed;
     if (completed.includes("agent_5")) return "results";
@@ -376,6 +387,13 @@ const Playground = () => {
               the pipeline starts and the backend has emitted the blueprint. */}
           {stage !== "conversation" && workflow && <WorkflowDiagram blueprint={workflow} />}
 
+          {/* Phase 4: candidates × scopes matrix. Renders only for multi-scope
+              blueprints once Agent 2 has emitted candidates with coverage
+              claims. Collapses to nothing for single-scope / legacy runs. */}
+          {stage !== "conversation" && workflow && workflow.steps.length >= 2 && candidates.length > 0 && (
+            <CoverageMatrix candidates={candidates} workflowSteps={workflow.steps} />
+          )}
+
           {/* Scrollable content */}
           <div className="flex-1 overflow-y-auto">
             <AnimatePresence mode="wait">
@@ -415,6 +433,17 @@ const Playground = () => {
                 </motion.div>
               )}
 
+              {/* Phase 6: Selection stage — per-scope picking */}
+              {stage === "selection" && workflow && (
+                <SelectionPanel
+                  candidates={candidates}
+                  workflowSteps={workflow.steps}
+                  perScopeCandidates={perScopeCandidates}
+                  onSubmit={submitSelection}
+                  isSubmitting={isSelectionSubmitting}
+                />
+              )}
+
               {/* Pipeline stage — show candidate cards */}
               {stage === "pipeline" && candidates.length > 0 && (
                 <motion.div
@@ -439,7 +468,12 @@ const Playground = () => {
                   <div className="space-y-2">
                     <AnimatePresence>
                       {candidates.map((cand, i) => (
-                        <CandidateCard key={cand.name} candidate={cand} index={i} />
+                        <CandidateCard
+                          key={cand.name}
+                          candidate={cand}
+                          index={i}
+                          workflowSteps={workflow?.steps}
+                        />
                       ))}
                     </AnimatePresence>
                   </div>
@@ -453,6 +487,13 @@ const Playground = () => {
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                 >
+                  {/* Phase 6.5 forward-compat: rejection summary at the top
+                      of results. Null-safe — renders nothing until Phase 6.5's
+                      candidate_rejected SSE events populate the list. */}
+                  <RejectionSummary
+                    rejections={rejections}
+                    workflowSteps={workflow?.steps}
+                  />
                   <ResultsComparison candidates={candidates} />
                 </motion.div>
               )}

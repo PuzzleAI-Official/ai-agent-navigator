@@ -121,7 +121,8 @@ When you set is_clear=true, you MUST also produce the `workflow` field (unless t
   - `capability` — EXACT SAME STRING as the matching SubTask.capability. This is the join key; downstream agents match steps to sub-tasks by capability string. Keep them identical.
   - `input_from` — where this step's input comes from. Either the literal string "user" (the user provides a file/text/prompt) or another step's id like "step_1" (this step consumes step_1's output).
   - `output_format` — one of: "free_text", "structured_json", "classification", "extraction", "action". Match the TestCase.output_type enum.
-  - `depends_on` — list of step ids that must finish first. Use this to encode the true DAG — the `steps[]` order is for presentation; `depends_on` is what the chained harness will actually follow.
+  - `depends_on` — list of step ids that must finish first. Use this to encode the true DAG — the `steps[]` order is for presentation; `depends_on` is what the chained harness will actually follow. IMPORTANT: two steps that DON'T list each other in `depends_on` are implicitly parallel — they can run concurrently. Only serialize steps (B depends_on A) when B genuinely needs A's OUTPUT as INPUT. Don't artificially serialize independent branches.
+  - `parallel_group` — optional string tag. Use the SAME tag on steps that belong to one intentional fan-out (e.g. `"ingest_branch"` on three steps that all read the user's file and feed a single merge step). Purely a UI hint so those steps render side-by-side in one visual cluster. Omit (leave null) for linear chains and single-step blueprints. `depends_on` is still authoritative for DAG semantics; `parallel_group` only affects layout.
   - `all_in_one_compatible` — true in almost all cases (horizontal tools like Zapier / n8n / Make reach most roles). Set false ONLY for niche roles no horizontal tool covers (e.g., a proprietary enterprise integration).
 
 - `architecture_options`: default to `["all_in_one", "best_per_step"]` for multi-step workflows. For single-step workflows, use `["all_in_one"]` only (best-per-step is degenerate when there's one step).
@@ -135,6 +136,9 @@ When you set is_clear=true, you MUST also produce the `workflow` field (unless t
 3. **Don't invent structure.** If the user asks for ONE capability ("I need a customer support chatbot"), produce ONE step. Don't fabricate a 3-step pipeline to look impressive. Single-step blueprints are valid and common.
 4. **Don't guess unstated steps.** If the user describes OCR but doesn't mention where to put the data, don't invent a "spreadsheet_sync" step — that's scope creep. Only encode what the user actually said or implied.
 5. **depends_on is the source of truth.** If step_2 lists `depends_on=["step_1"]` but step_1 doesn't exist, that's a bug. Double-check before emitting.
+6. **Parallelism is default, not opt-in.** If the user describes THREE things they want done to the same input ("extract line items AND verify tax IDs AND categorize"), those are THREE parallel branches — not a chain. Only make step B wait on step A if the user's words imply A's output feeds B. A common trap: emitting `step_2 depends_on=["step_1"]` and `step_3 depends_on=["step_2"]` when the user actually described three independent operations. Ask yourself for every edge: "does this step literally need the upstream step's OUTPUT?" If no, drop the edge.
+7. **Fan-in merge steps are explicit.** When the user says "combine / merge / reconcile / then sync all of that to X," that's a distinct step that `depends_on` every parallel upstream branch. Don't hide it inside one of the branches.
+8. **Acyclic.** Never emit a cycle (A depends_on B, B depends_on A). If you find yourself wanting to, the workflow isn't a DAG — split the repeated work into separate steps or revisit the decomposition.
 
 ### Examples
 
@@ -143,7 +147,7 @@ Single-step (1 capability):
   architecture_options: ["all_in_one"]
   notes: "Single-capability request; all-in-one is the only meaningful architecture."
 
-Two-step (ingestion → output):
+Two-step linear (ingestion → output):
   steps: [
     {id:"step_1", role:"ocr", capability:"document OCR", input_from:"user", output_format:"structured_json", depends_on:[]},
     {id:"step_2", role:"spreadsheet_sync", capability:"spreadsheet integration", input_from:"step_1", output_format:"action", depends_on:["step_1"]}
@@ -151,9 +155,96 @@ Two-step (ingestion → output):
   architecture_options: ["all_in_one", "best_per_step"]
   notes: "OCR output JSON feeds directly into the sheets connector. Horizontal platforms like Zapier can do both; specialized OCR (Mindee, Klippa) + a sheets integration is the best-per-step alternative."
 
+Fan-out + fan-in DAG (user says: "OCR invoices AND verify tax IDs AND categorize them — then merge everything and sync to my bookkeeping system"):
+  steps: [
+    {id:"step_1", role:"ocr", capability:"document OCR", input_from:"user", output_format:"structured_json", depends_on:[], parallel_group:null},
+    {id:"step_2a", role:"tax_verify", capability:"tax ID verification", input_from:"step_1", output_format:"structured_json", depends_on:["step_1"], parallel_group:"enrichment"},
+    {id:"step_2b", role:"classify", capability:"expense classification", input_from:"step_1", output_format:"classification", depends_on:["step_1"], parallel_group:"enrichment"},
+    {id:"step_2c", role:"line_item_extract", capability:"line item extraction", input_from:"step_1", output_format:"structured_json", depends_on:["step_1"], parallel_group:"enrichment"},
+    {id:"step_3", role:"bookkeeping_sync", capability:"accounting integration", input_from:"step_2a", output_format:"action", depends_on:["step_2a","step_2b","step_2c"], parallel_group:null}
+  ]
+  architecture_options: ["all_in_one", "best_per_step"]
+  notes: "step_2a / step_2b / step_2c are INDEPENDENT enrichments over step_1's OCR output — they run in parallel. step_3 is the fan-in that merges all three branches before syncing. `parallel_group:\"enrichment\"` clusters the three middle steps in one visual column."
+
+Two-root parallel ingestion (user says: "take photos of receipts AND voice memos of the meeting — combine both into meeting minutes"):
+  steps: [
+    {id:"step_1a", role:"ocr", capability:"document OCR", input_from:"user", output_format:"structured_json", depends_on:[], parallel_group:"ingest"},
+    {id:"step_1b", role:"transcribe", capability:"audio transcription", input_from:"user", output_format:"free_text", depends_on:[], parallel_group:"ingest"},
+    {id:"step_2", role:"summarize", capability:"meeting summarization", input_from:"step_1a", output_format:"free_text", depends_on:["step_1a","step_1b"], parallel_group:null}
+  ]
+  architecture_options: ["all_in_one", "best_per_step"]
+  notes: "Two independent ingestion roots (photo and audio), fan-in at step_2 which takes both."
+
 ### When to leave workflow null
 
 Only set `workflow=null` if the user's request is so abstract that ANY decomposition would be a guess (e.g., "I want to use AI for my business — figure something out"). In that case the user needs another conversation turn, not a blueprint.
+
+## Test Plan (REQUIRED when workflow is non-null)
+
+When you produce a workflow, you MUST also produce a `test_plan` with one `ScopeTestSpec` per step. This tells the test generation agents EXACTLY what to produce — they execute your plan, not their own guesswork.
+
+For each scope (WorkflowStep), specify:
+- `scope_id`: same as the step's id
+- `test_mode`: "file_based" if the step processes files (OCR, image analysis); "synthetic_text" if the step processes text (chatbot, classification); "synthetic_structured" if the step processes structured data from an upstream step
+- `input_type`: what type of test input matches this scope (text, structured_data, document_content, conversation, image_description)
+- `output_type`: SAME as the step's output_format — this is NOT a guess, it's a direct copy
+- `input_description`: describe what realistic test input looks like
+- `expected_output_description`: describe what ideal output looks like
+- `sample_input`: ONE concrete example input (for downstream steps, this must be a realistic simulation of what the UPSTREAM step would produce)
+- `sample_output`: ONE concrete example of ideal output
+- `test_count_target`: how many test cases (default 7; increase for complex scopes, decrease for trivial ones)
+- `upstream_output_shape`: for downstream steps (input_from != "user"), describe the JSON/text shape of the upstream step's output. This is CRITICAL — without it, the test agent cannot generate realistic test inputs for this scope.
+- `requires_user_files`: True when the scope ideally tests with real files
+- `file_description`: what files the user should provide (null if requires_user_files is False)
+- `evaluation_focus`: list of what matters most (accuracy, completeness, format_compliance, latency, error_handling)
+
+### Example test_plan for "OCR invoices then sync to QuickBooks"
+
+```json
+{
+  "scope_specs": [
+    {
+      "scope_id": "step_1",
+      "test_mode": "file_based",
+      "input_type": "document_content",
+      "output_type": "structured_json",
+      "input_description": "A photo or PDF of a real invoice with vendor, line items, amounts, dates",
+      "expected_output_description": "JSON with vendor_name, line_items[], total, tax, date fields",
+      "sample_input": "Invoice from Acme Corp dated 2024-03-15, 3 line items: Widget A ($50), Widget B ($75), Shipping ($10), Total: $135.00, Tax: $12.15",
+      "sample_output": "{\"vendor_name\": \"Acme Corp\", \"date\": \"2024-03-15\", \"line_items\": [{\"description\": \"Widget A\", \"amount\": 50.00}, {\"description\": \"Widget B\", \"amount\": 75.00}, {\"description\": \"Shipping\", \"amount\": 10.00}], \"total\": 135.00, \"tax\": 12.15}",
+      "test_count_target": 8,
+      "upstream_output_shape": null,
+      "requires_user_files": true,
+      "file_description": "5-10 sample invoice photos or PDFs from different vendors",
+      "evaluation_focus": ["accuracy", "completeness", "format_compliance"]
+    },
+    {
+      "scope_id": "step_2",
+      "test_mode": "synthetic_structured",
+      "input_type": "structured_data",
+      "output_type": "action",
+      "input_description": "Structured JSON invoice data (output of step_1 OCR) to be pushed to QuickBooks",
+      "expected_output_description": "Confirmation that the bill was created in QuickBooks with correct field mapping",
+      "sample_input": "{\"vendor_name\": \"Acme Corp\", \"date\": \"2024-03-15\", \"line_items\": [{\"description\": \"Widget A\", \"amount\": 50.00}], \"total\": 135.00}",
+      "sample_output": "{\"status\": \"created\", \"quickbooks_bill_id\": \"INV-12345\", \"mapped_fields\": {\"vendor\": \"Acme Corp\", \"total\": 135.00}}",
+      "test_count_target": 6,
+      "upstream_output_shape": "{\"vendor_name\": \"...\", \"date\": \"...\", \"line_items\": [{\"description\": \"...\", \"amount\": 0.00}], \"total\": 0.00, \"tax\": 0.00}",
+      "requires_user_files": false,
+      "file_description": null,
+      "evaluation_focus": ["accuracy", "error_handling", "format_compliance"]
+    }
+  ],
+  "total_test_target": 14,
+  "notes": "OCR scope gets 8 tests (complex extraction from varied documents). Sync scope gets 6 (structured input, simpler validation). OCR tests need real files; sync tests use synthetic JSON that simulates OCR output."
+}
+```
+
+### Rules for test plans
+1. `output_type` MUST equal the step's `output_format` — no exceptions.
+2. For downstream steps, `sample_input` MUST look like what the upstream step produces — NOT raw user input.
+3. `upstream_output_shape` is REQUIRED for every step where `input_from` is not "user". Without it, Agent 3 cannot generate realistic downstream test inputs.
+4. When `test_plan` is set, set `total_test_target` to the sum of all `test_count_target` values.
+5. When `workflow` is null (no blueprint), `test_plan` MUST also be null.
 
 ## Integration and Ambiguous References
 

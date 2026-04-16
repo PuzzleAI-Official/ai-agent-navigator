@@ -1,14 +1,22 @@
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import type { PipelineCandidate } from "@/types/pipeline";
+import type { PipelineCandidate, WorkflowStep } from "@/types/pipeline";
 import { TestResultRow } from "./TestResultRow";
+import { CoverageBadge } from "./CoverageBadge";
+import { PricingBlock } from "./PricingBlock";
 
 interface Props {
   candidate: PipelineCandidate;
   index: number;
+  /**
+   * Phase 4: when the run has a multi-scope blueprint, pass it so the card
+   * can render a "covers K/N scopes" badge with role names. Omit for
+   * single-scope / legacy runs — no badge shown.
+   */
+  workflowSteps?: WorkflowStep[];
 }
 
-export function CandidateCard({ candidate: c, index }: Props) {
+export function CandidateCard({ candidate: c, index, workflowSteps }: Props) {
   const [expanded, setExpanded] = useState(false);
   const [logExpanded, setLogExpanded] = useState(false);
 
@@ -80,6 +88,20 @@ export function CandidateCard({ candidate: c, index }: Props) {
             <span className="text-[9px] text-white/20 font-mono">screening</span>
           </div>
         </div>
+
+        {/* Phase 4: coverage badge — shown when the run has a blueprint
+            and the candidate claims at least one scope. The badge surfaces
+            the "covers K/N scopes" summary + claimed/verified status so the
+            user sees coverage breadth at a glance, even in compact rows. */}
+        {workflowSteps && workflowSteps.length > 0 && c.covers_step_ids.length > 0 && (
+          <div className="px-4 pb-2">
+            <CoverageBadge
+              candidate={c}
+              workflowSteps={workflowSteps}
+              compact
+            />
+          </div>
+        )}
 
         {/* Subtle bottom accent line */}
         <div className="h-[1px] bg-gradient-to-r from-transparent via-white/[0.04] to-transparent" />
@@ -174,6 +196,24 @@ export function CandidateCard({ candidate: c, index }: Props) {
             {c.confirmed_capabilities.length > 3 && (
               <span className="text-[10px] text-white/20">+{c.confirmed_capabilities.length - 3}</span>
             )}
+          </div>
+        )}
+
+        {/* Phase 4: coverage badge for built/tested cards. Lives in its
+            own row so role chips don't crowd the capability chips above. */}
+        {workflowSteps && workflowSteps.length > 0 && c.covers_step_ids.length > 0 && (
+          <div className="mt-3">
+            <CoverageBadge candidate={c} workflowSteps={workflowSteps} />
+          </div>
+        )}
+
+        {/* Phase 5: structured pricing block — null-safe. Invisible until
+            Phase 6.5's 4B extraction populates pricing_breakdown. When
+            data arrives, shows "From $X/mo" with expandable tier details
+            and source links. */}
+        {c.pricing_breakdown && (
+          <div className="mt-3">
+            <PricingBlock breakdown={c.pricing_breakdown} coversStepIds={c.covers_step_ids} workflowSteps={workflowSteps} />
           </div>
         )}
 

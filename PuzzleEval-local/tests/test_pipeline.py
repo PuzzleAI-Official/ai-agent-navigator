@@ -220,3 +220,86 @@ class TestPipelineRun:
 
             assert (Path(tmpdir) / "run-A" / "agent_1_output.json").exists()
             assert (Path(tmpdir) / "run-B" / "agent_1_output.json").exists()
+
+
+# ============================================================================
+# Phase 4: Derived metadata fingerprints
+# ============================================================================
+# Verifies that save_agent_result auto-promotes the Phase 4 coverage
+# extractor output into AgentRecord.metadata, and that finalize() aggregates
+# the derived fields into run-level metadata for pipeline_summary.json.
+# ============================================================================
+
+class TestPhase4DerivedMetadata:
+    def _make_agent2_with_coverage(self, scopes_covered=None):
+        from puzzleeval.schemas import Agent2Result, Agent2Input, Candidate
+
+        scopes_covered = scopes_covered or {"step_1", "step_2"}
+        candidates = [
+            Candidate(
+                name=f"Svc{i}", provider=f"Prov{i}",
+                description="desc", api_available=True, api_docs_url=None,
+                pricing_model="usage-based", pricing_details=None,
+                claimed_capabilities=["c"], relevance_score=0.8,
+                adoption_difficulty="easy", relevant_subtasks=[], source="t",
+                covers_step_ids=frozenset(scopes_covered),
+                coverage_confidence={s: "claimed" for s in scopes_covered},
+            )
+            for i in range(3)
+        ]
+        result = Agent2Result(
+            candidates=candidates,
+            search_approach="test",
+            coverage_notes="test",
+        )
+        input_data = Agent2Input(
+            user_understanding=_make_agent1_result().result,
+            trace_id="test-phase4",
+        )
+        return input_data, result
+
+    def test_coverage_metadata_auto_promoted(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("phase4-a", output_dir=tmpdir)
+            input_data, result = self._make_agent2_with_coverage()
+            run.save_agent_result("agent_2", input_data, result, duration_ms=100)
+            assert run.agents[0].metadata["phase4_dual_search_active"] is True
+            assert run.agents[0].metadata["phase4_scopes_covered_count"] == 2
+            assert run.agents[0].metadata["phase4_coverage_populated_all"] is True
+
+    def test_coverage_metadata_absent_for_legacy_flow(self):
+        # Candidates with empty covers_step_ids → no Phase 4 fingerprint.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("phase4-b", output_dir=tmpdir)
+            input_data, result = self._make_agent2_with_coverage()
+            # Strip coverage to simulate legacy flow
+            for c in result.candidates:
+                c.covers_step_ids = frozenset()
+                c.coverage_confidence = {}
+            run.save_agent_result("agent_2", input_data, result, duration_ms=100)
+            assert "phase4_dual_search_active" not in run.agents[0].metadata
+
+    def test_finalize_rolls_coverage_metadata_to_run_level(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("phase4-c", output_dir=tmpdir)
+            input_data, result = self._make_agent2_with_coverage(
+                {"step_1", "step_2", "step_3"}
+            )
+            run.save_agent_result("agent_2", input_data, result, duration_ms=100)
+            summary = run.finalize()
+            assert summary["metadata"]["phase4_dual_search_active"] is True
+            assert summary["metadata"]["phase4_scopes_covered_count"] == 3
+            assert summary["metadata"]["phase4_coverage_populated_all"] is True
+
+    def test_mixed_populated_yields_false_all_flag(self):
+        # One candidate without coverage, two with → all_populated=False.
+        with tempfile.TemporaryDirectory() as tmpdir:
+            run = PipelineRun("phase4-d", output_dir=tmpdir)
+            input_data, result = self._make_agent2_with_coverage()
+            result.candidates[0].covers_step_ids = frozenset()
+            result.candidates[0].coverage_confidence = {}
+            run.save_agent_result("agent_2", input_data, result, duration_ms=100)
+            # At least one has coverage → phase4 block activates
+            assert run.agents[0].metadata["phase4_dual_search_active"] is True
+            # But not all → populated_all=False
+            assert run.agents[0].metadata["phase4_coverage_populated_all"] is False

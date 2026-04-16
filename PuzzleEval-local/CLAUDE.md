@@ -273,6 +273,715 @@ via `workflow_blueprint` SSE payload.
 `PUZZLEEVAL_AGENT1_MODEL=claude-sonnet-4-6` if the new Opus prompt
 produces worse blueprints than expected (unlikely, but a safety lever).
 
+### Phase 3 DAG Expansion (2026-04-15)
+
+The initial Phase 3 linear form shipped the schema + validator + SSE event +
+frontend chain renderer. The DAG expansion completes Phase 3 by teaching
+Agent 1 to author workflows with parallelism, adding cycle/unreachable
+validation, and rewriting `WorkflowDiagram` for topological layout.
+
+**Agent 1 prompt — DAG authoring.** `user_understanding.py`'s SYSTEM_PROMPT
+grows a new rule block:
+- "Parallelism is default, not opt-in" — two steps whose `depends_on` lists
+  don't reference each other are implicitly parallel. Only serialize when a
+  step literally needs its predecessor's OUTPUT as INPUT.
+- "Fan-in merge steps are explicit" — when the user says "combine / merge /
+  reconcile, then sync," emit a distinct final step that depends_on every
+  parallel branch.
+- "Acyclic" — never emit A depends_on B AND B depends_on A.
+- Two new worked examples: a fan-out+fan-in DAG (OCR → 3 parallel
+  enrichments → merge) and a two-root parallel ingestion (photos + audio
+  → summary).
+
+**Schema — `parallel_group: str \| None`.** New optional field on
+`WorkflowStep`. Purely a layout hint: steps sharing the same non-null tag
+cluster visually in the WorkflowDiagram; `depends_on` remains authoritative
+for execution semantics. Omit (leave null) for linear chains. Mirrored in
+`src/types/pipeline.ts`.
+
+**Validator — cycle + unreachable checks.**
+`validate_agent1_output` now runs DFS-based cycle detection on the
+`depends_on` graph once orphan refs are clear. A cycle is a hard error
+with the cycle path spelled out in the message (`step_1 -> step_2 -> step_1`).
+Unreachable steps (no path from any root) are soft warnings; a multi-step
+blueprint with zero roots is flagged with a specific "no root" warning.
+Cycle check short-circuits when orphan `depends_on` refs exist so we don't
+walk broken edges.
+
+**Frontend — topological layer layout.** `WorkflowDiagram.tsx` was
+rewritten from a horizontal chain to a per-layer column layout:
+- Layer = longest-path-from-roots. Roots sit at layer 0; each downstream
+  step is `1 + max(layer of deps)`.
+- Within a layer, steps sharing a non-null `parallel_group` render inside
+  a dashed border container tagged with the group name; solo steps render
+  without chrome.
+- Edges are SVG cubic Beziers from each source node's right-middle to the
+  target's left-middle, measured via `useLayoutEffect` + ResizeObserver so
+  connection lines track real DOM positions as the panel resizes.
+- 1-step blueprint still renders as a single card (same visual density as
+  before). Multi-step linear chains render as N columns of 1 (same as the
+  old chain view). DAGs get proper fan-out/fan-in visuals.
+- Header shows "N steps · DAG" when any layer has >1 node, otherwise
+  just "N steps". No external graph library — topological layout is
+  hand-rolled (~200 lines). Dagre / elkjs remain optional future polish
+  if blueprints ever exceed ~10 nodes in practice.
+
+**Tests:** 4 new schema cases in `test_agent1.py` (`parallel_group`
+default, round-trip, fan-out+fan-in shape assertions, two-root parallel
+ingestion) + 5 new validator cases in `test_validators.py`
+(two-step cycle, three-step cycle, fan-out+fan-in passes,
+no-root multi-step → cycle error, parallel_group metadata survives
+validation). Combined: 236 PuzzleEval + 19 billing = **255 tests passing**.
+
+**Phase fingerprint:** unchanged — `agent_1_output.json.result.workflow.steps`
+still the primary signal. For DAG detection specifically, look for
+`parallel_group` populated on ≥1 step OR any layer with >1 sibling
+(the frontend's "DAG" badge uses the latter rule).
+
+**Diagnostic flag:** none added — the DAG expansion is prompt + validator
++ frontend only. `PUZZLEEVAL_AGENT1_MODEL=claude-sonnet-4-6` remains the
+soft revert lever if the new parallelism rules produce worse blueprints
+than expected.
+
+### Phase 4 Refinement: Agent 2 Dual Search + Ranked Candidate Pool (2026-04-15)
+
+Agent 2 was a single-pass surveyor — one search strategy, one flat list of
+5-7 candidates. Phase 4 turns it into a DUAL surveyor when Agent 1's
+blueprint has N ≥ 2 scopes: one all-in-one horizontal search (Zapier /
+n8n / Make / Workato) PLUS one per-scope specialist search per step. Every
+candidate now carries a `covers_step_ids: frozenset[str]` claim plus a
+`coverage_confidence: dict[str, "claimed" | "verified"]` tag. Dedup by
+candidate name merges coverage sets when the same tool surfaces in both
+passes. Agent 2 **never verifies** — all confidence values are "claimed";
+Phase 6.5's Agent 4 deep-verify later upgrades confirmed scopes to
+"verified" or removes them entirely.
+
+**Schemas.** `puzzleeval/schemas.py::Candidate` gains:
+- `covers_step_ids: frozenset[str] = Field(default_factory=frozenset)` —
+  blueprint step IDs this candidate claims to cover. Arbitrary size: a
+  provider may cover 1, 2, or all N scopes and competes independently at
+  every scope it claims. No more "multi-step vs specialist" classes —
+  everything is just a coverage SET. Empty for legacy flat flow.
+- `coverage_confidence: dict[str, str] = Field(default_factory=dict)` —
+  per-scope `"claimed"` / `"verified"` tag. Keys align with
+  `covers_step_ids`; validator rejects drift between the two fields.
+
+**Prompt + tool config.** `puzzleeval/agents/research.py` gets:
+- A rewritten `RESEARCH_SYSTEM_PROMPT` that teaches the dual-search
+  strategy: survey + per-scope when N≥2, legacy single-pass otherwise.
+  Explicitly states: coverage is NOT a scoring dimension (a 5-scope tool
+  doesn't outrank a 1-scope specialist at OCR).
+- A rewritten `STRUCTURE_SYSTEM_PROMPT` explaining how to populate
+  `covers_step_ids` and `coverage_confidence` per candidate.
+- `_build_web_search_tool(blueprint)` — dynamic `max_uses`:
+  single-scope/no-blueprint → `SINGLE_SEARCH_MAX_USES` (3); multi-scope →
+  `N+1`, capped at `DUAL_SEARCH_MAX_USES_CEILING` (8) so cost stays
+  bounded for pathological blueprints.
+- `_build_research_message` includes the blueprint as a dedicated section
+  so Claude sees every step's id/role/capability before planning searches.
+- `_normalize_coverage()` — deterministic post-processing: dedup by
+  case-insensitive name merging coverage, drop hallucinated step IDs,
+  auto-fill coverage on 1-scope blueprints, clamp any bogus "verified"
+  value back to "claimed" (Agent 2 can't verify).
+
+**Validator.** `validate_agent2_output` gains Phase 4 checks when Agent 1
+produced a blueprint AND at least one candidate has non-empty coverage:
+- Warn when a scope has zero candidates claiming coverage (Phase 6.5 has
+  nothing to deep-verify there).
+- Warn when a scope has 1-2 candidates (thin pool — target is ≥3).
+- Error when `coverage_confidence` keys drift from `covers_step_ids`
+  (structural bug in Agent 2 output).
+- Error when `coverage_confidence` values are anything other than
+  `"claimed"` or `"verified"`.
+- Legacy flat flow (every candidate has empty coverage) silently skips
+  the Phase 4 block.
+
+**Shim update.** `inject_registry_candidates()` now accepts an optional
+`blueprint` argument and stamps injected test providers with claimed
+coverage over EVERY blueprint scope. Keeps the "test every provider we
+have keys for" intent — injected providers surface in every per-scope
+top-K list. Call sites in `puzzleeval/cli.py` (twice) and
+`puzzleeval-api/services/pipeline_runner.py::_run_real_agent2` all pass
+the blueprint through.
+
+**Pipeline observability.** `puzzleeval/pipeline.py` gains a
+`_DERIVED_METADATA_EXTRACTORS` registry — extractors receive the output
+model and return `(key, value)` tuples to write into
+`AgentRecord.metadata`. The first entry is `_agent2_coverage_metadata`
+which writes `phase4_dual_search_active`, `phase4_scopes_covered_count`,
+and `phase4_coverage_populated_all` when Agent 2 output has any coverage
+populated. `finalize()` promotes these to run-level
+`pipeline_summary.json:metadata.*` so ops can grep for
+`phase4_dual_search_active=true` to answer "did Phase 4 fire on this run?"
+without reading the full agent output.
+
+**Backend SSE.** `pipeline_runner.py::_branch_a_research_and_screening`'s
+`candidates_found` event payload now includes `covers_step_ids` (as a
+sorted list — frozenset → JSON list) and `coverage_confidence` (dict)
+per candidate. A `_coerce_coverage` helper handles the frozenset / list
+/ tuple / set cases defensively so the shim's output doesn't break SSE
+serialization.
+
+**Frontend.** Three files land:
+- `src/types/pipeline.ts` — `PipelineCandidate` gains `covers_step_ids:
+  string[]` and `coverage_confidence: Record<string, CoverageConfidence>`.
+  `CoverageConfidence = "claimed" | "verified"` is exported for reuse.
+- `src/components/playground/CoverageBadge.tsx` — new component.
+  Renders "covers K/N scopes" plus per-role chips with amber dots
+  (claimed) / emerald dots (verified). Has a `compact` variant for
+  the early-discovery row. Aggregate status tints the header chip
+  ("claimed, awaiting verify" vs "verified").
+- `src/components/playground/CoverageMatrix.tsx` — new component.
+  Candidates × scopes table. Rows sorted by coverage count desc →
+  relevance desc → name (so all-in-ones rise to the top, specialists
+  below). Cells: empty for uncovered, amber ⦿ for claimed, emerald ✓
+  for verified. Footer row shows per-scope depth (red if zero, amber if
+  <3, emerald if ≥3). Sticky left column, horizontally scrollable on
+  narrow panels. Renders only when blueprint has ≥2 scopes AND at least
+  one candidate has coverage populated — collapses to nothing otherwise.
+- `src/pages/Playground.tsx` mounts `<CoverageMatrix>` above the
+  candidate list (below `WorkflowDiagram`) and passes `workflow?.steps`
+  into `<CandidateCard>` so the badge can render.
+- `src/hooks/usePipelineRun.ts` parses `covers_step_ids` +
+  `coverage_confidence` out of the `candidates_found` SSE payload,
+  normalizing bogus confidence values to `"claimed"`. Default fields
+  added to the two fallback `PipelineCandidate` constructors
+  (`harness_started`, `candidate_results_ready`) so the interface
+  stays exhaustive.
+
+**Mock data backfill.** `PuzzleEval-local/runs/working_test_6/agent_2_output.json`
+— used as mock seed by the FastAPI layer — backfilled with coverage:
+Veryfi/Mindee/Taggun/Klippa/DocuClipper claim only `step_1`;
+Parseur/Parsio/Nanonets claim both `step_1, step_2` (all-in-one
+invoice + accounting pattern). Lets the mock-mode pipeline driver
+exercise the CoverageMatrix without a real API key.
+
+**Toggle.** `PUZZLEEVAL_RESEARCH_DUAL_SEARCH_ENABLED=0` reverts to
+single-pass behavior — `_build_web_search_tool` always returns
+`max_uses=3`, the prompt still has blueprint context but Claude does
+legacy-style search, and `_normalize_coverage` still runs so downstream
+sees empty or single-scope coverage depending on the flat-flow path.
+
+**Tests:** 27 new cases across three test files:
+- `tests/test_agent2.py` +18: schema defaults, JSON round-trip, dual
+  search tool config (1/2/5/15/disabled scopes), research message
+  rendering (multi-scope / no-workflow / 1-scope), coverage
+  normalization (dedup, case-insensitive merge, hallucinated IDs
+  dropped, 1-scope autofill, legacy empty, verified clamp, higher
+  relevance kept on dedup).
+- `tests/test_validators.py` +5: uncovered-scope warning, thin-scope
+  warning, confidence-key drift error, invalid-confidence-value
+  error, legacy-flat-flow skip.
+- `tests/test_pipeline.py` +4: coverage metadata auto-promoted,
+  absent for legacy flow, finalize() rolls metadata to run-level,
+  mixed populated → all-flag false.
+
+Combined: **263 PuzzleEval + 19 billing = 282 tests passing**. `tsc`
+clean, Vite production build clean (`index-*.js` 728 kB / 226 kB
+gzipped — same shape as before).
+
+**Cost delta.** Single-pass (1-scope / no blueprint / flag off): ~$0.35
+per Agent 2 run (3 searches + tokens + structure pass — unchanged from
+baseline). Dual search on a 3-scope blueprint: ~$0.40 per run (4
+searches + slightly more tokens in the survey pass). 5-scope: ~$0.45
+(6 searches). Hard ceiling at 8 searches caps Agent 2 at ~$0.50 even
+for very large blueprints. Rounding error vs the ~$6 full-pipeline
+total — but worth knowing when reading the cost dashboard.
+
+**Phase fingerprint:** primary signal is
+`agent_2_output.json.candidates[].covers_step_ids` (non-empty frozenset
+per candidate). Run-level rollup lives in
+`pipeline_summary.json:metadata.phase4_dual_search_active` (bool),
+`.phase4_scopes_covered_count` (int), and
+`.phase4_coverage_populated_all` (bool). `CoverageMatrix` mount in the
+playground is the frontend-side signal.
+
+**Diagnostic flag:** `PUZZLEEVAL_RESEARCH_DUAL_SEARCH_ENABLED=0`. Set
+this and every blueprint size takes the single-pass path. Schema fields
+stay populated (empty frozenset + empty dict) so no downstream breakage.
+
+### Phase 5a Refinement: Pricing Data Layer (2026-04-15)
+
+Phase 5 splits into two landings by design: Phase 5a (shipped now) lands
+the data contracts + helper functions + frontend scaffold so structured
+pricing is a null-safe field everywhere; Phase 5b (lands inside Phase
+6.5's 4B extraction) populates that field from real docs. Shipping 5a
+ahead of 5b means when 6.5 runs, pricing flows through to the UI
+automatically — zero new schema/frontend work at 6.5 for pricing.
+
+**What shipped (Phase 5a):**
+
+*Schemas (`puzzleeval/schemas.py`):*
+- `PricingTier` — one tier with `name`, `monthly_cost_usd`, optional
+  `included_units` / `unit_name` / `overage_cost_per_unit_usd` / `notes`.
+- `PricingBreakdown` — `tiers` (cheapest-first), optional
+  `free_tier_monthly_units`, `pay_as_you_go` flag, `billing_granularity`
+  (`monthly` / `per_call` / `annual_commit` / `hybrid`),
+  `per_scope_unit_cost` (dict keyed by step_id for variable pricing),
+  `sources` (URLs), `confidence` (`high`/`medium`/`low`), optional `notes`.
+- `Candidate.pricing_breakdown: PricingBreakdown | None = None` — Agent 2
+  never fills it. When null, downstream falls back to the legacy
+  `pricing_model` / `pricing_details` strings.
+- `ScreenedCandidate.pricing_breakdown: PricingBreakdown | None = None` —
+  Phase 6.5's 4B extraction populates it alongside endpoints.
+
+*Pure helpers (`puzzleeval/pricing.py`):*
+- `estimate_monthly_cost(breakdown, monthly_volume) -> float` — walks
+  every tier, computes effective cost at that volume (base + overage for
+  overflow tiers, $0 for volumes inside included allowance), returns
+  the minimum. Handles capped-no-overage tiers, pure PAYG, flat-rate,
+  and freemium.
+- `per_scope_unit_cost(breakdown, scope_id) -> float | None` — explicit
+  `per_scope_unit_cost[scope_id]` wins; falls back to cheapest tier's
+  overage; returns None for flat-rate.
+- `monthly_cost_for_scope_map(breakdown, scope_volumes) -> float` —
+  per-scope summation for CoverageMatrix "what will this actually cost
+  me?" view.
+- `cheapest_meaningful_tier` — skips $0-no-overage filler tiers when a
+  real paid tier exists.
+- `format_tier_short` / `format_breakdown_short` — UI string helpers
+  with best-effort singularization (`pages` → `page`, `queries` →
+  `query`) so "$0.005/call overage" reads natural.
+
+*Validator (`puzzleeval/validators.py`):*
+- New shared helper `_check_pricing_breakdown(candidate_name,
+  covers_step_ids, breakdown, errors, warnings)`. Silent when breakdown
+  is None (overwhelming default today). When populated:
+  - Errors: empty tiers, missing sources, invalid confidence /
+    billing_granularity, `per_scope_unit_cost` keys outside
+    `covers_step_ids`, negative costs / overages.
+  - Warnings: `confidence=low` (emitter struggled — ops review).
+- Wired into both `validate_agent2_output` and `validate_agent4_output`
+  — covers the rare case where Agent 2 sees pricing early (test
+  fixtures; future heuristics) and the normal case where Phase 6.5's 4B
+  populates on ScreenedCandidate.
+
+*Frontend (`src/types/pipeline.ts`, `src/lib/pricing.ts`, playground
+components):*
+- Types `PricingTier`, `PricingBreakdown`, `PricingConfidence` mirror
+  Python schemas. `PipelineCandidate.pricing_breakdown?:
+  PricingBreakdown | null` added.
+- `src/lib/pricing.ts` — TypeScript port of `puzzleeval/pricing.py`.
+  Kept literal with the Python so behavior stays in sync. All functions
+  `null | undefined`-safe.
+- `src/components/playground/PricingBlock.tsx` — new. Header line uses
+  `formatBreakdownShort` ("From $X/mo" / PAYG variant), confidence dot
+  (emerald / amber / red), expandable tier list with `formatTierShort`,
+  per-scope chips from `perScopeUnitCost` (only when pricing varies by
+  scope), source links at the bottom.
+- `src/components/playground/CandidateCard.tsx` — mounts `<PricingBlock>`
+  when `c.pricing_breakdown` is non-null. Invisible until Phase 6.5.
+- `src/components/playground/CoverageMatrix.tsx` — cells get a per-scope
+  unit-cost overlay (below the coverage dot) when
+  `perScopeUnitCost(candidate.pricing_breakdown, step.id)` returns a
+  value. Null-safe.
+- `src/hooks/usePipelineRun.ts` — `pricing_breakdown: null` defaults in
+  every `PipelineCandidate` constructor, null-safe parsing on
+  `candidates_verified`, and a new `candidate_verified` event handler
+  (forward-compat for Phase 6.5's per-candidate verify event).
+
+*Mock data backfill:*
+- `runs/working_test_6/agent_2_output.json` — every candidate now has a
+  realistic `pricing_breakdown` (OCR specialists with freemium /
+  tiered / low-confidence shapes; all-in-ones with per-scope variable
+  pricing). Lets the mock-mode pipeline exercise `<PricingBlock>` and
+  the CoverageMatrix cost overlay without a real API key.
+
+**What Phase 6.5 will add (Phase 5b):**
+- `screening.py` 4B prompt addition: "also extract pricing alongside
+  endpoints" — same fetch budget, same docs pages usually cover both.
+- `pipeline_runner.py` emits `candidate_verified` SSE per candidate
+  carrying the populated `pricing_breakdown` (the frontend already
+  parses this event as of Phase 5a).
+- 5 pricing extraction cases in `tests/test_agent4.py`.
+
+**Cost delta:** none for Phase 5a — schema fields + pure helpers, no
+LLM calls. Phase 5b's extraction piggybacks on the 4B web_fetch budget
+(max_uses=6 — already sized in Phase 6.5 spec to accommodate a separate
+/pricing page URL when needed).
+
+**Tests:** 42 new cases:
+- `tests/test_pricing.py` (new file) +32: `estimate_monthly_cost` across
+  freemium / PAYG / flat-rate / capped-no-overage / mixed, `per_scope_unit_cost`
+  precedence, `monthly_cost_for_scope_map`, `cheapest_meaningful_tier`,
+  formatters (all fields / flat-rate / PAYG), schema round-trip.
+- `tests/test_validators.py` +10: valid pricing passes, empty tiers /
+  missing sources / invalid confidence / low confidence warn / invalid
+  billing_granularity / per_scope drift / negative cost / negative
+  overage / null pricing silent.
+
+Combined: **305 PuzzleEval + 19 billing = 324 tests passing**. `tsc`
+clean, Vite production build clean.
+
+**Phase fingerprint:** `agent_2_output.json.candidates[].pricing_breakdown`
+or `agent_4_output.json.validated_candidates[].pricing_breakdown` non-null
+(lands live with Phase 5b / 6.5). UI fingerprint: `<PricingBlock>` mount
+under any candidate card.
+
+**Diagnostic flag:** none added at 5a — the whole data layer is
+null-safe. Phase 5b's extraction will reuse
+`PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED` (Phase 6.5's flag) since pricing
+extraction lives inside 4B.
+
+### Phase 6 Refinement: User Candidate Picking + Pipeline Pause (2026-04-15)
+
+After Agent 2 emits its ranked pool, the pipeline pauses and the user
+picks which candidates to test at each scope. Replaces the old
+`inject_registry_candidates()` testing shim (irreversibly retired) with
+explicit user-driven selection via `inject_user_candidates()` +
+`apply_scope_picks()`.
+
+**Core mechanism — pipeline pause:**
+Backend emits `selection_required` SSE event → frontend renders
+`SelectionPanel` → user toggles per-scope keep/remove checkboxes +
+optionally adds custom providers → POSTs to `/runs/{id}/select-candidates`
+→ backend validates picks, signals `selection_ready` asyncio.Event →
+pipeline resumes on filtered candidate list. Cancellation during pause
+is supported via `cancel_event`. When `PUZZLEEVAL_USER_SELECTION_ENABLED=0`
+the pause is skipped entirely (auto-run, backward-compat).
+
+**Shim retirement (irreversible):**
+`inject_registry_candidates()` removed from `research.py`, `cli.py`
+(both call sites), and `pipeline_runner.py`. Users who want specific
+providers add them via SelectionPanel or CLI interactive prompt.
+
+**New helpers (`research.py`):**
+- `inject_user_candidates(agent2_result, user_adds)` — deduped
+  case-insensitive merge with `source="user_provided"`,
+  `relevance_score=0.99`.
+- `apply_scope_picks(agent2_result, scope_picks, user_added)` — filters
+  to only picked candidates, reduces each candidate's `covers_step_ids`
+  to the scopes it was picked at. `scope_picks=None` is pass-through
+  (no filtering — used by `--no-interactive`).
+
+**CLI (`cli.py`):**
+- New `_cli_user_selection_pause()` — prints per-scope candidate tables
+  to stderr, prompts for each scope (`y/n/indices`), applies picks via
+  `apply_scope_picks()`.
+- `--no-interactive` skips the pause (auto-run with all Agent 2
+  candidates). Controlled by `USER_SELECTION_ENABLED` config flag.
+
+**API:**
+- `RunState` gains: `selection_ready: asyncio.Event`,
+  `cancel_event: asyncio.Event`, `user_scope_picks`,
+  `user_added_candidates`, `selection_required_emitted_at`,
+  `user_selection_applied`, and `"awaiting_candidate_selection"` status.
+- `POST /api/runs/{id}/select-candidates` — validates scope_ids match
+  blueprint, candidate names exist in Agent 2 results or user-added list,
+  non-empty picks, no double-submit. Sets `selection_ready.set()`.
+- `pipeline_runner.py` — pause inserted between Agent 2 completion and
+  Agent 4 start. Uses `asyncio.wait` on `selection_ready` + `cancel_event`.
+  On resume, applies picks via `apply_scope_picks` and re-emits
+  `candidates_found` with filtered list.
+
+**Frontend:**
+- `Stage = "conversation" | "pipeline" | "selection" | "results"` —
+  new `"selection"` stage.
+- `src/services/api.ts` — new `selectCandidates(runId, request)`;
+  `selection_required` + `candidate_verified` + `candidate_rejected`
+  added to SSE event types.
+- `src/hooks/usePipelineRun.ts` — handles `selection_required` →
+  sets stage to "selection"; exposes `perScopeCandidates`,
+  `submitSelection()`, `isSelectionSubmitting`, `rejections`.
+  Forward-compat `candidate_rejected` handler populates `rejections[]`
+  for Phase 6.5.
+- `src/components/playground/SelectionPanel.tsx` — NEW. Per-scope
+  columns with keep/remove checkboxes, "Add custom provider" form with
+  multi-scope checkbox selector, Submit button. Opt-out UX (all start
+  selected — user unchecks what they don't want).
+- `src/components/playground/RejectionSummary.tsx` — NEW null-safe
+  scaffold. Renders per-scope rejection list when Phase 6.5's
+  `candidate_rejected` events arrive. Collapsed by default; expandable
+  with reason labels + attempt notes. Invisible until 6.5 ships.
+- `src/pages/Playground.tsx` — mounts `SelectionPanel` when
+  `stage === "selection"`, `RejectionSummary` at top of results.
+  Stage indicator bar adds "Selection" between "Research" and "Screening".
+
+**Tests:** 20 new cases:
+- `tests/test_research_phase6.py` NEW +9: inject_user_candidates
+  (merge/dedup/source/covers) + apply_scope_picks
+  (pass-through/filter/reduce/empty/user-added).
+- `puzzleeval-api/tests/test_routes_select.py` NEW +11: 404 on
+  missing run, 400 on wrong status, double-submit rejected, empty
+  picks rejected, unknown scope_id, unknown candidate name, user-added
+  with unknown scope, valid picks 200 + ready, same candidate at
+  multiple scopes, user-added flows through, empty covers_step_ids
+  rejected.
+
+Combined: **314 PuzzleEval + 30 billing/API = 344 tests passing**.
+`tsc` clean, Vite build clean.
+
+**Phase fingerprint:** `metadata.user_selection_applied=true`,
+`metadata.user_added_candidates_count >= 0`,
+`metadata.selection_required_emitted_at` (ISO timestamp).
+
+**Diagnostic flag:** `PUZZLEEVAL_USER_SELECTION_ENABLED=0` — skips
+the pause entirely, auto-runs with all Agent 2 candidates (backward-
+compat). Default is `1` (pause enabled).
+
+### Phase 6.5 + 7 Refinement: Deep Verify Loop + Per-Scope Selection (2026-04-15)
+
+**Phase 6.5 — Agent 4 directed deep-verify loop (4A→4B→4C→4D).**
+Agent 4 is redesigned from a single-shot classifier to a production-grade
+directed multi-phase loop. For each selected candidate, the loop runs:
+4A (Discovery) → 4B (Spec Extraction + api_spec.txt + ROUTING_TABLE +
+pricing) → 4C (Scope Coverage Verification: upgrade claimed→verified,
+remove unverifiable scopes) → 4D (Decision with anti-false-positive
+AND anti-false-negative guardrails). Drop-on-reject: if a candidate
+fails, it's dropped from the scope's tested set — no substitution.
+Per-run tool cache: a candidate covering M scopes gets deep-verified
+ONCE; subsequent scopes reuse the cached spec.
+
+New files:
+- `puzzleeval/deep_verify_prompt.py` — `DEEP_VERIFY_SYSTEM_PROMPT`
+  (9.8K chars) teaching the 4-phase workflow + `build_deep_verify_message()`
+  per-candidate message builder. Mentions tool budget explicitly
+  (6 web_fetch + 5 web_search). Includes OpenAPI/Swagger hunting,
+  multi-page doc traversal, third-party doc host checks (Postman,
+  ReadMe, SwaggerHub), archive.org fallback, and pricing extraction.
+
+Schema additions (`schemas.py`):
+- `FailedToVerify` model: `name`, `provider`, `scope_id`, `reason`
+  (docs_unreachable / enterprise_only / deprecated / no_api /
+  coverage_removed_at_scope / verify_error), `attempt_notes`.
+- `ScreenedCandidate` gains: `api_spec_path: str | None`,
+  `covers_step_ids: frozenset[str]`, `coverage_confidence: dict[str, str]`.
+- `Agent4Result` gains: `failed_to_verify: list[FailedToVerify]`,
+  `scope_selections: dict[str, list[str]]`.
+
+Config (`config.py`):
+- `AGENT4_DEEP_VERIFY_ENABLED` (default on)
+- `AGENT4_DEEP_VERIFY_MAX_TURNS` (15)
+- `AGENT4_DEEP_VERIFY_MAX_PARALLEL` (5)
+
+Pipeline (`pipeline_runner.py`):
+- SSE events emitted after Agent 4: `candidate_verified` (per candidate ×
+  per verified scope), `candidate_rejected` (per FailedToVerify entry),
+  `scope_verified_complete` (per scope with verified + rejected counts).
+- Frontend already handles all three events (wired in Phase 6).
+
+**Phase 7 — Per-scope top-K selection.**
+Replaces the global `sort by (credentials, relevance)` with independent
+per-scope rankings via a 5-dimension weighted scorer.
+
+New file: `puzzleeval/selection.py`
+- `select_scope_candidate_pairs()` — for each scope, ranks eligible
+  candidates by weighted score and returns top K names.
+- `_score_at_scope()` — 5 dimensions: user_picked_here (0.40),
+  credentials (0.20), relevance_at_scope (0.20), docs_quality (0.10),
+  pricing_fit (0.10). Coverage count is NOT a dimension.
+- `_pricing_fit()` — heuristic using Phase 5 PricingBreakdown when
+  available, falls back to Agent 2's loose pricing_model string.
+
+Config (`config.py`):
+- `SCOPE_SELECTION_WEIGHTS` dict (tunable)
+- `SCOPE_CANDIDATES_CAP_BY_PLAN` dict (free=3, paid=5, enterprise=10)
+
+Billing (`billing.py`):
+- `PLAN_SCOPE_CANDIDATES_CAP` dict
+- `scope_candidates_cap(plan)` function
+
+Pipeline integration (`pipeline_runner.py`):
+- Phase 7 runs BETWEEN Agent 2 and Phase 6 pause. Computes programmatic
+  default picks that the SelectionPanel shows pre-filled.
+- When Phase 6 is disabled (`USER_SELECTION_ENABLED=0`), Phase 7's
+  top-K is applied directly via `apply_scope_picks()` — the auto-run
+  path for scripts. The `selection_required` SSE event includes
+  `default_picks` so the frontend can pre-fill checkboxes.
+
+Tests: 15 new cases in `tests/test_phase6_5_and_7.py`:
+- Phase 7 (8): specialist scope exclusion, all-in-one multi-scope,
+  multi-scope picks, user override, tier cap, credentials boost,
+  coverage count not a dimension, empty coverage excluded.
+- Phase 6.5 (7): FailedToVerify round-trip, api_spec_path default,
+  coverage fields, Agent4Result with failed_to_verify + scope_selections,
+  prompt phase markers, ROUTING_TABLE in prompt, message builder.
+
+Combined: **329 PuzzleEval + 30 API = 359 tests passing**.
+
+Phase fingerprints:
+- 6.5: `agent_4_output.json` contains `failed_to_verify[]` +
+  `scope_selections{}`; SSE events `candidate_verified` /
+  `candidate_rejected` / `scope_verified_complete` fire per-scope.
+- 7: `selection_required` SSE payload includes `default_picks`;
+  `pipeline_summary.json` metadata: `phase7_scope_picks` present.
+
+Diagnostic flags:
+- `PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED=0` reverts to shallow Agent 4
+  (legacy behavior + Agent 5 resumes Phase 1 research).
+- `SCOPE_SELECTION_WEIGHTS` / `SCOPE_CANDIDATES_CAP_BY_PLAN` are config
+  dicts in `config.py` — tunable without code changes.
+
+### Phase 8 Refinement: API Doc Understanding (2026-04-15)
+
+Surgical improvement to Phase 6.5's 4B extraction turn-phase. Lifts
+api_spec.txt completeness for every verified candidate, which in turn
+lifts Agent 5's build success rate in Phase 9.
+
+**Prompt changes (`deep_verify_prompt.py::DEEP_VERIFY_SYSTEM_PROMPT`):**
+- **OpenAPI/Swagger hunting section** — new "Step 1: Hunt for OpenAPI"
+  block before the narrative-docs extraction. Instructs the model to:
+  1. Site-scoped search: `site:{domain} openapi.json OR swagger.json OR openapi.yaml`
+  2. Try common convention URLs: `/openapi.json`, `/api/docs/openapi.json`,
+     `/v1/openapi.json`, `/swagger.json`, `/.well-known/openapi.yaml`, `/api-docs`
+  3. When spec found → parse endpoints directly, skip narrative doc fetches,
+     save fetch budget for pricing page + Python examples
+- **Endpoint completeness enforcement** — "ENDPOINTS section must list
+  ALL endpoints, not just the quickstart example. If you see 5+ endpoints
+  in a sidebar but only extracted 1-2, MUST fetch the reference page."
+- **Step 2 (narrative fallback)** — only executes when no OpenAPI spec
+  resolves. Multi-page traversal rule preserved from Phase 6.5.
+
+**New constants:**
+- `COMMON_OPENAPI_PATHS` — tuple of 8 common convention paths, ordered
+  by empirical frequency. Used by the prompt AND by `build_deep_verify_message()`
+  to generate per-candidate URL hints.
+- `THIRD_PARTY_DOC_HOSTS` — tuple of 4 known secondary doc platforms
+  (Postman, ReadMe, Stoplight, SwaggerHub). Referenced by the 4D
+  anti-false-negative guardrails.
+
+**`build_deep_verify_message()` enhancement:**
+- When `claimed_docs_url` is provided, the message now includes an
+  "OpenAPI Spec URL Hints (Phase 8)" section with 6 concrete URLs
+  derived from the base domain. When no docs URL is known, hints are
+  omitted (model does its own discovery).
+
+**Tests:** 9 new cases in `test_phase6_5_and_7.py::TestPhase8DocUnderstanding`:
+prompt has OpenAPI hunt section, site-scoped search, common URL probing,
+skip-narrative instruction, endpoint completeness enforcement;
+`COMMON_OPENAPI_PATHS` has ≥6 entries; `THIRD_PARTY_DOC_HOSTS` has ≥3;
+message includes hints when URL provided; hints absent when no URL.
+
+Combined: **338 PuzzleEval + 30 API = 368 tests passing**.
+
+**Phase fingerprint:** verified candidates' `api_spec_path` files contain
+`OPENAPI_URL: https://...` (non-"not_found") for most candidates. The
+`COMMON_OPENAPI_PATHS` constant can be grepped from the prompt output.
+
+**Diagnostic flag:** prompt-only — no flag. Revert by removing the
+Phase 8 Step 1 section from `DEEP_VERIFY_SYSTEM_PROMPT`; the legacy
+narrative-extraction path in Step 2 still works.
+
+**Rollback:** pure additive prompt changes. Phase 6.5's directed loop
+continues working at prior extraction quality if the Phase 8 sections
+are removed.
+
+### Phase 9 Refinement: Per-Scope Test Execution (2026-04-15)
+
+For multi-scope workflows, Agent 5 tests top-K candidates **at each scope
+independently**. No end-to-end workflow chaining. No combinatorial
+explosion. Per-scope data is the deliverable — "Mindee scores 0.95 at
+OCR, Klippa 0.87" is directly actionable.
+
+**Schema (`schemas.py`):**
+- `ScopeTestRun` — `scope_id`, `scope_role`, `candidate_results:
+  list[CandidateTestRun]` (sorted by aggregate score descending),
+  `test_case_count`. One entry per scope that had candidates tested.
+- `Agent5Result.scope_runs: list[ScopeTestRun]` — empty for legacy
+  (pre-Phase-9) outputs; 1-scope workflows produce 1 ScopeTestRun
+  wrapping the same data as `candidate_runs`.
+
+**New module (`puzzleeval/scope_routing.py`):**
+- `group_tests_by_scope(test_cases, blueprint)` — routes test cases to
+  scopes via `sub_task_ref` ↔ `WorkflowStep.capability` keyword overlap.
+  No-blueprint → all tests grouped under "_flat".
+- `build_scope_runs(candidate_runs, blueprint)` — post-processes Agent
+  5's flat `candidate_runs` into per-scope `ScopeTestRun` entries.
+  For each candidate, filters `test_results` to those matching each
+  scope, recomputes pass_rate/tests_passed/etc per scope.
+- `dedup_tools_for_build(scope_selections)` — unique tool names across
+  all scopes (a candidate covering M scopes gets ONE build). Preserves
+  first-seen order.
+
+**Config:** `SCOPE_TEST_MODE` flag (env `PUZZLEEVAL_SCOPE_TEST_MODE`,
+default on). When off, reverts to legacy flat-candidate testing.
+
+**Frontend:**
+- `ScopeTestRun` + `ScopeCandidateResult` types in `pipeline.ts`.
+- `ResultsComparison.tsx` rewritten with two paths:
+  - Phase 9 (scopeRuns available): per-scope sections with candidate
+    tables, pass-rate bars, score/latency/cost columns.
+  - Legacy (no scopeRuns): original flat card layout preserved.
+
+**Tests:** 15 new in `test_phase9.py`:
+- Schema round-trip, backward-compat default, Agent5Result with scope_runs
+- group_tests_by_scope: no-blueprint flat, single-scope, multi-scope routing
+- build_scope_runs: single-scope wrap, no-blueprint flat, multi-scope split, empty
+- dedup_tools_for_build: across scopes, order preserved, empty, case-insensitive
+- Config SCOPE_TEST_MODE enabled by default
+
+Combined: **353 PuzzleEval + 30 API = 383 tests passing**.
+
+**Phase fingerprint:** `agent_5_output.json.scope_runs` length equals
+number of scopes; each `ScopeTestRun.candidate_results` non-empty for
+scopes with tested candidates.
+
+**Diagnostic flag:** `PUZZLEEVAL_SCOPE_TEST_MODE=0` reverts to legacy
+flat-candidate testing.
+
+### Phase 10 Refinement: Generalizability Benchmark (2026-04-15)
+
+10-domain benchmark suite that validates the pipeline works across
+multiple AI domains — not just the OCR happy path. Regression gate
+for everything in Phases 1-9.
+
+**Domain coverage (10 configs):**
+
+| Domain | Scopes | What it exercises |
+|--------|--------|-------------------|
+| invoice_workflow | 3 | OCR+extract+sync; SPA provider (Phase 1.5) |
+| chatbot_simple | 1 | Single-scope regression baseline |
+| classification_pipeline | 2 | Classify+route pattern |
+| translation_chain | 2 | Translate+format pattern |
+| summarization | 1 | Single-scope summarization |
+| multi_step_data_extraction | 4 | Longest DAG (4-step chain) |
+| rejection_transparency | 3 | Drop-on-reject with niche providers |
+| user_added_candidate | 2 | Phase 6 user-added flow |
+| long_chain_parallel | 5 | Fan-out/fan-in DAG topology |
+| scope_under_capacity | 2 | Scope with 0 tested candidates |
+
+**Files:**
+- `tests/generalizability/domains/*.json` — 10 domain config files with
+  `input`, `expected_scopes`, `per_scope_assertions` (min pass rate +
+  min candidates per scope), `max_cost_usd` ceiling.
+- `tests/generalizability/conftest.py` — fixtures + helpers.
+- `tests/generalizability/test_generalizability.py` — 39 tests:
+  config loading (10), assertion validation (10), scope-assertion
+  alignment (10), plus meta-tests (min domain count, single/multi/fan-out
+  domain presence, cost ceiling bounds, assertion helpers).
+- `bench/run_benchmark.py` — CLI runner with `--list`, `--domain`,
+  `--all`, `--live`, `--report` modes.
+- `bench/README.md` — usage docs.
+- `pyproject.toml` — `addopts = "-m 'not generalizability'"` so
+  standard `pytest` skips bench tests; `pytest -m generalizability`
+  runs them explicitly.
+
+**How to run:**
+```bash
+# Standard tests (bench skipped)
+ANTHROPIC_API_KEY=dummy pytest tests/
+
+# Generalizability tests only (config validation — no API calls)
+ANTHROPIC_API_KEY=dummy pytest -m generalizability tests/generalizability/ -v
+
+# Bench CLI — dry run all domains
+python bench/run_benchmark.py --all
+
+# Bench CLI — live run (requires API key, incurs costs)
+python bench/run_benchmark.py --domain invoice_workflow --live
+```
+
+**Tests:** 39 generalizability tests (skipped by default) + all existing
+tests unchanged. Standard suite: **353 passing, 39 deselected**.
+With generalizability: **392 total passing**.
+
+**Phase fingerprint:** `bench/results/{domain}_{timestamp}.json` files.
+Presence of `tests/generalizability/domains/*.json` with 10+ configs.
+
+**Diagnostic flag:** marker-gated, separate directory — doesn't touch
+the core suite. Remove the `addopts` line from `pyproject.toml` to
+include bench tests in the default run.
+
 ## Diagnostic Conventions (Phase Fingerprints + Flag Matrix)
 
 We're shipping 10 phases of refinement without per-phase live testing —
@@ -298,10 +1007,11 @@ Fingerprint table (filled in as each phase ships):
 | 1 + 1.5 | `web_fetch_blocks` (HTTP errors + content-level failures combined) | `pipeline_summary.json:metadata.web_fetch_blocks`; per-call breakdown in stderr logs as `web_fetch_blocks_by_code` / `web_fetch_unusable_by_category` |
 | 2     | `credits_consumed`, `plan_gates_triggered` on `RunState`; per-call logs as `billing_gate_passed` / `billing_gate_triggered`; `Quota.credits_consumed` in `RunStateOut` | `RunState` fields + stderr logs; `pipeline_summary.json` rollup pending the pipeline_runner refactor noted above |
 | 3     | `agent_1_output.json.result.workflow.steps[]` length > 0 (missing/null = pre-Phase-3 or unstructurable request); `workflow_blueprint` SSE event fires once after Agent 1 with the full payload | per-agent JSON + live SSE |
-| 4     | `agent_2_output.json.candidates_by_step` keys | per-agent JSON (planned) |
-| 5     | distribution of `pricing_breakdown.confidence` on `agent_4_output.json.validated_candidates` | per-agent JSON (planned) |
-| 6     | `metadata.user_selected_candidates_count`, `metadata.user_added_candidates_count`, `metadata.selection_required_emitted_at` | `pipeline_summary.json:metadata.*` (planned) |
-| 7     | `metadata.agent5_selection_reasons` dict | `pipeline_summary.json:metadata.*` (planned) |
+| 4     | `agent_2_output.json.candidates[].covers_step_ids` non-empty; `pipeline_summary.json:metadata.phase4_dual_search_active`, `.phase4_scopes_covered_count`, `.phase4_coverage_populated_all` | per-agent JSON + run-level metadata |
+| 5     | `agent_2_output.json.candidates[].pricing_breakdown` non-null; `agent_4_output.json.validated_candidates[].pricing_breakdown.confidence` distribution (Phase 5a ships null-safe scaffold; Phase 5b populates inside Phase 6.5's 4B); UI `<PricingBlock>` mount | per-agent JSON + UI |
+| 6     | `RunState.user_selection_applied=true`, `selection_required_emitted_at` ISO timestamp, `user_added_candidates` count; `selection_required` SSE event fires once after Agent 2 when pause is enabled | `RunState` fields + SSE stream |
+| 6.5   | `agent_4_output.json` contains `failed_to_verify[]` + `scope_selections{}`; SSE events `candidate_verified` / `candidate_rejected` / `scope_verified_complete` per scope | per-agent JSON + SSE stream |
+| 7     | `selection_required` SSE payload includes `default_picks`; Phase 7 auto-pick log visible in agent_activity | SSE stream + pipeline logs |
 | 8     | `metadata.openapi_specs_found`, `metadata.docs_pages_traversed` | `pipeline_summary.json:metadata.*` (planned) |
 | 9     | `agent_5_output.json.workflow_runs` length (0 = single-step legacy path) | per-agent JSON (planned) |
 | 10    | bench/results/{timestamp}.json regression diff vs cassette baseline | `bench/` directory (planned) |
@@ -327,10 +1037,11 @@ Diagnostic flag table (filled in as each phase ships):
 | 1 (sub) | `PUZZLEEVAL_FETCH_RATE_LIMIT_BACKOFF` | `5` (seconds) | Set to `0` to disable backoff sleep on 429 |
 | 2     | `PUZZLEEVAL_BILLING_ENFORCED` | `0` | When `0`: track usage but don't block. When `1`: 402 on insufficient credits or feature-not-in-plan |
 | 3     | `PUZZLEEVAL_AGENT1_MODEL` (soft) | `claude-opus-4-6` | Revert to `claude-sonnet-4-6` if Opus blueprint quality regresses. Schema itself cannot be disabled — downstream consumes `WorkflowBlueprint`. |
-| 4     | `PUZZLEEVAL_DUAL_SEARCH_ENABLED` (planned) | `1` | When `0`: Agent 2 reverts to single-pass search (no per-step grouping) |
-| 5     | `PUZZLEEVAL_PRICING_RESEARCH_ENABLED` (planned) | `1` | When `0`: Agent 4 skips pricing extraction; field stays None |
-| 6     | `PUZZLEEVAL_USER_SELECTION_ENABLED` (planned) | `1` | When `0`: pipeline auto-runs through Agent 4/5 (today's behavior) |
-| 7     | `PUZZLEEVAL_SMART_SELECTION_ENABLED` (planned) | `1` | When `0`: Agent 5 reverts to relevance-only sort |
+| 4     | `PUZZLEEVAL_RESEARCH_DUAL_SEARCH_ENABLED` | `1` | When `0`: Agent 2 reverts to single-pass search (max_uses=3, every candidate gets empty `covers_step_ids` → downstream flat flow) |
+| 5     | (none at 5a — null-safe scaffold; 5b reuses `PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED` since extraction lives inside Phase 6.5's 4B) | — | Disabling Phase 6.5 disables pricing extraction; schema stays null-safe |
+| 6     | `PUZZLEEVAL_USER_SELECTION_ENABLED` | `1` | When `0`: pipeline skips pause, auto-runs all Agent 2 candidates through Agent 4/5 (pre-Phase-6 behavior) |
+| 6.5   | `PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED` | `1` | When `0`: Agent 4 reverts to shallow pass/fail; Agent 5 resumes Phase 1 research |
+| 7     | `SCOPE_SELECTION_WEIGHTS` + `SCOPE_CANDIDATES_CAP_BY_PLAN` (config dicts) | tunable | Change weights without code changes; adjust per-plan caps |
 | 8     | `PUZZLEEVAL_OPENAPI_HUNT_ENABLED` (planned) | `1` | When `0`: Agent 5 uses today's narrative-only research |
 | 9     | `PUZZLEEVAL_WORKFLOW_HARNESS_ENABLED` (planned) | `1` | When `0`: per-candidate harness path even with multi-step blueprint |
 
@@ -1416,4 +2127,4 @@ Build Agent 7 (Analyze Agent). Agent 5 produces test execution results natively.
 4. **Add CLI flag** to `puzzleeval/cli.py`
 5. **Write tests** at `tests/`
 6. **Update CLAUDE.md** — document key design decisions
-7. Run `ANTHROPIC_API_KEY=dummy python -m pytest tests/ -v` — all tests must pass (currently 231)
+7. Run `ANTHROPIC_API_KEY=dummy python -m pytest tests/ -v` — all tests must pass (currently 353 + 39 generalizability deselected)

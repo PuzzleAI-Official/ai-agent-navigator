@@ -40,10 +40,10 @@ if not ANTHROPIC_API_KEY:
 # ---------------------------------------------------------------------------
 # Which Claude model to use. Defaults to claude-sonnet-4-6 — best speed/intelligence
 # balance. Used by Agents 1-4 and post-loop evaluation.
-# Override with: export PUZZLEEVAL_MODEL="claude-opus-4-6"
+# Override with: export PUZZLEEVAL_MODEL="claude-opus-4-7"
 #
 # Available models (as of 2026):
-#   claude-opus-4-6    — most capable, slowest, most expensive (Agent 5 builder)
+#   claude-opus-4-7    — most capable, slowest, most expensive (Agent 5 builder)
 #   claude-sonnet-4-6  — best speed/intelligence balance (Agents 1-4, research)
 #   claude-haiku-4-5   — fastest, cheapest, less capable
 # ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ DEFAULT_MODEL = os.environ.get("PUZZLEEVAL_MODEL", "claude-sonnet-4-6")
 # decompose the user's demand into an ordered WorkflowBlueprint with
 # step ordering, data flow, role assignment, and architecture options
 # (all-in-one vs best-per-step). This requires real planning reasoning —
-# the kind of task Opus 4.6 is materially better at than Sonnet.
+# the kind of task Opus 4.7 is materially better at than Sonnet.
 #
 # Cost impact: Agent 1 runs in ~1-3 turns with ~4K in + ~0.5-1K out per turn.
 # Sonnet -> Opus roughly doubles the Agent 1 cost from ~$0.05 to ~$0.10 per
@@ -66,7 +66,7 @@ DEFAULT_MODEL = os.environ.get("PUZZLEEVAL_MODEL", "claude-sonnet-4-6")
 #
 # Override with: export PUZZLEEVAL_AGENT1_MODEL="claude-sonnet-4-6" to revert.
 # ---------------------------------------------------------------------------
-AGENT1_MODEL = os.environ.get("PUZZLEEVAL_AGENT1_MODEL", "claude-opus-4-6")
+AGENT1_MODEL = os.environ.get("PUZZLEEVAL_AGENT1_MODEL", "claude-opus-4-7")
 
 
 # ---------------------------------------------------------------------------
@@ -124,8 +124,8 @@ LOG_OUTPUT_PATH = os.environ.get("PUZZLEEVAL_LOG_PATH", None)
 # Format: { "model_name": (input_price_per_token, output_price_per_token) }
 # ---------------------------------------------------------------------------
 MODEL_PRICING = {
-    # Opus 4.6: $5 / 1M input, $25 / 1M output
-    "claude-opus-4-6": (5.0 / 1_000_000, 25.0 / 1_000_000),
+    # Opus 4.7: $5 / 1M input, $25 / 1M output
+    "claude-opus-4-7": (5.0 / 1_000_000, 25.0 / 1_000_000),
     # Opus 4.5: $5 / 1M input, $25 / 1M output
     "claude-opus-4-5": (5.0 / 1_000_000, 25.0 / 1_000_000),
     # Opus 4.1: $15 / 1M input, $75 / 1M output
@@ -160,7 +160,7 @@ CACHE_READ_MULTIPLIER = 0.10
 # The API silently ignores cache_control if the prefix is below this threshold.
 # No error is raised — the request just runs at full price without caching.
 #
-# This means: our ~800-token system prompt ALONE won't be cached on Opus 4.6.
+# This means: our ~800-token system prompt ALONE won't be cached on Opus 4.7.
 # Caching only kicks in when total cached prefix (system + file + history)
 # exceeds the threshold. A user who uploads a PDF will easily hit it.
 # A user with just a short text prompt may not — and that's fine, the cost
@@ -175,6 +175,92 @@ CACHE_READ_MULTIPLIER = 0.10
 # Used in logging to calculate total cost per Agent 2 run.
 # ---------------------------------------------------------------------------
 WEB_SEARCH_PRICE_PER_SEARCH = 0.01
+
+
+# ---------------------------------------------------------------------------
+# Agent 2 Dual Search (Phase 4)
+# ---------------------------------------------------------------------------
+# When Agent 1 produces a multi-scope WorkflowBlueprint, Agent 2 runs DUAL
+# search: ONE all-in-one survey search that looks for tools covering the
+# entire workflow (Zapier, n8n, etc.) AND ONE per-scope search per step in
+# the blueprint (so specialists at each scope surface alongside the
+# all-in-ones). Every candidate carries a `covers_step_ids: frozenset[str]`
+# claim plus a `coverage_confidence: dict[str, "claimed"]` tag — Agent 2
+# never verifies, only records what search snippets claim. Phase 6.5's
+# deep-verify upgrades `"claimed"` → `"verified"` per scope or drops the
+# scope from `covers_step_ids`.
+#
+# When disabled: single-pass search (today's behavior); every candidate
+# gets an empty `covers_step_ids` and empty `coverage_confidence` so
+# downstream falls back to the flat flow.
+#
+# 1-scope blueprints and blueprint=None runs always take the single-pass
+# path regardless of this flag — dual search only activates for N>=2 steps.
+# ---------------------------------------------------------------------------
+RESEARCH_DUAL_SEARCH_ENABLED = (
+    os.environ.get("PUZZLEEVAL_RESEARCH_DUAL_SEARCH_ENABLED", "1") != "0"
+)
+
+
+# ---------------------------------------------------------------------------
+# User Candidate Selection (Phase 6)
+# ---------------------------------------------------------------------------
+# After Agent 2 emits a ranked candidate pool with claimed covers_step_ids,
+# the pipeline pauses and waits for the user to:
+#   1. Pick which candidates to test at each scope (keep/remove per-scope)
+#   2. Optionally add custom providers with explicit covers_step_ids
+#
+# API path: pipeline emits `selection_required` SSE event; frontend renders
+# SelectionPanel; user POSTs to `/runs/{id}/select-candidates`; pipeline
+# resumes on filtered candidate list.
+#
+# CLI path: prints per-scope candidate tables to stderr; prompts stdin per
+# scope (y = keep all, n = drop all, edit = toggle by index). Skipped when
+# `--no-interactive` is set.
+#
+# When disabled: pause is skipped, pipeline auto-runs with every Agent 2
+# candidate tested at every scope it claims to cover (today's behavior
+# pre-Phase-6). Useful for scripted nightly runs.
+# ---------------------------------------------------------------------------
+USER_SELECTION_ENABLED = (
+    os.environ.get("PUZZLEEVAL_USER_SELECTION_ENABLED", "1") != "0"
+)
+
+
+# ---------------------------------------------------------------------------
+# Agent 4 Deep Verify (Phase 6.5)
+# ---------------------------------------------------------------------------
+AGENT4_DEEP_VERIFY_ENABLED = (
+    os.environ.get("PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED", "1") != "0"
+)
+AGENT4_DEEP_VERIFY_MAX_TURNS = int(
+    os.environ.get("PUZZLEEVAL_AGENT4_DEEP_VERIFY_MAX_TURNS", "15")
+)
+AGENT4_DEEP_VERIFY_MAX_PARALLEL = int(
+    os.environ.get("PUZZLEEVAL_AGENT4_DEEP_VERIFY_MAX_PARALLEL", "5")
+)
+
+
+# ---------------------------------------------------------------------------
+# Per-Scope Candidate Selection (Phase 7)
+# ---------------------------------------------------------------------------
+SCOPE_SELECTION_WEIGHTS = {
+    "user_picked_here": 0.40,
+    "credentials": 0.20,
+    "relevance_at_scope": 0.20,
+    "docs_quality": 0.10,
+    "pricing_fit": 0.10,
+}
+SCOPE_CANDIDATES_CAP_BY_PLAN = {
+    "free": 3,
+    "paid": 5,
+    "enterprise": 10,
+}
+
+# ---------------------------------------------------------------------------
+# Per-Scope Test Execution Mode (Phase 9)
+# ---------------------------------------------------------------------------
+SCOPE_TEST_MODE = os.environ.get("PUZZLEEVAL_SCOPE_TEST_MODE", "1") != "0"
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +300,7 @@ FETCH_RATE_LIMIT_BACKOFF_SECONDS = int(
 # AGENT5_MAX_OUTPUT_TOKENS: 8192 — code generation needs more output tokens
 #   than the default 4096 (a full harness.py + requirements.txt can be 2-3K tokens).
 # ---------------------------------------------------------------------------
-AGENT5_BUILDER_MODEL = os.environ.get("PUZZLEEVAL_BUILDER_MODEL", "claude-opus-4-6")
+AGENT5_BUILDER_MODEL = os.environ.get("PUZZLEEVAL_BUILDER_MODEL", "claude-opus-4-7")
 AGENT5_MAX_TURNS = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_TURNS", "25"))
 AGENT5_MAX_BUDGET_PER_CANDIDATE = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_PER_CANDIDATE", "3.0")
@@ -278,7 +364,7 @@ PROVIDER_REGISTRY_PATH = os.environ.get(
 
 
 MIN_CACHEABLE_TOKENS = {
-    "claude-opus-4-6": 4096,
+    "claude-opus-4-7": 4096,
     "claude-opus-4-5": 4096,
     "claude-opus-4-1": 1024,
     "claude-sonnet-4-6": 2048,

@@ -7,6 +7,10 @@ import type {
   SSEEventData,
   AgentModes,
   WorkflowBlueprint,
+  CoverageConfidence,
+  SelectCandidatesRequest,
+  UserAddedCandidate,
+  RejectionEntry,
 } from "@/types/pipeline";
 import type { ActivityEntry, PipelineNodeState } from "@/types/activity";
 import { AGENT_LABELS } from "@/types/activity";
@@ -15,6 +19,7 @@ import {
   sendMessage as apiSendMessage,
   uploadFiles,
   cancelRun as apiCancelRun,
+  selectCandidates as apiSelectCandidates,
   subscribeToEvents,
 } from "@/services/api";
 
@@ -83,6 +88,20 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
   // a step chain; when null it renders nothing (legacy pre-Phase-3 flow).
   const [workflow, setWorkflow] = useState<WorkflowBlueprint | null>(null);
 
+  // Phase 6: per-scope candidate selection state. Populated when the
+  // pipeline pauses with `selection_required` SSE. Consumed by the
+  // SelectionPanel component which lets the user keep/remove candidates
+  // per scope and add custom providers.
+  const [perScopeCandidates, setPerScopeCandidates] = useState<
+    Record<string, string[]>
+  >({});
+  const [isSelectionSubmitting, setIsSelectionSubmitting] = useState(false);
+
+  // Phase 6.5 forward-compat: rejection entries after deep-verify.
+  // Populated by `candidate_rejected` SSE events; consumed by the
+  // null-safe RejectionSummary component. Empty until 6.5 ships.
+  const [rejections, setRejections] = useState<RejectionEntry[]>([]);
+
   const unsubscribeRef = useRef<(() => void) | null>(null);
   const runIdRef = useRef<string | null>(null);
 
@@ -110,12 +129,70 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           setPipelineNodes([...INITIAL_NODES]);
           break;
 
+        case "selection_required": {
+          // Phase 6: pipeline paused after Agent 2 — show SelectionPanel.
+          // Payload: per_scope_candidates (scope_id -> candidate name list)
+          setStage("selection");
+          const psc = data.per_scope_candidates as Record<string, string[]> | undefined;
+          setPerScopeCandidates(psc ?? {});
+          addActivity("pipeline", "info", "Waiting for your candidate selection...", {
+            status: "progress",
+          });
+          break;
+        }
+
+        case "candidate_rejected": {
+          // Phase 6.5 forward-compat: per-candidate rejection after deep-verify.
+          const rName = data.candidate_name as string;
+          const rScopeId = data.scope_id as string;
+          const rReason = data.reason as RejectionEntry["reason"];
+          const rNotes = (data.attempt_notes as string) || "";
+          const rProvider = (data.provider as string) || "";
+          if (rName && rScopeId && rReason) {
+            setRejections((prev) => [
+              ...prev,
+              {
+                name: rName,
+                provider: rProvider,
+                scope_id: rScopeId,
+                reason: rReason,
+                attempt_notes: rNotes,
+              },
+            ]);
+          }
+          break;
+        }
+
         case "workflow_blueprint": {
           // Phase 3: Agent 1's director output. Payload may be null for
           // pre-Phase-3 mock artifacts — WorkflowDiagram handles null by
           // rendering nothing, matching legacy behavior.
           const bp = data.workflow as WorkflowBlueprint | null | undefined;
           setWorkflow(bp ?? null);
+
+          // TestPlan summary → chat message so user sees the architecture
+          // before research starts (non-blocking UX improvement).
+          const tp = data.test_plan as Record<string, unknown> | null | undefined;
+          if (bp && bp.steps && bp.steps.length > 0) {
+            const stepSummary = bp.steps
+              .map((s) => `**${s.id}** (${s.role}): ${s.description}`)
+              .join("\n");
+            let planNote = "";
+            if (tp && Array.isArray(tp.scope_specs)) {
+              const specs = tp.scope_specs as Array<Record<string, unknown>>;
+              planNote = "\n\n**Test Plan:**\n" + specs
+                .map((s) => `- ${s.scope_id}: ${s.test_mode}, ${s.test_count_target} tests`)
+                .join("\n");
+            }
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                role: "assistant" as const,
+                content: `I've designed a ${bp.steps.length}-scope workflow:\n\n${stepSummary}${planNote}\n\nNow searching for the best AI solutions for each scope...`,
+              },
+            ]);
+          }
           break;
         }
 
@@ -188,19 +265,42 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
         case "candidates_found": {
           const rawCandidates = data.candidates as Array<Record<string, unknown>>;
           setCandidates(
-            rawCandidates.map((c) => ({
-              name: (c.name as string) || "",
-              provider: (c.provider as string) || "",
-              description: (c.description as string) || "",
-              relevance_score: (c.relevance_score as number) || 0,
-              adoption_difficulty: (c.adoption_difficulty as "easy" | "medium" | "hard") || "medium",
-              claimed_capabilities: (c.claimed_capabilities as string[]) || [],
-              confirmed_capabilities: [],
-              harness_status: "pending" as const,
-              test_status: "pending" as const,
-              test_results: [],
-              buildLog: [],
-            }))
+            rawCandidates.map((c) => {
+              // Phase 4: dual-search coverage fields. Backend sends a list of
+              // step IDs and a dict of step_id -> "claimed"/"verified". When
+              // absent (pre-Phase-4 mock artifacts, or legacy single-pass
+              // search) default to empty — the UI falls back to the pre-Phase-4
+              // flat view with no coverage badges.
+              const coversRaw = c.covers_step_ids;
+              const covers = Array.isArray(coversRaw)
+                ? coversRaw.filter((x): x is string => typeof x === "string")
+                : [];
+              const confRaw = (c.coverage_confidence as Record<string, string> | undefined) || {};
+              const coverageConfidence: Record<string, CoverageConfidence> = {};
+              for (const [sid, val] of Object.entries(confRaw)) {
+                coverageConfidence[sid] = val === "verified" ? "verified" : "claimed";
+              }
+              // Phase 5: pricing_breakdown is null here (Agent 2 never fills
+              // it); Phase 6.5 populates via a separate `candidate_verified`
+              // event. Default to null so the PricingBlock stays hidden
+              // until then.
+              return {
+                name: (c.name as string) || "",
+                provider: (c.provider as string) || "",
+                description: (c.description as string) || "",
+                relevance_score: (c.relevance_score as number) || 0,
+                adoption_difficulty: (c.adoption_difficulty as "easy" | "medium" | "hard") || "medium",
+                claimed_capabilities: (c.claimed_capabilities as string[]) || [],
+                covers_step_ids: covers,
+                coverage_confidence: coverageConfidence,
+                pricing_breakdown: null,
+                confirmed_capabilities: [],
+                harness_status: "pending" as const,
+                test_status: "pending" as const,
+                test_results: [],
+                buildLog: [],
+              };
+            })
           );
           break;
         }
@@ -213,6 +313,15 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
             return updated.map((c) => {
               const match = validated.find((v) => v.name === c.name);
               if (!match) return c;
+              // Phase 5 forward-compat: once Phase 6.5's 4B extraction
+              // populates pricing_breakdown server-side, it travels on
+              // this SSE payload (or its successor `candidate_verified`
+              // per-candidate event). Parse it null-safely so the field
+              // stays null when Phase 6.5 hasn't shipped yet.
+              const maybePricing = match.pricing_breakdown;
+              const pricing = maybePricing && typeof maybePricing === "object"
+                ? (maybePricing as unknown as typeof c.pricing_breakdown)
+                : null;
               return {
                 ...c,
                 description: (match.description as string) || c.description,
@@ -220,9 +329,34 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
                 auth_method: match.auth_method as string,
                 api_access_method: match.api_access_method as string,
                 verified_api_docs_url: match.verified_api_docs_url as string,
+                pricing_breakdown: pricing,
               };
             });
           });
+          break;
+        }
+
+        case "candidate_verified": {
+          // Phase 5 + 6.5: per-candidate verification event emitted during
+          // Phase 6.5's directed 4A→4B→4C→4D loop. Carries pricing_breakdown
+          // populated by 4B extraction. Null-safe here — when 6.5 hasn't
+          // shipped this event never fires and candidates keep the default
+          // null pricing.
+          const name = data.candidate_name as string;
+          const pricing = data.pricing_breakdown as Record<string, unknown> | null | undefined;
+          if (!name) break;
+          setCandidates((prev) =>
+            prev.map((c) => {
+              if (c.name !== name) return c;
+              return {
+                ...c,
+                pricing_breakdown:
+                  pricing && typeof pricing === "object"
+                    ? (pricing as unknown as typeof c.pricing_breakdown)
+                    : c.pricing_breakdown ?? null,
+              };
+            })
+          );
           break;
         }
 
@@ -246,6 +380,9 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
                 relevance_score: 0,
                 adoption_difficulty: "medium" as const,
                 claimed_capabilities: [],
+                covers_step_ids: [],
+                coverage_confidence: {},
+                pricing_breakdown: null,
                 confirmed_capabilities: [],
                 harness_status: "building" as const,
                 test_status: "pending" as const,
@@ -357,6 +494,9 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
                 relevance_score: 0,
                 adoption_difficulty: "medium" as const,
                 claimed_capabilities: [],
+                covers_step_ids: [],
+                coverage_confidence: {},
+                pricing_breakdown: null,
                 confirmed_capabilities: [],
                 harness_status: "built" as const,
                 test_results: [],
@@ -496,6 +636,45 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
     }
   }, []);
 
+  // Phase 6: submit the user's per-scope candidate picks + optional
+  // user-added providers. Called by SelectionPanel.
+  const submitSelection = useCallback(
+    async (
+      scopePicks: Record<string, string[]>,
+      userAdded: UserAddedCandidate[] = []
+    ) => {
+      const id = runIdRef.current;
+      if (!id) return;
+      setIsSelectionSubmitting(true);
+      try {
+        const req: SelectCandidatesRequest = {
+          scope_picks: scopePicks,
+          add: userAdded,
+        };
+        await apiSelectCandidates(id, req);
+        // Selection submitted — pipeline resumes automatically. The backend
+        // will re-emit `candidates_found` with the filtered set, and the
+        // stage will transition back to "pipeline" when events resume.
+        setStage("pipeline");
+        addActivity("pipeline", "info", "Selection submitted — pipeline resuming...", {
+          status: "success",
+        });
+      } catch (err) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: Date.now(),
+            role: "assistant" as const,
+            content: `Selection failed: ${err instanceof Error ? err.message : "Unknown error"}. Please try again.`,
+          },
+        ]);
+      } finally {
+        setIsSelectionSubmitting(false);
+      }
+    },
+    [addActivity]
+  );
+
   return {
     stage,
     messages,
@@ -509,5 +688,11 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
     pipelineNodes,
     runId, // Phase 2: needed by QuotaBadge to poll GET /runs/{id} for current quota
     workflow, // Phase 3: blueprint from Agent 1, consumed by WorkflowDiagram
+    // Phase 6: selection state + handlers
+    perScopeCandidates,
+    isSelectionSubmitting,
+    submitSelection,
+    // Phase 6.5 forward-compat: rejection entries from deep-verify
+    rejections,
   };
 }

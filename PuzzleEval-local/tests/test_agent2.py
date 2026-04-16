@@ -516,3 +516,235 @@ class TestResearchAgent:
 
         with pytest.raises(AgentOutputError, match="no text findings"):
             run_research_agent(input_data)
+
+
+# ============================================================================
+# Phase 4: Dual search + coverage set tests
+# ============================================================================
+# These sit alongside TestResearchAgent and drive the dual-search code path
+# end-to-end using mocked API calls. They verify:
+#   - the web_search tool config scales max_uses with blueprint size
+#   - the prompt message carries blueprint context to Claude
+#   - post-processing normalizes covers_step_ids + coverage_confidence
+#   - dedup merges coverage across duplicate candidate names
+#   - hallucinated step IDs are dropped
+#   - single-scope blueprint auto-fills covers_step_ids = {step_1}
+#   - the diagnostic flag (PUZZLEEVAL_RESEARCH_DUAL_SEARCH_ENABLED=0) reverts
+#     to single-pass behavior without touching the schema
+# ============================================================================
+
+from puzzleeval.schemas import WorkflowBlueprint, WorkflowStep
+
+
+def _make_linear_blueprint(step_count: int) -> WorkflowBlueprint:
+    """Build a linear N-step blueprint (step_1 -> step_2 -> ... -> step_N)."""
+    steps: list[WorkflowStep] = []
+    for i in range(1, step_count + 1):
+        steps.append(WorkflowStep(
+            id=f"step_{i}",
+            role=f"role_{i}",
+            description=f"Step {i} description",
+            capability=f"capability_{i}",
+            input_from="user" if i == 1 else f"step_{i - 1}",
+            output_format="structured_json",
+            depends_on=[] if i == 1 else [f"step_{i - 1}"],
+        ))
+    return WorkflowBlueprint(steps=steps, architecture_options=["all_in_one", "best_per_step"])
+
+
+def _make_user_understanding_with_blueprint(step_count: int) -> UserUnderstandingOutput:
+    uo = _make_user_understanding()
+    uo.workflow = _make_linear_blueprint(step_count)
+    return uo
+
+
+class TestPhase4DualSearchConfig:
+    """web_search tool config scales with blueprint size."""
+
+    def test_single_scope_uses_single_search_max(self):
+        from puzzleeval.agents.research import _build_web_search_tool, SINGLE_SEARCH_MAX_USES
+        blueprint = _make_linear_blueprint(1)
+        tool = _build_web_search_tool(blueprint)
+        assert tool["max_uses"] == SINGLE_SEARCH_MAX_USES  # 1-scope → legacy cap
+
+    def test_no_blueprint_uses_single_search_max(self):
+        from puzzleeval.agents.research import _build_web_search_tool, SINGLE_SEARCH_MAX_USES
+        tool = _build_web_search_tool(None)
+        assert tool["max_uses"] == SINGLE_SEARCH_MAX_USES  # legacy path
+
+    def test_two_scope_uses_n_plus_one(self):
+        from puzzleeval.agents.research import _build_web_search_tool
+        blueprint = _make_linear_blueprint(2)
+        tool = _build_web_search_tool(blueprint)
+        assert tool["max_uses"] == 3  # N+1 = 2+1
+
+    def test_five_scope_uses_n_plus_one(self):
+        from puzzleeval.agents.research import _build_web_search_tool
+        blueprint = _make_linear_blueprint(5)
+        tool = _build_web_search_tool(blueprint)
+        assert tool["max_uses"] == 6  # N+1 = 5+1
+
+    def test_huge_blueprint_caps_at_ceiling(self):
+        from puzzleeval.agents.research import (
+            _build_web_search_tool,
+            DUAL_SEARCH_MAX_USES_CEILING,
+        )
+        blueprint = _make_linear_blueprint(15)  # N+1 = 16, ceiling caps it
+        tool = _build_web_search_tool(blueprint)
+        assert tool["max_uses"] == DUAL_SEARCH_MAX_USES_CEILING
+
+    def test_disabled_flag_reverts_to_single_pass(self, monkeypatch):
+        # Flip the diagnostic flag off → every blueprint size uses single-pass.
+        from puzzleeval.agents import research as research_module
+        monkeypatch.setattr(research_module, "RESEARCH_DUAL_SEARCH_ENABLED", False)
+        blueprint = _make_linear_blueprint(5)
+        tool = research_module._build_web_search_tool(blueprint)
+        assert tool["max_uses"] == research_module.SINGLE_SEARCH_MAX_USES
+
+
+class TestPhase4ResearchMessage:
+    """_build_research_message includes blueprint context for dual search."""
+
+    def test_blueprint_section_rendered_for_multi_scope(self):
+        from puzzleeval.agents.research import _build_research_message
+        uo = _make_user_understanding_with_blueprint(3)
+        msg = _build_research_message(uo)
+        # Blueprint header + each step id + role present
+        assert "Workflow Blueprint" in msg
+        assert "step_1" in msg
+        assert "step_2" in msg
+        assert "step_3" in msg
+        assert "role_1" in msg
+        # Scope-pool instruction tail scales with N (explicitly says N+1 searches)
+        assert "3-scope" in msg
+        assert "4 searches total" in msg
+
+    def test_blueprint_section_absent_when_no_workflow(self):
+        from puzzleeval.agents.research import _build_research_message
+        uo = _make_user_understanding()  # no blueprint (workflow=None)
+        msg = _build_research_message(uo)
+        # Single-scope fallback text appears; dual-search instructions absent.
+        assert "None provided" in msg
+        assert "Find 5-7" in msg  # legacy pool target
+        assert "4 searches total" not in msg
+
+    def test_single_scope_blueprint_uses_legacy_tail(self):
+        from puzzleeval.agents.research import _build_research_message
+        uo = _make_user_understanding_with_blueprint(1)
+        msg = _build_research_message(uo)
+        # Blueprint IS shown (agent knows covers=step_1) but pool target is legacy.
+        assert "step_1" in msg
+        assert "Find 5-7" in msg
+        assert "4 searches total" not in msg
+
+
+class TestPhase4CoverageNormalization:
+    """_normalize_coverage dedups, fills, sanitizes covers_step_ids + confidence."""
+
+    def _make_candidate(self, name, covers, conf=None):
+        return Candidate(
+            name=name, provider=name,
+            description="desc",
+            api_available=True,
+            api_docs_url=None,
+            pricing_model="usage-based",
+            pricing_details=None,
+            claimed_capabilities=["cap"],
+            relevance_score=0.8,
+            adoption_difficulty="easy",
+            relevant_subtasks=[],
+            source="test",
+            covers_step_ids=frozenset(covers),
+            coverage_confidence=conf if conf is not None else {s: "claimed" for s in covers},
+        )
+
+    def test_dedup_merges_coverage_sets(self):
+        from puzzleeval.agents.research import _normalize_coverage
+        c1 = self._make_candidate("Zapier", ["step_1", "step_2"])
+        c2 = self._make_candidate("Zapier", ["step_2", "step_3"])  # dup with additional scope
+        out = _normalize_coverage([c1, c2], ["step_1", "step_2", "step_3"])
+        assert len(out) == 1
+        assert out[0].covers_step_ids == frozenset({"step_1", "step_2", "step_3"})
+        # Confidence populated for every scope
+        for sid in ("step_1", "step_2", "step_3"):
+            assert out[0].coverage_confidence[sid] == "claimed"
+
+    def test_dedup_case_insensitive_name(self):
+        from puzzleeval.agents.research import _normalize_coverage
+        c1 = self._make_candidate("Mindee", ["step_1"])
+        c2 = self._make_candidate("mindee", ["step_2"])  # same tool, different case
+        out = _normalize_coverage([c1, c2], ["step_1", "step_2"])
+        assert len(out) == 1
+
+    def test_hallucinated_step_ids_dropped(self):
+        from puzzleeval.agents.research import _normalize_coverage
+        c = self._make_candidate("X", ["step_1", "step_99"])  # step_99 not in blueprint
+        out = _normalize_coverage([c], ["step_1", "step_2"])
+        assert out[0].covers_step_ids == frozenset({"step_1"})
+        assert "step_99" not in out[0].coverage_confidence
+
+    def test_single_scope_autofill(self):
+        from puzzleeval.agents.research import _normalize_coverage
+        # Candidate emitted with empty covers — normalizer should fill.
+        c = self._make_candidate("X", [], conf={})
+        out = _normalize_coverage([c], ["step_1"])
+        assert out[0].covers_step_ids == frozenset({"step_1"})
+        assert out[0].coverage_confidence == {"step_1": "claimed"}
+
+    def test_legacy_flow_leaves_coverage_empty(self):
+        from puzzleeval.agents.research import _normalize_coverage
+        c = self._make_candidate("X", [], conf={})
+        out = _normalize_coverage([c], [])  # no blueprint
+        assert out[0].covers_step_ids == frozenset()
+        assert out[0].coverage_confidence == {}
+
+    def test_verified_confidence_clamped_to_claimed(self):
+        # Agent 2 cannot produce "verified" — it doesn't fetch docs. If the
+        # LLM tries to claim otherwise, normalizer clamps it back.
+        from puzzleeval.agents.research import _normalize_coverage
+        c = self._make_candidate(
+            "X", ["step_1"],
+            conf={"step_1": "verified"},  # bogus — Agent 2 never verifies
+        )
+        out = _normalize_coverage([c], ["step_1"])
+        assert out[0].coverage_confidence["step_1"] == "claimed"
+
+    def test_keeps_higher_relevance_score_on_dedup(self):
+        from puzzleeval.agents.research import _normalize_coverage
+        c1 = self._make_candidate("X", ["step_1"])
+        c1.relevance_score = 0.6
+        c2 = self._make_candidate("X", ["step_2"])
+        c2.relevance_score = 0.9
+        out = _normalize_coverage([c1, c2], ["step_1", "step_2"])
+        assert out[0].relevance_score == 0.9
+
+
+class TestPhase4SchemaDefaults:
+    """Candidate with new Phase 4 fields — schema-level checks."""
+
+    def test_default_covers_step_ids_is_empty_frozenset(self):
+        c = Candidate(
+            name="X", provider="X", description="d",
+            api_available=True, api_docs_url=None,
+            pricing_model="usage-based", pricing_details=None,
+            claimed_capabilities=["c"], relevance_score=0.5,
+            adoption_difficulty="easy", relevant_subtasks=[], source="t",
+        )
+        assert isinstance(c.covers_step_ids, frozenset)
+        assert len(c.covers_step_ids) == 0
+        assert c.coverage_confidence == {}
+
+    def test_frozenset_round_trips_as_list(self):
+        c = Candidate(
+            name="X", provider="X", description="d",
+            api_available=True, api_docs_url=None,
+            pricing_model="usage-based", pricing_details=None,
+            claimed_capabilities=["c"], relevance_score=0.5,
+            adoption_difficulty="easy", relevant_subtasks=[], source="t",
+            covers_step_ids=frozenset({"step_1", "step_2"}),
+            coverage_confidence={"step_1": "claimed", "step_2": "claimed"},
+        )
+        j = c.model_dump_json()
+        back = Candidate.model_validate_json(j)
+        assert back.covers_step_ids == frozenset({"step_1", "step_2"})
+        assert back.coverage_confidence == {"step_1": "claimed", "step_2": "claimed"}

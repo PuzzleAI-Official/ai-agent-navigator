@@ -63,6 +63,11 @@ build-backend = "setuptools.build_meta"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Skip generalizability benchmarks by default; run with: pytest -m generalizability
+addopts = "-m 'not generalizability'"
+markers = [
+    "generalizability: long-running cross-domain benchmark tests (Phase 10). Skipped by default; run with: pytest -m generalizability",
+]
 # TestCase and TestHarness in schemas.py are Pydantic models, not test classes.
 # Suppress the PytestCollectionWarning about them.
 filterwarnings = [

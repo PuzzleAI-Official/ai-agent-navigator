@@ -3,6 +3,8 @@ import type {
   Plan,
   RunStateOut,
   SSEEventData,
+  SelectCandidatesRequest,
+  SelectCandidatesResponse,
 } from "@/types/pipeline";
 
 const API_BASE = "/pzapi";
@@ -77,6 +79,23 @@ export async function uploadFiles(
   return res.json();
 }
 
+// Phase 6: submit per-scope candidate picks + user-added providers.
+export async function selectCandidates(
+  runId: string,
+  request: SelectCandidatesRequest
+): Promise<SelectCandidatesResponse> {
+  const res = await fetch(`${API_BASE}/runs/${runId}/select-candidates`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`Selection failed (${res.status}): ${detail}`);
+  }
+  return res.json();
+}
+
 export async function cancelRun(runId: string): Promise<void> {
   const res = await fetch(`${API_BASE}/runs/${runId}`, {
     method: "DELETE",
@@ -124,6 +143,10 @@ export function subscribeToEvents(
     "report_generating",
     "agent_blocked",       // Phase 2: emitted when billing gate denies an agent
     "workflow_blueprint",  // Phase 3: emitted after Agent 1 with the blueprint payload
+    "selection_required",  // Phase 6: pipeline paused, awaiting user candidate picks
+    "candidate_verified",  // Phase 6.5: per-candidate deep-verify result (per scope)
+    "candidate_rejected",  // Phase 6.5: per-candidate rejection (per scope)
+    "scope_verified_complete", // Phase 6.5: per-scope summary (verified + rejected counts)
     "done",
   ];
 

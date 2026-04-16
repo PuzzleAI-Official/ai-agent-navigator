@@ -339,6 +339,103 @@ class TestWorkflowBlueprintSchema:
         assert back.steps[1].depends_on == ["step_1"]
         assert back.notes == "round-trip test"
 
+    # ── DAG expansion: parallel_group + fan-out/fan-in schema support ──
+
+    def test_parallel_group_default_is_none(self):
+        # parallel_group is optional and defaults to None for linear steps.
+        step = WorkflowStep(
+            id="step_1", role="ocr",
+            description="OCR", capability="document OCR",
+            input_from="user", output_format="structured_json",
+        )
+        assert step.parallel_group is None
+
+    def test_parallel_group_round_trips(self):
+        # Non-null parallel_group must survive JSON serialization so the
+        # frontend can read it.
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(
+                id="step_2a", role="tax_verify",
+                description="verify tax ids", capability="tax ID verification",
+                input_from="step_1", output_format="structured_json",
+                depends_on=["step_1"], parallel_group="enrichment",
+            ),
+        ])
+        s = bp.model_dump_json()
+        back = WorkflowBlueprint.model_validate_json(s)
+        assert back.steps[0].parallel_group == "enrichment"
+
+    def test_fan_out_fan_in_dag(self):
+        # The user-described "OCR AND verify AND classify, then merge"
+        # shape: three parallel enrichments after step_1, all feeding step_3.
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(
+                id="step_1", role="ocr",
+                description="OCR invoices", capability="document OCR",
+                input_from="user", output_format="structured_json",
+                depends_on=[],
+            ),
+            WorkflowStep(
+                id="step_2a", role="tax_verify",
+                description="Verify tax IDs", capability="tax ID verification",
+                input_from="step_1", output_format="structured_json",
+                depends_on=["step_1"], parallel_group="enrichment",
+            ),
+            WorkflowStep(
+                id="step_2b", role="classify",
+                description="Categorize expenses", capability="expense classification",
+                input_from="step_1", output_format="classification",
+                depends_on=["step_1"], parallel_group="enrichment",
+            ),
+            WorkflowStep(
+                id="step_2c", role="line_item_extract",
+                description="Extract line items", capability="line item extraction",
+                input_from="step_1", output_format="structured_json",
+                depends_on=["step_1"], parallel_group="enrichment",
+            ),
+            WorkflowStep(
+                id="step_3", role="bookkeeping_sync",
+                description="Sync all to QuickBooks", capability="accounting integration",
+                input_from="step_2a", output_format="action",
+                depends_on=["step_2a", "step_2b", "step_2c"],
+            ),
+        ])
+        # Shape assertions — the DAG the downstream phases need to see.
+        ids = {s.id for s in bp.steps}
+        assert ids == {"step_1", "step_2a", "step_2b", "step_2c", "step_3"}
+        enrichment = [s for s in bp.steps if s.parallel_group == "enrichment"]
+        assert len(enrichment) == 3
+        fan_in = next(s for s in bp.steps if s.id == "step_3")
+        assert set(fan_in.depends_on) == {"step_2a", "step_2b", "step_2c"}
+
+    def test_two_root_parallel_ingestion(self):
+        # Two roots (photo + audio) fan into a single summarize step.
+        bp = WorkflowBlueprint(steps=[
+            WorkflowStep(
+                id="step_1a", role="ocr",
+                description="OCR receipts", capability="document OCR",
+                input_from="user", output_format="structured_json",
+                depends_on=[], parallel_group="ingest",
+            ),
+            WorkflowStep(
+                id="step_1b", role="transcribe",
+                description="Transcribe audio", capability="audio transcription",
+                input_from="user", output_format="free_text",
+                depends_on=[], parallel_group="ingest",
+            ),
+            WorkflowStep(
+                id="step_2", role="summarize",
+                description="Meeting summary", capability="meeting summarization",
+                input_from="step_1a", output_format="free_text",
+                depends_on=["step_1a", "step_1b"],
+            ),
+        ])
+        roots = [s for s in bp.steps if not s.depends_on]
+        assert len(roots) == 2
+        assert all(r.parallel_group == "ingest" for r in roots)
+        fan_in = next(s for s in bp.steps if s.id == "step_2")
+        assert set(fan_in.depends_on) == {"step_1a", "step_1b"}
+
 
 class TestUserUnderstandingOutputBackwardCompat:
 
@@ -376,3 +473,79 @@ class TestUserUnderstandingOutputBackwardCompat:
         )
         assert uo.workflow is not None
         assert uo.workflow.steps[0].capability == "document OCR"
+
+
+class TestTestPlanSchema:
+    """Test Plan schema from Agent 1 as test director."""
+
+    def test_test_plan_round_trip(self):
+        from puzzleeval.schemas import TestPlan, ScopeTestSpec
+        plan = TestPlan(
+            scope_specs=[
+                ScopeTestSpec(
+                    scope_id="step_1", test_mode="file_based",
+                    input_type="document_content", output_type="structured_json",
+                    input_description="Invoice photo", expected_output_description="JSON",
+                    sample_input="Invoice data", sample_output='{"vendor": "X"}',
+                    test_count_target=8, requires_user_files=True,
+                    file_description="Invoice photos",
+                    evaluation_focus=["accuracy", "completeness"],
+                ),
+                ScopeTestSpec(
+                    scope_id="step_2", test_mode="synthetic_structured",
+                    input_type="structured_data", output_type="action",
+                    input_description="JSON from OCR", expected_output_description="Confirmation",
+                    sample_input='{"vendor": "X"}', sample_output='{"status": "ok"}',
+                    test_count_target=6, requires_user_files=False,
+                    upstream_output_shape='{"vendor": "...", "total": 0}',
+                    evaluation_focus=["accuracy", "error_handling"],
+                ),
+            ],
+            total_test_target=14,
+            notes="OCR needs files; sync uses simulated output.",
+        )
+        j = plan.model_dump_json()
+        back = TestPlan.model_validate_json(j)
+        assert len(back.scope_specs) == 2
+        assert back.scope_specs[0].scope_id == "step_1"
+        assert back.scope_specs[0].test_mode == "file_based"
+        assert back.scope_specs[1].upstream_output_shape is not None
+        assert back.total_test_target == 14
+
+    def test_test_plan_on_user_understanding(self):
+        from puzzleeval.schemas import TestPlan, ScopeTestSpec
+        uo = UserUnderstandingOutput(
+            summary="test",
+            sub_tasks=[SubTask(description="d", capability="c", search_keywords=["k"])],
+            domain="d", search_keywords=["k"], constraints=Constraints(),
+            test_plan=TestPlan(
+                scope_specs=[
+                    ScopeTestSpec(
+                        scope_id="step_1", test_mode="synthetic_text",
+                        input_type="text", output_type="free_text",
+                        input_description="chat msg", expected_output_description="response",
+                        sample_input="Hello", sample_output="Hi there!",
+                    ),
+                ],
+                total_test_target=7,
+            ),
+        )
+        assert uo.test_plan is not None
+        assert uo.test_plan.scope_specs[0].scope_id == "step_1"
+
+    def test_test_plan_default_none(self):
+        uo = UserUnderstandingOutput(
+            summary="t", sub_tasks=[SubTask(description="d", capability="c", search_keywords=["k"])],
+            domain="d", search_keywords=["k"], constraints=Constraints(),
+        )
+        assert uo.test_plan is None
+
+    def test_test_plan_backward_compat_json(self):
+        """Pre-TestPlan saved artifacts parse with test_plan=None."""
+        import json
+        uo = UserUnderstandingOutput.model_validate_json(json.dumps({
+            "summary": "t", "sub_tasks": [{"description": "d", "capability": "c", "search_keywords": ["k"]}],
+            "search_strategy": "both", "domain": "d", "search_keywords": ["k"],
+            "constraints": {},
+        }))
+        assert uo.test_plan is None

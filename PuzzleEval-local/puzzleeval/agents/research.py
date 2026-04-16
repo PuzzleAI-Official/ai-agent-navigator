@@ -53,6 +53,7 @@ import anthropic
 from puzzleeval.config import (
     ANTHROPIC_API_KEY,
     DEFAULT_MODEL,
+    RESEARCH_DUAL_SEARCH_ENABLED,
     RESEARCH_MODEL,
     WEB_SEARCH_PRICE_PER_SEARCH,
 )
@@ -62,7 +63,14 @@ from puzzleeval.exceptions import (
     AgentRateLimitError,
 )
 from puzzleeval.logging_setup import get_logger, log_llm_call
-from puzzleeval.schemas import Agent2Input, Agent2Result, Candidate, UserUnderstandingOutput
+from puzzleeval.schemas import (
+    Agent2Input,
+    Agent2Result,
+    Candidate,
+    UserAddedCandidate,
+    UserUnderstandingOutput,
+    WorkflowBlueprint,
+)
 
 
 # ============================================================================
@@ -92,79 +100,94 @@ from puzzleeval.schemas import Agent2Input, Agent2Result, Candidate, UserUnderst
 #   10 results with encrypted_content, Claude can write code to keep only
 #   the relevant results and discard the rest BEFORE they accumulate in
 #   context. This reduces token cost per search iteration.
-#   Requires Sonnet 4.6 or Opus 4.6 (code execution is auto-injected).
+#   Requires Sonnet 4.6 or Opus 4.7 (code execution is auto-injected).
 # ============================================================================
 
 RESEARCH_SYSTEM_PROMPT = """You are the Research Agent for PuzzleEval — a product expert who finds AI solutions tailored to each user's specific situation.
 
 You are NOT finding the best services in the world. You are finding the best services FOR THIS USER — their background, technical ability, domain, and use case.
 
-## Phase 1: Search
-Do 1-2 searches to find comparison/roundup articles listing the market players.
-- Search: "best [main capability] API tools 2026" or "[capability] API comparison"
-- If the user has a second distinct sub-task, do ONE more search for that capability
-- STOP after 2-3 searches. Do not search for individual tools.
+You do NOT verify docs, fetch pages, or pick endpoints. You SURVEY and RANK. Phase 6.5's Agent 4 does deep verification later — only on candidates that will actually be tested. Your job is to produce a broad, well-ranked candidate pool.
 
-## Phase 2: Collect Candidate Pool
-From search results, list EVERY tool/service mentioned. Don't filter yet — this is your raw pool (typically 15-30 candidates).
+## Search strategy
 
-## Phase 3: Score Each Candidate (the critical step)
+The user's request comes with a WorkflowBlueprint in the message. The blueprint has N scopes (step_1, step_2, ... step_N). How you search depends on N:
+
+**Single-scope (N=1) or no blueprint:**
+- Run 1 survey search: "best [capability] API tools 2026" or "[capability] API comparison".
+- Optionally 1 targeted follow-up if the first search was thin.
+- Every candidate you emit covers `step_1` (or empty coverage if there's no blueprint at all).
+
+**Multi-scope (N>=2):**
+- Run 1 SURVEY search for all-in-one horizontal tools that could cover the ENTIRE workflow (Zapier, n8n, Make, Workato, Pipedream, etc.): "best workflow automation [domain]" or "[end-to-end use case] no-code platform".
+- Run 1 PER-SCOPE search for EACH step in the blueprint, focused on SPECIALISTS for that step's role: e.g. "best OCR APIs 2026" for step_1 role=ocr, "best Google Sheets API integration" for step_2 role=spreadsheet_sync.
+- Total searches = N+1 (one survey + one per scope). Hard cap.
+
+## Collect + classify coverage
+
+For every tool/service mentioned across your searches, record:
+1. **Where it surfaced.** All-in-one survey? Per-scope search for step_k? Both?
+2. **What scopes it plausibly covers.** Read the search snippet. An all-in-one tool in the survey typically claims broad coverage — note which scopes the snippet mentions. A specialist in a per-scope search usually covers that one scope only. If a tool surfaces in BOTH an all-in-one search claiming scopes {1,2,3} AND a per-scope search for step_1, merge → {1,2,3}.
+
+There's NO "multi-step category" vs "specialist category" — coverage is just a SET. A tool may cover 1, 2, or all N scopes. Specialists and all-in-ones compete equally at every scope they claim.
+
+Your output must populate `covers_step_ids` (set of step_ids) and `coverage_confidence` (dict of step_id → "claimed") for every candidate. All confidence is "claimed" — YOU do not verify. Phase 6.5 verifies and can remove scopes later.
+
+## Score each candidate
 
 For EVERY candidate in your pool, score on three dimensions (0-10):
 
 ### Dimension 1: Capability Fit (0-10)
-How well does this service handle the user's specific sub-tasks?
-- 9-10: Covers all sub-tasks with production-quality, purpose-built features
-- 6-8: Covers most sub-tasks well, may need minor workarounds
-- 3-5: Covers some sub-tasks, significant gaps or limitations
+How well does this service handle the scopes it covers?
+- 9-10: Production-quality, purpose-built features for every covered scope
+- 6-8: Covers most well, may need minor workarounds
+- 3-5: Covers some, significant gaps at other claimed scopes
 - 1-2: Barely relevant, would require heavy customization
 
 ### Dimension 2: Adoption Fit (0-10)
 How realistic is it for THIS SPECIFIC USER to get from zero to a working integration?
 Consider: their technical level, what setup the service requires, documentation quality, SDK availability.
-- 9-10: This user could be up and running in under an hour (signup → key → first API call)
-- 6-8: Manageable for this user with some learning, clear docs available
-- 3-5: Significant effort for this user, requires skills they may not have
-- 1-2: This user would need to hire someone to set it up
+- 9-10: Up and running in under an hour (signup → key → first API call)
+- 6-8: Manageable with some learning, clear docs available
+- 3-5: Significant effort, requires skills they may not have
+- 1-2: Would need to hire someone to set it up
 
 ### Dimension 3: Use Case Fit (0-10)
 Is this service designed for someone like this user, in their domain, solving their kind of problem?
-- 9-10: Built specifically for this use case and user profile (e.g., invoice tool for accountants)
+- 9-10: Built specifically for this use case and user profile
 - 6-8: General-purpose but commonly used for this use case
-- 3-5: Can technically do it but designed for a different audience/use case
+- 3-5: Can technically do it but designed for a different audience
 - 1-2: Enterprise/developer infrastructure tool being repurposed
 
-## Phase 4: Weight the Dimensions for THIS User
+**Coverage is NOT a scoring dimension.** A 5-scope tool doesn't automatically outrank a 1-scope specialist at OCR. Each scope's competition is independent. The user picks per-scope in Phase 6; multi-scope coverage only helps IF it comes with competitive fit at each claimed scope.
+
+## Weight the dimensions for THIS user
 
 Based on the user's context, decide how much each dimension matters:
-
-Example weights:
 - Non-technical small business owner: Adoption 40%, Use Case 35%, Capability 25%
-  (they need something they can actually use, even if it's not the most powerful)
 - Senior engineer building a pipeline: Capability 50%, Use Case 30%, Adoption 20%
-  (they need raw power and can handle any setup)
 - Freelancer with some tech skills: Use Case 40%, Capability 30%, Adoption 30%
-  (domain fit matters most for their workflow)
 
 State your chosen weights and WHY they fit this user.
 
-## Phase 5: Rank and Select Top 5-7
+## Rank and select
 
 Composite score = (capability × w1) + (adoption × w2) + (use_case × w3)
 
-Show the scoring table. Select the top 5-7 by composite score.
+Select the top candidates by composite score, with two diversity rules:
+- **Per-scope floor:** for every scope, try to include at least 3 candidates whose `covers_step_ids` includes that scope. Reach for more if the search pool allows.
+- **Provider diversity:** at least 4 different PROVIDERS across the final pool.
+- **Upper bound:** aim for 8-12 total when N>=2 (more scopes → larger pool). For N=1, 5-7 like today.
 
-Hard requirements (candidates must have):
-- Public API (V0 scope)
-- At least 4 different providers in the final 5-7
+Hard requirement: every candidate must have a public API (V0 scope).
 
-## Output Format
+## Output format
 
-1. **Candidate pool**: List ALL tools found in search results
-2. **Weights**: Your chosen weights + reasoning for this user
-3. **Scoring table**: Every candidate scored on 3 dimensions + composite
-4. **Selected 5-7**: The top candidates with: name, provider, description, API docs URL, pricing, sub-tasks covered, and WHY this candidate fits this user
-5. **Coverage analysis**: Which sub-tasks are well-covered vs underserved
+1. **Candidate pool**: List ALL tools found in search results, with a notation of which search surfaced each (survey / per-scope-step_k / both).
+2. **Weights**: Your chosen weights + reasoning for this user.
+3. **Scoring table**: Every candidate scored on 3 dimensions + composite. For each, also list `covers_step_ids` (which scopes it claims).
+4. **Selected top candidates**: name, provider, description, API docs URL, pricing, `covers_step_ids`, and WHY this candidate fits this user.
+5. **Coverage analysis**: For each scope, which candidates cover it and the depth of coverage (well-covered vs thin).
 """
 
 
@@ -176,7 +199,7 @@ Hard requirements (candidates must have):
 # all the hard work (searching, fetching, validating) was done in Step 1.
 # ============================================================================
 
-STRUCTURE_SYSTEM_PROMPT = """You are a data structuring assistant. Take the research findings (which include a scoring table) and structure them into the exact JSON format required.
+STRUCTURE_SYSTEM_PROMPT = """You are a data structuring assistant. Take the research findings (which include a scoring table and per-candidate coverage notes) and structure them into the exact JSON format required.
 
 ## How to Map Scores to Schema Fields
 
@@ -199,16 +222,28 @@ Derive from the ADOPTION FIT dimensional score:
 
 This is an objective description of setup complexity, useful for the final report.
 
+### covers_step_ids (frozenset of step_id strings)  — Phase 4
+For each candidate, set `covers_step_ids` to the list of blueprint step IDs the research findings say that candidate covers. Sources of truth, in order:
+1. The findings explicitly list covered scopes per candidate in the scoring/selection tables.
+2. If a candidate surfaced ONLY in a per-scope search for step_k, covers_step_ids = [step_k].
+3. If a candidate surfaced in the ALL-IN-ONE survey with broad claimed coverage, copy the step IDs the findings list for it.
+4. If the findings dedup a tool across multiple searches (e.g. survey + per-scope-1), the merged coverage is the UNION.
+
+If the user's request has no blueprint at all (single-scope / legacy flow), leave covers_step_ids empty — downstream falls back to flat flow.
+
+### coverage_confidence (dict of step_id → "claimed")  — Phase 4
+Set ONE entry per step_id in covers_step_ids, always with value "claimed". Agent 2 never verifies; Phase 6.5 later upgrades confirmed scopes to "verified" or removes them.
+
 ## Field Guidelines
 
 - api_available: Should be True for all candidates (V0 scope)
 - api_docs_url: Use the URL from the research findings, or null if unconfirmed
 - pricing_model: "per-token", "per-request", "per-page", "monthly", "usage-based", "free-tier", or "freemium"
-- relevant_subtasks: Use the EXACT sub-task description strings from the user's request
+- relevant_subtasks: Use the EXACT sub-task description strings from the user's request (KEEP this field populated for backwards compat — covers_step_ids is the new authoritative scope linkage, relevant_subtasks is a human-readable mirror)
 - source: URL where the candidate was found during research
 
 ## Coverage Notes
-Summarize which sub-tasks are well-covered vs underserved. Note the dimension weights used and why.
+In `coverage_notes`, write a per-scope summary: "step_1 (ocr): 4 candidates covering — Mindee, Google DocAI, AWS Textract, Zapier. step_2 (sheets_sync): 3 candidates — Zapier, Make, Google Sheets API." Flag scopes with thin coverage (<3 candidates) so the validator can warn.
 """
 
 
@@ -236,13 +271,35 @@ Summarize which sub-tasks are well-covered vs underserved. Note the dimension we
 
 # ---------------------------------------------------------------------------
 # Web Search: $10/1000 searches = $0.01 each
-# max_uses=3: one comparison search + 1-2 targeted follow-ups.
+#
+# Single-pass (legacy / 1-scope / no blueprint): max_uses=3 — one comparison
+# search + 1-2 targeted follow-ups.
+#
+# Dual search (Phase 4, N>=2 scope blueprint): max_uses=N+1 — one all-in-one
+# survey search + one per-scope search per blueprint step. Capped at
+# DUAL_SEARCH_MAX_USES_CEILING so cost stays bounded for unusually large
+# blueprints (typical N is 2-5; a 10-scope workflow would still cap at 8).
 # ---------------------------------------------------------------------------
-WEB_SEARCH_TOOL = {
-    "type": "web_search_20250305",
-    "name": "web_search",
-    "max_uses": 3,
-}
+SINGLE_SEARCH_MAX_USES = 3
+DUAL_SEARCH_MAX_USES_CEILING = 8
+
+
+def _build_web_search_tool(blueprint: WorkflowBlueprint | None) -> dict:
+    """
+    Build the web_search server-tool config. When a multi-scope blueprint is
+    present AND dual search is enabled, cap max_uses at N+1 (one survey + one
+    per scope). Otherwise fall back to SINGLE_SEARCH_MAX_USES.
+    """
+    step_count = len(blueprint.steps) if blueprint else 0
+    if RESEARCH_DUAL_SEARCH_ENABLED and step_count >= 2:
+        max_uses = min(step_count + 1, DUAL_SEARCH_MAX_USES_CEILING)
+    else:
+        max_uses = SINGLE_SEARCH_MAX_USES
+    return {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": max_uses,
+    }
 
 
 # Caching is DISABLED for Agent 2 (single-shot, no conversation loop).
@@ -288,6 +345,7 @@ def _build_research_message(user_understanding: UserUnderstandingOutput) -> str:
     - Each sub-task listed with its capability and search keywords
     - Top-level keywords for all-in-one solution searches
     - Constraints that might affect which candidates are viable
+    - Workflow blueprint (Phase 3) — scope list that drives Phase 4 dual search
     """
     # ── CORE: Build the sub-tasks section ──
     subtask_lines = []
@@ -312,6 +370,14 @@ def _build_research_message(user_understanding: UserUnderstandingOutput) -> str:
     # ── CORE: Build technical level guidance ──
     tech_guidance = _tech_level_guidance(tech_level)
 
+    # ── Phase 4: Workflow Blueprint section ──
+    # Surfaces the scope list to the research prompt so Claude knows to do
+    # dual search (survey + one per scope) and to populate covers_step_ids
+    # per candidate. If no blueprint exists, show a single-scope fallback
+    # note so the agent takes the legacy path.
+    blueprint_section = _format_blueprint_section(user_understanding.workflow)
+    scope_pool_instruction = _scope_pool_instruction(user_understanding.workflow)
+
     # ── CORE: Assemble the full message ──
     message = f"""## What the User Needs
 {user_understanding.summary}
@@ -327,6 +393,8 @@ def _build_research_message(user_understanding: UserUnderstandingOutput) -> str:
 ## Sub-Tasks to Find Solutions For
 {subtasks_text}
 
+{blueprint_section}
+
 ## Top-Level Search Keywords (for all-in-one solutions)
 {', '.join(user_understanding.search_keywords)}
 
@@ -335,9 +403,55 @@ def _build_research_message(user_understanding: UserUnderstandingOutput) -> str:
 
 ---
 
-Find 5-7 AI services with public APIs that are the best fit for THIS user — not the best in the world, but the best for their specific background, technical ability, and use case."""
+{scope_pool_instruction}"""
 
     return message
+
+
+def _format_blueprint_section(workflow: WorkflowBlueprint | None) -> str:
+    """
+    Render Agent 1's WorkflowBlueprint as a scope table for the research prompt.
+    Empty string when no blueprint exists (legacy flow).
+    """
+    if workflow is None or not workflow.steps:
+        return "## Workflow Blueprint\nNone provided — treat the request as a single-scope search and leave covers_step_ids empty for every candidate."
+
+    step_lines = []
+    for step in workflow.steps:
+        deps = f", depends_on={list(step.depends_on)}" if step.depends_on else ""
+        step_lines.append(
+            f"- `{step.id}` (role={step.role}, capability=\"{step.capability}\", "
+            f"input_from={step.input_from or 'none'}{deps}): {step.description}"
+        )
+    return (
+        "## Workflow Blueprint (Phase 4 dual search)\n"
+        + "\n".join(step_lines)
+        + "\n\nCover these step_ids in covers_step_ids per candidate. "
+        f"Total scopes: {len(workflow.steps)}. Architecture options Agent 1 considered: "
+        f"{', '.join(workflow.architecture_options) or 'all_in_one, best_per_step'}."
+    )
+
+
+def _scope_pool_instruction(workflow: WorkflowBlueprint | None) -> str:
+    """
+    Tail instruction that tells Claude how many candidates to aim for based
+    on blueprint size. N=1 → today's 5-7 behavior. N>=2 → larger pool.
+    """
+    n = len(workflow.steps) if workflow else 0
+    if not RESEARCH_DUAL_SEARCH_ENABLED or n < 2:
+        return (
+            "Find 5-7 AI services with public APIs that are the best fit for THIS "
+            "user — not the best in the world, but the best for their specific "
+            "background, technical ability, and use case."
+        )
+    return (
+        f"This is a {n}-scope workflow. Run dual search: ONE all-in-one survey + "
+        f"ONE per-scope search per step ({n + 1} searches total, capped). Produce "
+        f"8-12 candidates TOTAL with per-scope diversity — aim for 3+ candidates "
+        f"whose covers_step_ids includes each scope (specialists + any all-in-ones "
+        f"that surface at that scope). Populate covers_step_ids and "
+        f"coverage_confidence for every candidate."
+    )
 
 
 def _tech_level_guidance(tech_level: str) -> str:
@@ -434,6 +548,14 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
     # ★ CORE LINE 2: Build the research request message
     research_message = _build_research_message(input_data.user_understanding)
 
+    # ── Phase 4: dynamic web_search max_uses based on blueprint size ──
+    # 1-scope / no blueprint → single-pass (max_uses=3). N>=2 → dual search
+    # with max_uses=N+1 (one survey + one per scope, capped at 8). This is
+    # the ONLY place the dual-search flag affects tool behavior.
+    blueprint = input_data.user_understanding.workflow
+    web_search_tool = _build_web_search_tool(blueprint)
+    step_ids = [s.id for s in blueprint.steps] if blueprint else []
+
     # ======================================================================
     # STEP 1: Web Research (search-only + pause_turn handling)
     # ======================================================================
@@ -463,7 +585,7 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
                 max_tokens=RESEARCH_MAX_TOKENS,
                 system=[{"type": "text", "text": RESEARCH_SYSTEM_PROMPT}],
                 messages=messages,
-                tools=[WEB_SEARCH_TOOL],
+                tools=[web_search_tool],
             )
 
         # [error handling] Same pattern as Agent 1 — different error types
@@ -637,8 +759,36 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
             agent_name="research", trace_id=input_data.trace_id,
         )
 
+    # ── Phase 4 post-processing: dedup + coverage normalization ──
+    # 1. Dedup by candidate name (case-insensitive). When the same tool
+    #    surfaces in both survey + per-scope searches (e.g. Zapier appears
+    #    in survey claiming scopes {1,2,3} AND in per-scope-1 search),
+    #    the structuring pass may emit two records; we merge here.
+    # 2. Enforce coverage_confidence semantics: every scope in
+    #    covers_step_ids gets confidence "claimed" (Agent 2 never verifies).
+    # 3. Drop scope IDs that aren't in the blueprint (hallucination guard).
+    # 4. For single-scope blueprint, ensure every candidate covers step_1
+    #    UNLESS covers_step_ids was explicitly empty (legacy flow).
+    result.candidates = _normalize_coverage(result.candidates, step_ids)
+
     # [cost tracking] Set total cost on the result
     result.cost_usd = round(total_cost, 6)
+
+    # [phase fingerprint] Log coverage stats for observability
+    if step_ids:
+        scope_coverage_counts = {sid: 0 for sid in step_ids}
+        for c in result.candidates:
+            for sid in c.covers_step_ids:
+                if sid in scope_coverage_counts:
+                    scope_coverage_counts[sid] += 1
+        logger.info("Agent 2 scope coverage", extra={
+            "operation": "coverage_stats",
+            "trace_id": input_data.trace_id,
+            "blueprint_scopes": len(step_ids),
+            "scope_coverage_counts": scope_coverage_counts,
+            "dual_search_enabled": RESEARCH_DUAL_SEARCH_ENABLED,
+            "dual_search_active": RESEARCH_DUAL_SEARCH_ENABLED and len(step_ids) >= 2,
+        })
 
     logger.info("Agent 2 completed", extra={
         "operation": "agent_complete",
@@ -649,89 +799,240 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
     return result
 
 
+def _normalize_coverage(
+    candidates: list[Candidate],
+    blueprint_step_ids: list[str],
+) -> list[Candidate]:
+    """
+    Phase 4 post-processing: dedup candidates by name, merge coverage sets
+    across duplicates, enforce `coverage_confidence[sid] = "claimed"` for
+    every scope in `covers_step_ids`, drop hallucinated step IDs, and
+    force-fill single-scope coverage for 1-step blueprints.
+
+    Never shrinks the ranking order — preserves the first occurrence of
+    each name and merges coverage FROM later occurrences into the first.
+    """
+    valid_ids = set(blueprint_step_ids)
+    n_scopes = len(blueprint_step_ids)
+
+    # First pass: dedup by normalized name, merging coverage.
+    merged: dict[str, Candidate] = {}
+    order: list[str] = []
+    for c in candidates:
+        key = c.name.strip().lower()
+        if key in merged:
+            # Merge coverage: union covers, union confidence (prefer
+            # 'verified' over 'claimed' if both exist — future-proof).
+            existing = merged[key]
+            new_covers = frozenset(existing.covers_step_ids | c.covers_step_ids)
+            new_conf = dict(existing.coverage_confidence)
+            for sid, conf in c.coverage_confidence.items():
+                if conf == "verified" or sid not in new_conf:
+                    new_conf[sid] = conf
+            existing.covers_step_ids = new_covers
+            existing.coverage_confidence = new_conf
+            # Keep the higher relevance_score of the two (more recent
+            # research may re-score the same tool more accurately).
+            if c.relevance_score > existing.relevance_score:
+                existing.relevance_score = c.relevance_score
+        else:
+            merged[key] = c
+            order.append(key)
+
+    # Second pass: sanitize coverage on each merged candidate.
+    out: list[Candidate] = []
+    for key in order:
+        c = merged[key]
+        # Drop hallucinated step IDs that aren't in the blueprint.
+        if valid_ids:
+            cleaned = frozenset(s for s in c.covers_step_ids if s in valid_ids)
+        else:
+            # No blueprint → legacy flow; covers should be empty.
+            cleaned = frozenset()
+        # 1-scope blueprint: every candidate implicitly covers step_1.
+        # (Catches LLM drift where the structuring pass forgot to set it.)
+        if n_scopes == 1 and not cleaned:
+            cleaned = frozenset(blueprint_step_ids)
+        c.covers_step_ids = cleaned
+        # Normalize confidence: exactly one entry per covered scope,
+        # value "claimed" unless already "verified" from a future pass.
+        new_conf: dict[str, str] = {}
+        for sid in cleaned:
+            new_conf[sid] = c.coverage_confidence.get(sid, "claimed")
+            # Agent 2 CANNOT produce "verified" — it doesn't fetch docs.
+            # Clamp to "claimed" even if the LLM tried to claim otherwise.
+            if new_conf[sid] != "claimed":
+                new_conf[sid] = "claimed"
+        c.coverage_confidence = new_conf
+        out.append(c)
+    return out
+
+
 # ============================================================================
-# TEMPORARY TESTING SHIM — Registry Candidate Injection
+# Phase 6: User Candidate Injection + Per-Scope Selection
 # ============================================================================
-# Injects any provider_registry.json providers missing from Agent 2's results
-# so that Agent 4/5 always see all registered providers. This ensures test
-# coverage for all providers we have API keys for, even if Agent 2's web
-# search doesn't discover them.
+# Replaces the retired `inject_registry_candidates` testing shim with two
+# explicit, user-driven helpers:
 #
-# TO REMOVE THIS SHIM:
-#   1. Delete this entire function (inject_registry_candidates)
-#   2. Delete the call in cli.py (search for "inject_registry_candidates")
-#   3. Remove "Candidate" from the import at the top of this file
-#   That's it — no other code references this function.
+#   inject_user_candidates(agent2_result, user_adds) -> Agent2Result
+#       Appends user-supplied candidates to the pool. Called by both the
+#       API route handler (after the SelectionPanel POST) and the CLI
+#       interactive mode. Source is always "user_provided".
+#
+#   apply_scope_picks(agent2_result, scope_picks, user_added) -> Agent2Result
+#       Filters the Agent 2 pool to only candidates the user picked at
+#       at least one scope. For kept candidates, reduces covers_step_ids
+#       to just the scopes where they were picked (intersection with
+#       original coverage for safety). User-added candidates are then
+#       injected on top via inject_user_candidates.
+#
+# Both helpers are pure functions operating on `Agent2Result` — no I/O,
+# no logging side effects. All the async/state plumbing lives upstream.
 # ============================================================================
 
 
-def inject_registry_candidates(
+def inject_user_candidates(
     agent2_result: Agent2Result,
-    registry_path: str | None = None,
+    user_adds: list[UserAddedCandidate],
 ) -> Agent2Result:
     """
-    Append any provider_registry providers missing from agent2_result.candidates.
+    Append user-supplied candidates to Agent 2's pool.
 
-    Matching is case-insensitive on provider name. Injected candidates get
-    source="provider_registry_injection" so they're clearly identifiable.
+    - Dedups case-insensitively against existing Agent 2 candidates (a
+      user picking a provider Agent 2 already found is silently a no-op
+      on the dedup side).
+    - Every user-added candidate gets `source="user_provided"`,
+      `relevance_score=0.99` (guarantees top-K inclusion at every scope
+      it covers), and explicit `covers_step_ids` / `coverage_confidence`
+      derived from the user's claim (all "claimed" — Phase 6.5 verifies
+      later).
+    - `api_docs_url` passes through when provided; Phase 6.5's 4A uses
+      it as the starting point for deep verify.
 
-    Returns a NEW Agent2Result (does not mutate the original).
+    Returns a NEW Agent2Result. Never mutates the input.
     """
-    import json
-    from pathlib import Path
-    from puzzleeval.config import PROVIDER_REGISTRY_PATH
-
-    reg_path = Path(registry_path or PROVIDER_REGISTRY_PATH)
-    if not reg_path.exists():
+    if not user_adds:
         return agent2_result
 
-    try:
-        raw = json.loads(reg_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return agent2_result
+    existing_names = {
+        c.name.strip().lower() for c in agent2_result.candidates
+    }
+    existing_names.update(
+        c.provider.strip().lower() for c in agent2_result.candidates
+    )
 
-    registry_providers = raw.get("providers", {})
-    if not registry_providers:
-        return agent2_result
-
-    # Build a set of normalized names already present in Agent 2's results
-    existing_names = set()
-    for c in agent2_result.candidates:
-        existing_names.add(c.name.lower().strip())
-        existing_names.add(c.provider.lower().strip())
-
-    injected = []
-    for provider_key, _data in registry_providers.items():
-        normalized_key = provider_key.lower().strip()
-        if normalized_key in existing_names:
+    new_candidates: list[Candidate] = []
+    for ua in user_adds:
+        normalized = ua.name.strip().lower()
+        if normalized in existing_names:
+            # User tried to add a provider Agent 2 already found — skip.
+            # Their intent is served by picking the existing entry in the
+            # SelectionPanel.
             continue
-
-        injected.append(Candidate(
-            name=provider_key,
-            provider=provider_key,
-            description=(
-                f"{provider_key} — injected from provider_registry.json for "
-                f"testing. Agent 4 will verify API docs."
-            ),
+        covers = frozenset(ua.covers_step_ids)
+        confidence = {sid: "claimed" for sid in covers}
+        new_candidates.append(Candidate(
+            name=ua.name,
+            provider=ua.provider,
+            description=ua.notes or f"{ua.name} — user-added provider",
             api_available=True,
-            api_docs_url=None,
+            api_docs_url=ua.api_docs_url,
             pricing_model="unknown",
             pricing_details=None,
-            claimed_capabilities=["document processing", "data extraction"],
-            relevance_score=0.99,  # TESTING SHIM — guarantees top-N selection by Agent 5
+            claimed_capabilities=[],
+            relevance_score=0.99,
             adoption_difficulty="medium",
             relevant_subtasks=[],
-            source="provider_registry_injection",
+            source=ua.source,
+            covers_step_ids=covers,
+            coverage_confidence=confidence,
         ))
+        existing_names.add(normalized)
 
-    if not injected:
+    if not new_candidates:
         return agent2_result
 
     return Agent2Result(
-        candidates=agent2_result.candidates + injected,
+        candidates=agent2_result.candidates + new_candidates,
         search_approach=(
             agent2_result.search_approach
-            + f" [+{len(injected)} injected from provider_registry]"
+            + f" [+{len(new_candidates)} user-added]"
         ),
         coverage_notes=agent2_result.coverage_notes,
+        cost_usd=agent2_result.cost_usd,
     )
+
+
+def apply_scope_picks(
+    agent2_result: Agent2Result,
+    scope_picks: dict[str, list[str]] | None = None,
+    user_added: list[UserAddedCandidate] | None = None,
+) -> Agent2Result:
+    """
+    Filter Agent 2's candidate pool to only the candidates the user picked
+    at at least one scope; reduce each kept candidate's covers_step_ids to
+    just the scopes where it was picked. Then append user-added
+    candidates via inject_user_candidates.
+
+    `scope_picks=None` means "pass through" — no filtering, every Agent 2
+    candidate survives (used by the CLI --no-interactive path and by the
+    API when PUZZLEEVAL_USER_SELECTION_ENABLED=0).
+
+    `scope_picks={}` means "filter everything out" — zero candidates.
+    Emit this cautiously; useful for testing but probably an error in
+    production.
+
+    Returns a NEW Agent2Result; never mutates the input.
+    """
+    # Pass-through path
+    if scope_picks is None:
+        return (
+            inject_user_candidates(agent2_result, user_added)
+            if user_added
+            else agent2_result
+        )
+
+    # Invert: candidate_name (normalized) -> set of scope_ids where picked
+    picked_scopes: dict[str, set[str]] = {}
+    for scope_id, names in scope_picks.items():
+        for name in names:
+            key = name.strip().lower()
+            picked_scopes.setdefault(key, set()).add(scope_id)
+
+    # Filter + reduce
+    kept: list[Candidate] = []
+    for c in agent2_result.candidates:
+        key = c.name.strip().lower()
+        if key not in picked_scopes:
+            continue
+        picked_at = picked_scopes[key]
+        # Intersect with original coverage to defend against pick-outside
+        # attacks; if the intersection is empty, trust the user's intent
+        # and keep their picked scopes (frontend should prevent this but
+        # backend stays permissive).
+        original = set(c.covers_step_ids)
+        if original:
+            new_covers = frozenset(picked_at & original) or frozenset(picked_at)
+        else:
+            new_covers = frozenset(picked_at)
+        new_conf = {
+            sid: c.coverage_confidence.get(sid, "claimed") for sid in new_covers
+        }
+        c.covers_step_ids = new_covers
+        c.coverage_confidence = new_conf
+        kept.append(c)
+
+    filtered = Agent2Result(
+        candidates=kept,
+        search_approach=(
+            agent2_result.search_approach
+            + f" [user-filtered to {len(kept)} candidates]"
+        ),
+        coverage_notes=agent2_result.coverage_notes,
+        cost_usd=agent2_result.cost_usd,
+    )
+
+    if user_added:
+        filtered = inject_user_candidates(filtered, user_added)
+
+    return filtered

@@ -130,6 +130,47 @@ class Quota(BaseModel):
     )
 
 
+# ============================================================================
+# Phase 6: Candidate Selection (per-scope picks + user-added providers)
+# ============================================================================
+
+class UserAddedCandidateIn(BaseModel):
+    """User-supplied candidate from the SelectionPanel's 'Add provider' form."""
+    name: str
+    provider: str
+    api_docs_url: Optional[str] = None
+    notes: Optional[str] = None
+    covers_step_ids: list[str] = Field(
+        description="Blueprint step IDs this provider covers. Required, at least one."
+    )
+    source: str = "user_provided"
+
+
+class SelectCandidatesRequest(BaseModel):
+    """POST body for /runs/{id}/select-candidates."""
+    scope_picks: dict[str, list[str]] = Field(
+        description=(
+            "Per-scope picks: scope_id -> list of candidate names the user "
+            "wants tested at that scope. A candidate can appear under multiple "
+            "scope_ids if it covers multiple scopes."
+        )
+    )
+    add: list[UserAddedCandidateIn] = Field(
+        default_factory=list,
+        description="Candidates the user added via the SelectionPanel form.",
+    )
+
+
+class SelectCandidatesResponse(BaseModel):
+    """Response from /runs/{id}/select-candidates."""
+    accepted_count: int = Field(
+        description="Total unique (candidate, scope) pairs accepted."
+    )
+    scope_coverage: dict[str, int] = Field(
+        description="scope_id -> how many candidates were picked at that scope."
+    )
+
+
 class RunStateOut(BaseModel):
     run_id: str
     trace_id: str

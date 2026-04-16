@@ -10,8 +10,15 @@ from services.event_bus import EventBus
 class RunState:
     run_id: str
     trace_id: str
-    status: str = "created"  # created, agent1_conversation, pipeline_running, completed, failed, cancelled
+    # Status values: "created", "agent1_conversation", "pipeline_running",
+    # "awaiting_candidate_selection" (Phase 6 pause),
+    # "completed", "failed", "cancelled".
+    status: str = "created"
     cancel_requested: bool = False
+    # Phase 6: asyncio.Event-based cancellation signal, used alongside
+    # `cancel_requested` for clean `await` paths (cancel_requested remains
+    # for sync polling code that hasn't migrated to event-driven waits).
+    cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
 
     # Agent modes
     agent_modes: dict[str, str] = field(default_factory=lambda: {
@@ -49,6 +56,21 @@ class RunState:
     credits_remaining: Optional[int] = None
     credits_consumed: int = 0
     plan_gates_triggered: int = 0
+
+    # ── Phase 6: User Candidate Selection ──
+    # After Agent 2 emits its candidate pool, the pipeline pauses and
+    # awaits `selection_ready`. The route handler
+    # /runs/{id}/select-candidates validates the picks, writes them to
+    # `user_scope_picks` + `user_added_candidates`, and sets the event.
+    # `selection_required_emitted_at` is recorded as an ISO timestamp
+    # when the pause begins — used by ops tooling to measure pause
+    # duration and by `pipeline_summary.json:metadata` as a Phase 6
+    # fingerprint.
+    selection_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    user_scope_picks: Optional[dict[str, list[str]]] = None
+    user_added_candidates: list[dict] = field(default_factory=list)
+    selection_required_emitted_at: Optional[str] = None
+    user_selection_applied: bool = False
 
     # SSE
     event_bus: EventBus = field(default_factory=EventBus)
@@ -94,6 +116,10 @@ class RunManager:
         if not state:
             return False
         state.cancel_requested = True
+        # Phase 6: also signal the asyncio.Event so the pause in
+        # pipeline_runner wakes up immediately instead of sleeping
+        # until the selection_ready event fires.
+        state.cancel_event.set()
         return True
 
     def list_runs(self) -> list[str]:

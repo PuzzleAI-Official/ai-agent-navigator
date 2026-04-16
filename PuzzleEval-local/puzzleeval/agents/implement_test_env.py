@@ -614,13 +614,13 @@ ASK_RESEARCH_TOOL = {
     },
 }
 
-# Advisor tool — Opus 4.6 provides strategic guidance to Sonnet executor.
+# Advisor tool — Opus 4.7 provides strategic guidance to Sonnet executor.
 # Sonnet decides when to call it. Opus sees the full conversation and gives a plan.
 # This is a server-side tool — no local dispatch needed.
 ADVISOR_TOOL = {
     "type": "advisor_20260301",
     "name": "advisor",
-    "model": "claude-opus-4-6",
+    "model": "claude-opus-4-7",
     "caching": {"type": "ephemeral", "ttl": "5m"},
 }
 
@@ -735,7 +735,7 @@ def _calculate_call_cost(response: anthropic.types.Message, model: str) -> float
 
             # Determine rates based on iteration type
             if iter_type == "advisor_message":
-                iter_model = getattr(iteration, "model", "claude-opus-4-6")
+                iter_model = getattr(iteration, "model", "claude-opus-4-7")
                 in_price, out_price = MODEL_PRICING.get(
                     iter_model, (5.0 / 1_000_000, 25.0 / 1_000_000)
                 )
@@ -3446,6 +3446,26 @@ def run_implement_test_env_agent(
                 if not result["success"]:
                     error_msg = result.get("error") or ""
                     is_incompatible = "INCOMPATIBLE" in error_msg.upper()
+
+                    # Gap 3 fix: file_required tests with no file should NOT be
+                    # unconditionally skipped.  The harness was given the text
+                    # input_data as a fallback; if it returned INCOMPATIBLE that
+                    # is a real result (API genuinely needs a file), not a
+                    # pre-filter skip.  Record it as a normal failure so OCR /
+                    # audio scopes get non-zero test results.
+                    file_required_no_file = (
+                        getattr(tc, "file_required", False) and not tc.test_file_path
+                    )
+                    if is_incompatible and file_required_no_file:
+                        skip = None  # do NOT skip — count as real failure
+                        annotated_error = (
+                            f"{error_msg} "
+                            "[Tested with synthetic text input (no user file provided)]"
+                        )
+                    else:
+                        skip = error_msg if is_incompatible else None
+                        annotated_error = result.get("error")
+
                     test_case_results.append(TestCaseResult(
                         test_case_id=tc.id,
                         sub_task_ref=tc.sub_task_ref,
@@ -3456,8 +3476,8 @@ def run_implement_test_env_agent(
                         tokens_used=result.get("tokens_used"),
                         cost_usd=result.get("cost_usd"),
                         success=False,
-                        error=result.get("error"),
-                        skip_reason=error_msg if is_incompatible else None,
+                        error=annotated_error,
+                        skip_reason=skip,
                         criteria_scores=[],
                         weighted_score=0.0,
                         passed=False,
@@ -3472,10 +3492,18 @@ def run_implement_test_env_agent(
                 ]
                 eval_items.append((tc, result, all_criteria))
 
+                # Gap 3: annotate when a file_required test succeeded with
+                # synthetic text input (no user file).
+                success_input = dict(adapted)
+                if getattr(tc, "file_required", False) and not tc.test_file_path:
+                    success_input["_note"] = (
+                        "Tested with synthetic text input (no user file provided)"
+                    )
+
                 test_case_results.append(TestCaseResult(
                     test_case_id=tc.id,
                     sub_task_ref=tc.sub_task_ref,
-                    input_sent=adapted,
+                    input_sent=success_input,
                     output_received=str(result.get("output", "")),
                     raw_response=result.get("raw_response", {}),
                     latency_ms=result.get("latency_ms", 0.0),

@@ -350,8 +350,8 @@ The builder agent does its own research in Phase 1 (no separate research sub-age
 
 **The flow per candidate:**
 1. **PHASE 1: RESEARCH** (Sonnet 4.6) — Server-side web_search and web_fetch to find API docs. Write api_spec.txt with INPUT_COMPATIBILITY, ROUTING_TABLE, PYTHON_EXAMPLES, DOC_MAP, DOC_REFERENCES. Agent knows ALL test case input forms upfront.
-2. **PHASE 2: BUILD** (Opus 4.6) — Write harness.py as a thin API client for all compatible input forms. Incompatible forms return `success=False, error="INCOMPATIBLE"`. Smoke test verifies structure. `ask_research` available for debugging.
-3. **PHASE 3: VALIDATE** (Opus 4.6) — Live API validation required. Credentials are injected into the build sandbox. Run real API calls with test files (staged before build). Fix failures with full API context.
+2. **PHASE 2: BUILD** (Opus 4.7) — Write harness.py as a thin API client for all compatible input forms. Incompatible forms return `success=False, error="INCOMPATIBLE"`. Smoke test verifies structure. `ask_research` available for debugging.
+3. **PHASE 3: VALIDATE** (Opus 4.7) — Live API validation required. Credentials are injected into the build sandbox. Run real API calls with test files (staged before build). Fix failures with full API context.
 4. **HARNESS_COMPLETE** — Signal completion. Milestone message on smoke test pass.
 5. **POST-LOOP** (Python, parallel across candidates) — Run ALL test cases through harness.run(). Evaluate with LLM judge: raw API response (truncated to 15K chars) compared against ground truth and judgement criteria. Produce CandidateTestRun with aggregate metrics.
 

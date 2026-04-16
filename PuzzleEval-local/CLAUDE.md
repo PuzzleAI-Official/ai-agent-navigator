@@ -202,7 +202,7 @@ branch on this structure — Phase 4's dual search groups candidates by
 step role, Phase 6's selection UI renders the step chain, Phase 9's
 workflow harness wires `step_N.run() → step_N+1.run()`.
 
-**Model promotion.** `AGENT1_MODEL` is now **Opus 4.6** (was Sonnet 4.6).
+**Model promotion.** `AGENT1_MODEL` is now **Opus 4.7** (was Sonnet 4.6).
 Override with `PUZZLEEVAL_AGENT1_MODEL=claude-sonnet-4-6` to revert.
 Cost impact: ~$0.10 per evaluation (was ~$0.05) — roughly 1% of the
 pipeline total; negligible at scale. Opus's stronger planning reasoning
@@ -1036,7 +1036,7 @@ Diagnostic flag table (filled in as each phase ships):
 | 1 + 1.5 | `PUZZLEEVAL_ENABLE_FETCH_FALLBACK` | `1` | Skip detection; agents see raw web_fetch errors and useless pages with no recovery guidance |
 | 1 (sub) | `PUZZLEEVAL_FETCH_RATE_LIMIT_BACKOFF` | `5` (seconds) | Set to `0` to disable backoff sleep on 429 |
 | 2     | `PUZZLEEVAL_BILLING_ENFORCED` | `0` | When `0`: track usage but don't block. When `1`: 402 on insufficient credits or feature-not-in-plan |
-| 3     | `PUZZLEEVAL_AGENT1_MODEL` (soft) | `claude-opus-4-6` | Revert to `claude-sonnet-4-6` if Opus blueprint quality regresses. Schema itself cannot be disabled — downstream consumes `WorkflowBlueprint`. |
+| 3     | `PUZZLEEVAL_AGENT1_MODEL` (soft) | `claude-opus-4-7` | Revert to `claude-sonnet-4-6` if Opus blueprint quality regresses. Schema itself cannot be disabled — downstream consumes `WorkflowBlueprint`. |
 | 4     | `PUZZLEEVAL_RESEARCH_DUAL_SEARCH_ENABLED` | `1` | When `0`: Agent 2 reverts to single-pass search (max_uses=3, every candidate gets empty `covers_step_ids` → downstream flat flow) |
 | 5     | (none at 5a — null-safe scaffold; 5b reuses `PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED` since extraction lives inside Phase 6.5's 4B) | — | Disabling Phase 6.5 disables pricing extraction; schema stays null-safe |
 | 6     | `PUZZLEEVAL_USER_SELECTION_ENABLED` | `1` | When `0`: pipeline skips pause, auto-runs all Agent 2 candidates through Agent 4/5 (pre-Phase-6 behavior) |
@@ -1086,7 +1086,7 @@ User Input → [1. User Understanding] → [2. Research] → [4. Screening]
 
 - **Language:** Python 3.11+
 - **LLM:** Claude via Anthropic SDK (`client.messages.parse()` for structured outputs, `client.messages.create()` for server tools like web search)
-- **Default model:** `claude-sonnet-4-6` (Sonnet 4.6) for Agents 1-4. Agent 5 uses Sonnet 4.6 for Phase 1 research and Opus 4.6 for Phase 2+ build/debug. Opus is reserved for agents where nuanced judgment matters (Agent 5 build, Agent 7).
+- **Default model:** `claude-sonnet-4-6` (Sonnet 4.6) for Agents 1-4. Agent 5 uses Sonnet 4.6 for Phase 1 research and Opus 4.7 for Phase 2+ build/debug. Opus is reserved for agents where nuanced judgment matters (Agent 5 build, Agent 7).
 - **Schema validation:** Pydantic v2 (also serves as JSON Schema for structured outputs)
 - **Logging:** Structured JSON to stderr via Python stdlib logging. Ready for CloudWatch/Datadog with zero migration.
 - **Frontend:** React/TypeScript (built separately in Lovable). Communicates via JSON API contracts defined by Pydantic models.
@@ -1216,7 +1216,7 @@ Cache infrastructure is fully built (`CACHING_ENABLED` flag, block-level and top
 
 ### Model Choice: Sonnet 4.6 (default)
 
-Agent 1 uses `DEFAULT_MODEL` (`claude-sonnet-4-6`). Parsing/classification task — Sonnet's sweet spot. Override with `PUZZLEEVAL_MODEL=claude-opus-4-6` environment variable.
+Agent 1 uses `DEFAULT_MODEL` (`claude-sonnet-4-6`). Parsing/classification task — Sonnet's sweet spot. Override with `PUZZLEEVAL_MODEL=claude-opus-4-7` environment variable.
 
 ### Cost Per Evaluation (Agent 1 only, Sonnet 4.6)
 
@@ -1737,12 +1737,12 @@ When `--agent4` is set, the CLI runs Agent 1's conversation loop, then Agent 2 (
 
 | Model | Input | Output | 5m Cache Write | 1h Cache Write | Cache Read |
 |---|---|---|---|---|---|
-| Opus 4.6 | $5/MTok | $25/MTok | $6.25/MTok | $10/MTok | $0.50/MTok |
+| Opus 4.7 | $5/MTok | $25/MTok | $6.25/MTok | $10/MTok | $0.50/MTok |
 | Sonnet 4.6 | $3/MTok | $15/MTok | $3.75/MTok | $6/MTok | $0.30/MTok |
 | Sonnet 4.5 | $3/MTok | $15/MTok | $3.75/MTok | $6/MTok | $0.30/MTok |
 | Haiku 4.5 | $1/MTok | $5/MTok | $1.25/MTok | $2/MTok | $0.10/MTok |
 
-Minimum cacheable tokens: Opus 4.6 = 4,096; Sonnet 4.6 = 1,024; Sonnet 4.5 = 1,024; Haiku 4.5 = 4,096.
+Minimum cacheable tokens: Opus 4.7 = 4,096; Sonnet 4.6 = 1,024; Sonnet 4.5 = 1,024; Haiku 4.5 = 4,096.
 
 ## Agent 5 — Key Design Decisions (Updated 2026-04-11)
 
@@ -1798,7 +1798,7 @@ When Claude signals HARNESS_COMPLETE, `_run_verification_checks()` confirms harn
 ### Model Strategy: Sonnet for Research, Opus for Build
 
 - **Phase 1 (research):** Sonnet 4.6 — uses server-side web_search and web_fetch (NOT ask_research) to find API docs. Follows search→navigate→fetch→synthesize pattern. I/O-heavy, doesn't need Opus reasoning. Cost: ~$0.10-0.30/candidate.
-- **Phase 2+ (build/verify):** Opus 4.6 — planning, coding, debugging need strong reasoning. Transition detected when api_spec.txt is written.
+- **Phase 2+ (build/verify):** Opus 4.7 — planning, coding, debugging need strong reasoning. Transition detected when api_spec.txt is written.
 - **Opus Advisor:** Available in all phases. Sonnet/Opus can call `advisor()` for strategic guidance. Typically called once per candidate before writing code. Uses `advisor-tool-2026-03-01` beta.
 - **ask_research:** Sonnet 4.6 — targeted web search for Phase 2+ debugging ONLY, not for initial research.
 
@@ -1808,7 +1808,7 @@ When Claude signals HARNESS_COMPLETE, `_run_verification_checks()` confirms harn
 |------|------|---------|
 | `web_fetch` | Server (Anthropic API) | Read API docs (max_content_tokens: 15000) |
 | `web_search` | Server (Anthropic API) | Search for SDK docs, examples, tutorials |
-| `advisor` | Server (Anthropic API) | Consult Opus 4.6 for strategic guidance |
+| `advisor` | Server (Anthropic API) | Consult Opus 4.7 for strategic guidance |
 | `write_file` | Custom (local dispatch) | Write NEW files (harness.py, requirements.txt, smoke_test.py) |
 | `patch_file` | Custom (local dispatch) | String-replace editing on EXISTING files |
 | `run_code` | Custom (local dispatch) | Run shell commands (120s timeout) |
@@ -1826,7 +1826,7 @@ When Claude signals HARNESS_COMPLETE, `_run_verification_checks()` confirms harn
 
 ### Configuration Settings
 
-- `AGENT5_BUILDER_MODEL = Opus 4.6` — strong reasoning for coding/debugging
+- `AGENT5_BUILDER_MODEL = Opus 4.7` — strong reasoning for coding/debugging
 - `RESEARCH_MODEL = Sonnet 4.6` — for Phase 1 research (web_search/web_fetch) + ask_research in Phase 2+
 - `AGENT5_MAX_TURNS = 25` — typical successful build: 7-9 turns
 - `MAX_TURNS_AFTER_SMOKE = 15` — turns allowed for live API validation after smoke test
@@ -1957,7 +1957,7 @@ WEB_SEARCH_TOOL = {"type": "web_search_20250305", "name": "web_search", "max_use
 
 Increased from 3/2 to 5/4 after analyzing run failures. Complex APIs (docs behind auth, multi-page docs) need more fetches. Cost increase (~$0.10-0.15/candidate) is negligible vs cost of a failed build ($0).
 
-### Cost Per Build Run (Agent 5 only, Sonnet 4.6 + Opus 4.6 with adaptive thinking)
+### Cost Per Build Run (Agent 5 only, Sonnet 4.6 + Opus 4.7 with adaptive thinking)
 
 - Research + build per candidate (7-9 turns): ~$0.80-1.30
 - Targeted research calls (0-1 per candidate): ~$0.05-0.15

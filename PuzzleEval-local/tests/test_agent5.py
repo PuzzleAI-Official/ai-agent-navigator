@@ -433,7 +433,7 @@ os.environ["INTUIT_CLIENT_ID"]
 
         advisor_iter = MagicMock()
         advisor_iter.type = "advisor_message"
-        advisor_iter.model = "claude-opus-4-6"
+        advisor_iter.model = "claude-opus-4-7"
         advisor_iter.input_tokens = 3000
         advisor_iter.output_tokens = 500
         advisor_iter.cache_creation_input_tokens = 0

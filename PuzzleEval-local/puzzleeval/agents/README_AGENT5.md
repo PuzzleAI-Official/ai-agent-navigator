@@ -31,17 +31,17 @@ Steps 3-4 are owned by Agent 5 because:
 ```
 Phase 1 (Sonnet 4.6): Server-side web_search/web_fetch for API docs → write api_spec.txt
   ↓ [model switch when api_spec.txt written]
-Phase 2 (Opus 4.6): Build thin API client harness.py + smoke test (ask_research for debugging)
+Phase 2 (Opus 4.7): Build thin API client harness.py + smoke test (ask_research for debugging)
   ↓ [smoke passes → milestone message]
-Phase 3 (Opus 4.6): Live API validation required (credentials + test files staged in sandbox)
+Phase 3 (Opus 4.7): Live API validation required (credentials + test files staged in sandbox)
   ↓ [HARNESS_COMPLETE]
 Post-loop (Python, parallel across candidates): Run ALL test cases → LLM judge eval (raw response truncated to 15K) → aggregate metrics
 ```
 
 ### Model Strategy
 - **Sonnet 4.6** for Phase 1 research (server-side web_search/web_fetch, cheap, I/O-heavy)
-- **Opus 4.6** for Phase 2-3 build/validate (needs strong reasoning)
-- **Opus 4.6 Advisor** available in all phases via `advisor-tool-2026-03-01`
+- **Opus 4.7** for Phase 2-3 build/validate (needs strong reasoning)
+- **Opus 4.7 Advisor** available in all phases via `advisor-tool-2026-03-01`
 - **Sonnet 4.6** for `ask_research` (Phase 2+ debugging, targeted web search, doesn't need Opus)
 
 ### Key Design Principles (Lessons Learned)
@@ -132,7 +132,7 @@ Same input every time. Different results. One failed run does NOT mean the code 
 ```json
 "iterations": [
   {"type": "message", "input_tokens": 988, "output_tokens": 79},
-  {"type": "advisor_message", "model": "claude-opus-4-6", "input_tokens": 1915, "output_tokens": 93},
+  {"type": "advisor_message", "model": "claude-opus-4-7", "input_tokens": 1915, "output_tokens": 93},
   {"type": "message", "input_tokens": 1092, "output_tokens": 29}
 ]
 ```
@@ -757,7 +757,7 @@ and custom tools (executed locally by our code).
 |---|---|---|---|---|
 | web_fetch | Server | 20250910 | 5 | Read API docs, quickstart guides, SDK refs |
 | web_search | Server | 20250305 | 4 | Search for docs, examples, SDK installation |
-| advisor | Server | advisor-tool-2026-03-01 | unlimited | Consult Opus 4.6 for strategic guidance |
+| advisor | Server | advisor-tool-2026-03-01 | unlimited | Consult Opus 4.7 for strategic guidance |
 | write_file | Custom | n/a | unlimited | Write harness.py, requirements.txt, smoke_test.py |
 | patch_file | Custom | n/a | unlimited | String-replace editing on existing files (efficient bug fixing) |
 | run_code | Custom | n/a | unlimited | Run smoke tests, pip installs, import tests (venv-isolated, 120s timeout) |

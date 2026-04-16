@@ -15,7 +15,7 @@ type: reference
 
 | Model | ID | Context | Max Output | Input $/MTok | Output $/MTok |
 |-------|-----|---------|------------|------|-------|
-| Opus 4.6 | `claude-opus-4-6` | 1M | 128K | $5 | $25 |
+| Opus 4.7 | `claude-opus-4-7` | 1M | 128K | $5 | $25 |
 | Sonnet 4.6 | `claude-sonnet-4-6` | 1M | 64K | $3 | $15 |
 | Sonnet 4.5 | `claude-sonnet-4-5-20250929` | 200K | 64K | $3 | $15 |
 | Haiku 4.5 | `claude-haiku-4-5-20251001` | 200K | 64K | $1 | $5 |
@@ -132,7 +132,7 @@ Disable with: `"disable_parallel_tool_use": true` in `tool_choice`.
 - 1-hour: `{"type": "ephemeral", "ttl": "1h"}` — 2.0x write, 0.10x read
 
 ### Minimum Cacheable Tokens (SILENT FAILURE BELOW)
-- Opus 4.6 / Haiku 4.5: 4,096
+- Opus 4.7 / Haiku 4.5: 4,096
 - Sonnet 4.6: 2,048
 - Sonnet 4.5: 1,024
 
@@ -219,7 +219,7 @@ Use before API calls to prevent prompt-too-long errors.
 thinking={"type": "adaptive", "effort": "high"}  # low, medium, high
 ```
 
-- Use `"adaptive"` (not manual budget) on Opus 4.6 / Sonnet 4.6
+- Use `"adaptive"` (not manual budget) on Opus 4.7 / Sonnet 4.6
 - Only compatible with `tool_choice: "auto"`
 - Must pass thinking blocks back during tool use cycles
 - Thinking tokens billed as output tokens

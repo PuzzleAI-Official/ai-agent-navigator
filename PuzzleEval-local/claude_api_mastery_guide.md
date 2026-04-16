@@ -170,7 +170,7 @@ Content can be: string, content block array (text, image, document), or omitted 
 - Cache read: 0.10x base input (**10x cheaper**)
 
 ### Minimum Cacheable Tokens (SILENT FAILURE BELOW)
-- Opus 4.6: 4,096
+- Opus 4.7: 4,096
 - Sonnet 4.6: **2,048** (different from Sonnet 4.5!)
 - Sonnet 4.5: 1,024
 - Haiku 4.5: 4,096
@@ -205,13 +205,13 @@ Rate limits: 100-8,000 RPM depending on tier. Separate from Messages API.
 
 ```python
 response = client.messages.create(
-    model="claude-opus-4-6",
+    model="claude-opus-4-7",
     thinking={"type": "adaptive", "effort": "high"},
     ...
 )
 ```
 
-- Opus 4.6 / Sonnet 4.6: use `"adaptive"` with `"effort"` level
+- Opus 4.7 / Sonnet 4.6: use `"adaptive"` with `"effort"` level
 - Only compatible with `tool_choice: "auto"` (default)
 - Must pass thinking blocks back in subsequent tool-result messages
 - Thinking tokens billed as OUTPUT tokens (expensive)
@@ -318,7 +318,7 @@ MCP connector lets you point the API at a remote HTTPS server that exposes tools
 ## 10. CONTEXT ENGINEERING — KEY CONCEPTS
 
 ### Context Window Sizes (2026)
-- Claude Opus 4.6 / Sonnet 4.6 / Mythos: **1M tokens**
+- Claude Opus 4.7 / Sonnet 4.6 / Mythos: **1M tokens**
 - Claude Sonnet 4.5 / Sonnet 4 / all others: **200K tokens**
 
 ### Built-in Context Budget Tracking (FREE, automatic)

@@ -250,7 +250,7 @@ class WorkflowBlueprint(BaseModel):
 
 **Diagnostic flag:** soft revert only — `PUZZLEEVAL_AGENT1_MODEL=claude-sonnet-4-6` reverts Agent 1 to the pre-Phase-3 model if Opus blueprints regress. Schema itself cannot be disabled (downstream consumes it); `workflow=None` + no-ops downstream is the legacy fallback.
 
-**Model switch:** Agent 1 promoted to Opus 4.6 (`AGENT1_MODEL` in `config.py`). Opus's planning reasoning is what lets Agent 1 reliably emit consistent multi-step blueprints. Cost: ~$0.05 → ~$0.10 per Agent 1 evaluation; ~1% of total pipeline cost.
+**Model switch:** Agent 1 promoted to Opus 4.7 (`AGENT1_MODEL` in `config.py`). Opus's planning reasoning is what lets Agent 1 reliably emit consistent multi-step blueprints. Cost: ~$0.05 → ~$0.10 per Agent 1 evaluation; ~1% of total pipeline cost.
 
 **Tests:** 25 new unit tests total (10 schema + 15 validator, incl. DAG expansion). Baseline now **255 green** (236 PuzzleEval + 19 billing; was 246 before DAG expansion). `tsc` clean, Vite production build clean. Frontend originally verified live in preview with a mock 2-step linear blueprint; DAG rendering path exercised via unit tests + production build (live DAG preview scheduled alongside Phase 6 SelectionPanel work that consumes it).
 

@@ -664,7 +664,7 @@ class TestPhase4CoverageNormalization:
         c2 = self._make_candidate("Zapier", ["step_2", "step_3"])  # dup with additional scope
         out = _normalize_coverage([c1, c2], ["step_1", "step_2", "step_3"])
         assert len(out) == 1
-        assert out[0].covers_step_ids == frozenset({"step_1", "step_2", "step_3"})
+        assert out[0].covers_step_ids == sorted({"step_1", "step_2", "step_3"})
         # Confidence populated for every scope
         for sid in ("step_1", "step_2", "step_3"):
             assert out[0].coverage_confidence[sid] == "claimed"
@@ -680,7 +680,7 @@ class TestPhase4CoverageNormalization:
         from puzzleeval.agents.research import _normalize_coverage
         c = self._make_candidate("X", ["step_1", "step_99"])  # step_99 not in blueprint
         out = _normalize_coverage([c], ["step_1", "step_2"])
-        assert out[0].covers_step_ids == frozenset({"step_1"})
+        assert out[0].covers_step_ids == sorted({"step_1"})
         assert "step_99" not in out[0].coverage_confidence
 
     def test_single_scope_autofill(self):
@@ -688,14 +688,14 @@ class TestPhase4CoverageNormalization:
         # Candidate emitted with empty covers — normalizer should fill.
         c = self._make_candidate("X", [], conf={})
         out = _normalize_coverage([c], ["step_1"])
-        assert out[0].covers_step_ids == frozenset({"step_1"})
+        assert out[0].covers_step_ids == sorted({"step_1"})
         assert out[0].coverage_confidence == {"step_1": "claimed"}
 
     def test_legacy_flow_leaves_coverage_empty(self):
         from puzzleeval.agents.research import _normalize_coverage
         c = self._make_candidate("X", [], conf={})
         out = _normalize_coverage([c], [])  # no blueprint
-        assert out[0].covers_step_ids == frozenset()
+        assert out[0].covers_step_ids == []
         assert out[0].coverage_confidence == {}
 
     def test_verified_confidence_clamped_to_claimed(self):
@@ -722,7 +722,10 @@ class TestPhase4CoverageNormalization:
 class TestPhase4SchemaDefaults:
     """Candidate with new Phase 4 fields — schema-level checks."""
 
-    def test_default_covers_step_ids_is_empty_frozenset(self):
+    def test_default_covers_step_ids_is_empty_list(self):
+        # Schema migrated frozenset[str] → list[str] so LLM structured output
+        # can natively emit it (JSON has no frozenset type). De-dup is
+        # enforced caller-side; default is an empty list.
         c = Candidate(
             name="X", provider="X", description="d",
             api_available=True, api_docs_url=None,
@@ -730,8 +733,8 @@ class TestPhase4SchemaDefaults:
             claimed_capabilities=["c"], relevance_score=0.5,
             adoption_difficulty="easy", relevant_subtasks=[], source="t",
         )
-        assert isinstance(c.covers_step_ids, frozenset)
-        assert len(c.covers_step_ids) == 0
+        assert isinstance(c.covers_step_ids, list)
+        assert c.covers_step_ids == []
         assert c.coverage_confidence == {}
 
     def test_frozenset_round_trips_as_list(self):
@@ -741,10 +744,10 @@ class TestPhase4SchemaDefaults:
             pricing_model="usage-based", pricing_details=None,
             claimed_capabilities=["c"], relevance_score=0.5,
             adoption_difficulty="easy", relevant_subtasks=[], source="t",
-            covers_step_ids=frozenset({"step_1", "step_2"}),
+            covers_step_ids=sorted({"step_1", "step_2"}),
             coverage_confidence={"step_1": "claimed", "step_2": "claimed"},
         )
         j = c.model_dump_json()
         back = Candidate.model_validate_json(j)
-        assert back.covers_step_ids == frozenset({"step_1", "step_2"})
+        assert back.covers_step_ids == sorted({"step_1", "step_2"})
         assert back.coverage_confidence == {"step_1": "claimed", "step_2": "claimed"}

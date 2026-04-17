@@ -180,18 +180,33 @@ class TestFileTestsAgent:
         assert len(result.test_cases) == 1
         assert result.test_cases[0].test_file_path == "/uploads/invoice_001.pdf"
 
-    def test_no_files_raises_error(self):
-        from puzzleeval.exceptions import AgentOutputError
+    @patch("puzzleeval.agents.synthetic_tests.run_synthetic_tests_agent")
+    def test_no_files_falls_back_to_text_only_agent3(self, mock_text_agent):
+        """Generalized: Agent 3F no longer raises when files are absent.
+        It falls back to Agent 3's text-only synthesis so users without
+        sample files still get test cases. Downstream test execution
+        surfaces 'INCOMPATIBLE: file required' as a real failure when
+        the API actually needs a file (Gap 3 fix in implement_test_env)."""
         from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
+        from puzzleeval.schemas import Agent3Result
+
+        sentinel = Agent3Result(
+            test_cases=[],
+            coverage_summary={},
+            generation_notes="text-only fallback",
+            generation_duration_ms=10,
+            cost_usd=0.0,
+        )
+        mock_text_agent.return_value = sentinel
 
         input_data = Agent3Input(
             user_understanding=_make_user_understanding(),
             trace_id="test-3f-002",
             test_file_paths=None,
         )
-
-        with pytest.raises(AgentOutputError, match="requires test_file_paths"):
-            run_file_tests_agent(input_data)
+        result = run_file_tests_agent(input_data)
+        mock_text_agent.assert_called_once_with(input_data)
+        assert result is sentinel
 
     @patch("puzzleeval.agents.synthetic_tests_file.parse_file")
     @patch("puzzleeval.agents.synthetic_tests_file.anthropic.Anthropic")

@@ -1,10 +1,12 @@
 import asyncio
 import json
+import logging
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger("puzzleeval.pipeline_runner")
 
 from fastapi import HTTPException
 
@@ -143,7 +145,16 @@ async def real_agent1_turn(state: RunState, user_message: str) -> dict:
 
     # Append assistant response to conversation history (critical for multi-turn)
     state.conversation_history.append({"role": "assistant", "content": json.dumps(result_dict)})
-    state.total_cost_usd += result_dict.get("cost_usd", 0)
+    # record_cost drives both the plain total AND the budget circuit-breaker.
+    # Raises BudgetExceededError if the run blew through the cap — we let it
+    # propagate; chat.py's outer handler catches and surfaces the clear error.
+    state.record_cost(result_dict.get("cost_usd", 0) or 0, reason="agent_1_turn")
+    state.event_bus.emit("cost_update", {
+        "trace_id": state.trace_id,
+        "total_cost_usd": state.total_cost_usd,
+        "source": "agent_1_turn",
+        "budget": state.budget.snapshot(),
+    })
     return response
 
 
@@ -174,15 +185,61 @@ async def run_pipeline(state: RunState):
     run_dir = runs_dir / state.trace_id
 
     def _save_json(filename: str, data):
-        """Save any data (dict or Pydantic model) to the run directory."""
+        """Save any data (dict or Pydantic model) to the run directory.
+
+        Uses Pydantic's mode='json' for nested dumps so non-JSON-native types
+        (frozenset, set, datetime, UUID) round-trip as proper JSON values
+        (frozenset → list, etc.). Without this, ``json.dumps(default=str)``
+        would call ``str(frozenset(...))`` producing the literal Python repr
+        ``"frozenset({'x'})"`` — silently breaking any downstream consumer
+        that re-loads the file and tries to validate it through Pydantic
+        again.
+        """
         try:
             path = run_dir / filename
             if hasattr(data, "model_dump_json"):
                 path.write_text(data.model_dump_json(indent=2), encoding="utf-8")
-            else:
-                path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+                return
+            # If data is a dict that came from `.model_dump()`, it may carry
+            # native Python objects (frozenset, set) that json doesn't know
+            # how to serialize. Walk and coerce them.
+            path.write_text(
+                json.dumps(_jsonify(data), indent=2, default=str),
+                encoding="utf-8",
+            )
         except Exception:
             pass  # Non-critical — don't break pipeline for logging
+
+    def _jsonify(node):
+        """Coerce non-JSON-native Python types to JSON-friendly equivalents."""
+        if isinstance(node, (frozenset, set)):
+            return sorted(node) if all(isinstance(x, str) for x in node) else list(node)
+        if isinstance(node, dict):
+            return {k: _jsonify(v) for k, v in node.items()}
+        if isinstance(node, list):
+            return [_jsonify(v) for v in node]
+        if isinstance(node, tuple):
+            return [_jsonify(v) for v in node]
+        return node
+
+    def _record_agent_cost_and_emit(agent_name: str, cost_usd: float) -> None:
+        """Record agent cost through the budget circuit-breaker AND emit a
+        live ``cost_update`` SSE so the UI meter updates between agent
+        boundaries. Previously cost was only surfaced at agent_completed
+        time and the meter appeared frozen during multi-minute agents.
+
+        Raises ``BudgetExceededError`` when the cap is crossed — caller
+        catches at the pipeline boundary and surfaces a clear failure.
+        """
+        if cost_usd and cost_usd > 0:
+            state.record_cost(float(cost_usd), reason=agent_name)
+        emit("cost_update", {
+            "trace_id": state.trace_id,
+            "source": agent_name,
+            "delta_usd": float(cost_usd or 0),
+            "total_cost_usd": state.total_cost_usd,
+            "budget": state.budget.snapshot(),
+        })
 
     # Save conversation history
     _save_json("agent_1_conversation.json", state.conversation_history)
@@ -193,11 +250,10 @@ async def run_pipeline(state: RunState):
 
         user_understanding = _get_user_understanding(state)
 
-        # ── Phase 3: surface the WorkflowBlueprint so the frontend can
-        # render the step diagram before Agents 2-5 start producing
-        # candidates. Emitted unconditionally — payload is `None` for
-        # pre-Phase-3 Agent 1 outputs (mock data saved before Phase 3)
-        # so the frontend knows to skip the diagram.
+        # Surface the WorkflowBlueprint so the frontend can render the step
+        # diagram before Agents 2-5 start producing candidates. Emitted
+        # unconditionally — payload is `None` when the mock Agent 1 fixture
+        # has no blueprint, so the frontend knows to skip the diagram.
         workflow_payload = None
         test_plan_payload = None
         try:
@@ -288,6 +344,23 @@ async def run_pipeline(state: RunState):
                     return sorted({str(x) for x in raw})
                 if isinstance(raw, (set, frozenset)):
                     return sorted({str(x) for x in raw})
+                # Defense-in-depth: when an upstream path stringifies a
+                # frozenset / set with json.dumps(default=str), we get
+                # "frozenset({'step_1'})" or "set({'step_1'})" or "{'step_1'}".
+                # Recover the items so consumers downstream don't break.
+                if isinstance(raw, str):
+                    s = raw.strip()
+                    for prefix, suffix in (("frozenset(", ")"), ("set(", ")")):
+                        if s.startswith(prefix) and s.endswith(suffix):
+                            inner = s[len(prefix):-len(suffix)].strip()
+                            if inner.startswith("{") and inner.endswith("}"):
+                                inner = inner[1:-1]
+                            return sorted({
+                                p.strip().strip("'").strip('"')
+                                for p in inner.split(",") if p.strip()
+                            })
+                    if s in ("frozenset()", "set()"):
+                        return []
                 return []
 
             emit("candidates_found", {"candidates": [
@@ -305,7 +378,51 @@ async def run_pipeline(state: RunState):
             ]})
             emit("agent_activity", {"agent": "agent_2", "message": f"Research complete — {len(candidates)} candidates selected", "status": "success"})
             emit("agent_completed", {"agent": "agent_2", "cost_usd": state.agent2_result.get("cost_usd", 0)})
+            _record_agent_cost_and_emit("agent_2", state.agent2_result.get("cost_usd", 0))
             _save_json("agent_2_output.json", state.agent2_result)
+
+            # ── Coverage gap detection ──
+            # Tell the user immediately when (a) Agent 2 found ZERO candidates
+            # at all, or (b) every candidate is missing a workflow scope. The
+            # previous behavior silently let the pipeline run to "completed"
+            # with no actual results, which the user reads as "the system
+            # broke" rather than "your niche capability has no public APIs."
+            try:
+                user_understanding = _get_user_understanding(state)
+                workflow = getattr(user_understanding, "workflow", None)
+                blueprint_steps = (
+                    [s.id for s in workflow.steps]
+                    if workflow and getattr(workflow, "steps", None)
+                    else []
+                )
+                covered_scopes: set[str] = set()
+                for c in candidates:
+                    for sid in (c.get("covers_step_ids") or []):
+                        covered_scopes.add(sid)
+                missing_scopes = [s for s in blueprint_steps if s not in covered_scopes]
+                if not candidates or missing_scopes:
+                    emit("coverage_gap", {
+                        "trace_id": state.trace_id,
+                        "candidate_count": len(candidates),
+                        "blueprint_step_ids": blueprint_steps,
+                        "missing_scopes": missing_scopes,
+                        "covered_scopes": sorted(covered_scopes),
+                        "user_message": (
+                            "No candidates found for this request — try broadening "
+                            "your description (different keywords, larger industry "
+                            "scope) or add specific providers via the SelectionPanel."
+                            if not candidates
+                            else (
+                                f"Found {len(candidates)} candidate(s) but "
+                                f"{len(missing_scopes)} scope(s) have no coverage: "
+                                f"{', '.join(missing_scopes)}. The pipeline will "
+                                f"only test the covered scopes."
+                            )
+                        ),
+                    })
+            except Exception as exc:  # noqa: BLE001
+                # Don't kill the pipeline if blueprint introspection fails.
+                logger.exception("coverage_gap emit failed: %s", exc)
 
             if state.cancel_requested:
                 return
@@ -462,12 +579,11 @@ async def run_pipeline(state: RunState):
                     "status": "info",
                 })
 
-            # --- Phase 2 billing gate: Agent 4 needs the "testing" feature ──
-            # In default mode (PUZZLEEVAL_BILLING_ENFORCED=0) this is a no-op
-            # that just bumps state.plan_gates_triggered for observability.
-            # In enforced mode it raises HTTPException(402) which we catch
-            # below and translate into an SSE failure event. The legacy
-            # behavior (Agent 4 always runs) is preserved when not enforced.
+            # Billing gate: Agent 4 requires the "testing" feature. In default
+            # mode (PUZZLEEVAL_BILLING_ENFORCED=0) this is a no-op that just
+            # bumps state.plan_gates_triggered for observability. In enforced
+            # mode it raises HTTPException(402) which we catch below and
+            # translate into an SSE failure event.
             try:
                 require_agent_access(state, "agent_4")
             except HTTPException as e:
@@ -532,6 +648,7 @@ async def run_pipeline(state: RunState):
                 "rejected": [c.get("name", "") for c in rejected],
             })
             emit("agent_completed", {"agent": "agent_4", "cost_usd": state.agent4_result.get("cost_usd", 0)})
+            _record_agent_cost_and_emit("agent_4", state.agent4_result.get("cost_usd", 0))
             _save_json("agent_4_output.json", state.agent4_result)
 
             # ── Phase 6.5: emit per-candidate deep-verify results ──
@@ -596,6 +713,7 @@ async def run_pipeline(state: RunState):
             emit("test_cases_ready", {"count": len(test_cases)})
             emit("agent_activity", {"agent": "agent_3", "message": f"Test generation complete — {len(test_cases)} cases", "status": "success"})
             emit("agent_completed", {"agent": "agent_3", "cost_usd": state.agent3_result.get("cost_usd", 0)})
+            _record_agent_cost_and_emit("agent_3", state.agent3_result.get("cost_usd", 0))
             _save_json("agent_3_output.json", state.agent3_result)
 
         # Run both branches in parallel — Agent 4 starts as soon as Agent 2 finishes
@@ -724,29 +842,73 @@ async def run_pipeline(state: RunState):
 
             state.agent5_result = await _run_real_agent5(state, user_understanding, _agent5_progress)
 
-        emit("agent_completed", {"agent": "agent_5", "cost_usd": state.agent5_result.get("total_build_cost_usd", 0) + state.agent5_result.get("total_test_cost_usd", 0)})
+        _agent5_cost = state.agent5_result.get("total_build_cost_usd", 0) + state.agent5_result.get("total_test_cost_usd", 0)
+        emit("agent_completed", {"agent": "agent_5", "cost_usd": _agent5_cost})
+        _record_agent_cost_and_emit("agent_5", _agent5_cost)
         _save_json("agent_5_output.json", state.agent5_result)
 
         # ------------------------------------------------------------------
-        # Report generation step
+        # Report generation step — assemble structured EvaluationReport
         # ------------------------------------------------------------------
         emit("report_generating", {})
         emit("agent_activity", {"agent": "report", "message": "Generating evaluation report...", "status": "progress"})
-        await asyncio.sleep(5.0)
-        emit("agent_activity", {"agent": "report", "message": "Report ready", "status": "success"})
+        try:
+            from puzzleeval.report import assemble_report, report_to_dict
+            # Compute cost first so the report carries the final number.
+            total_cost = sum(
+                r.get("cost_usd", 0) if r else 0
+                for r in [state.agent2_result, state.agent3_result, state.agent4_result]
+            ) + (state.agent5_result.get("total_build_cost_usd", 0) if state.agent5_result else 0) \
+              + (state.agent5_result.get("total_test_cost_usd", 0) if state.agent5_result else 0)
+
+            report = assemble_report(
+                run_id=state.run_id,
+                trace_id=state.trace_id,
+                agent1_result=state.agent1_result,
+                agent2_result=state.agent2_result,
+                agent4_result=state.agent4_result,
+                agent5_result=state.agent5_result,
+                total_cost_usd=state.total_cost_usd + total_cost,
+            )
+            report_dict = report_to_dict(report)
+            _save_json("evaluation_report.json", report_dict)
+            emit("evaluation_report", report_dict)
+            emit("agent_activity", {
+                "agent": "report",
+                "message": (
+                    f"Report ready — {report.candidate_count} candidate(s) ranked, "
+                    f"winner: {report.overall_winner or 'none'}"
+                ),
+                "status": "success",
+            })
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("report assembly failed: %s", exc)
+            emit("agent_activity", {
+                "agent": "report",
+                "message": f"Report assembly failed: {exc}",
+                "status": "error",
+            })
+            total_cost = sum(
+                r.get("cost_usd", 0) if r else 0
+                for r in [state.agent2_result, state.agent3_result, state.agent4_result]
+            ) + (state.agent5_result.get("total_build_cost_usd", 0) if state.agent5_result else 0) \
+              + (state.agent5_result.get("total_test_cost_usd", 0) if state.agent5_result else 0)
 
         # ------------------------------------------------------------------
-        # Pipeline complete
+        # Pipeline complete. Per-agent costs were already recorded through
+        # ``_record_agent_cost_and_emit`` as each agent finished, so
+        # ``state.total_cost_usd`` and ``state.budget.spent_usd`` are already
+        # the real total — NO second aggregate record here (that would
+        # double-count). The ``total_cost`` local is kept only for back-compat
+        # with callers that dump it into pipeline_summary.json metadata.
         # ------------------------------------------------------------------
-        total_cost = sum(
-            r.get("cost_usd", 0) if r else 0
-            for r in [state.agent2_result, state.agent3_result, state.agent4_result]
-        ) + state.agent5_result.get("total_build_cost_usd", 0) + state.agent5_result.get("total_test_cost_usd", 0)
-        state.total_cost_usd += total_cost
-
         emit("pipeline_completed", {
             "total_cost_usd": state.total_cost_usd,
-            "summary": state.agent5_result.get("test_execution_summary", "Pipeline complete."),
+            "budget": state.budget.snapshot(),
+            "summary": (
+                state.agent5_result.get("test_execution_summary", "Pipeline complete.")
+                if state.agent5_result else "Pipeline complete."
+            ),
         })
         state.status = "completed"
 
@@ -759,7 +921,27 @@ async def run_pipeline(state: RunState):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        emit("pipeline_failed", {"error": str(e)})
+        # Budget exhaustion is a first-class failure category — surface it
+        # with a clear reason code so the frontend can render a different
+        # banner than generic "pipeline_failed" (e.g. "Cost cap reached —
+        # raise PUZZLEEVAL_MAX_RUN_COST_USD and retry").
+        from puzzleeval.budget import BudgetExceededError
+        if isinstance(e, BudgetExceededError):
+            emit("pipeline_failed", {
+                "error": str(e),
+                "reason": "budget_exceeded",
+                "spent_usd": e.spent,
+                "cap_usd": e.cap,
+                "last_charge_reason": e.last_reason,
+                "recovery": (
+                    "Raise PUZZLEEVAL_MAX_RUN_COST_USD in the backend env "
+                    "(currently "
+                    f"${e.cap:.2f}) and retry. The run stopped cleanly — "
+                    "partial results are preserved in the run directory."
+                ),
+            })
+        else:
+            emit("pipeline_failed", {"error": str(e)})
         state.status = "failed"
 
     finally:
@@ -902,12 +1084,9 @@ async def _run_real_agent2(state: RunState, user_understanding):
 
     result = await asyncio.to_thread(run_research_agent, agent2_input)
 
-    # Phase 6: the legacy `inject_registry_candidates` testing shim is
-    # retired here. Users now add specific providers via the SelectionPanel
-    # (flowing through inject_user_candidates) or via the CLI interactive
-    # prompt. Automated runs that need specific providers should POST to
-    # /runs/{id}/select-candidates with the desired `add` list.
-
+    # Users add specific providers via the SelectionPanel (flowing through
+    # inject_user_candidates) or via the CLI interactive prompt. Automated
+    # runs that need specific providers POST to /runs/{id}/select-candidates.
     result_dict = result.model_dump()
     return result_dict, result
 
@@ -922,7 +1101,6 @@ async def _run_real_agent3(state: RunState, user_understanding):
     """
     from puzzleeval.schemas import (
         Agent3Input, Agent3Result, UserUnderstandingOutput,
-        SubTask, Constraints,
     )
     from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
     from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
@@ -975,6 +1153,50 @@ async def _run_real_agent3(state: RunState, user_understanding):
             workflow=getattr(user_understanding, "workflow", None),
             test_plan=test_plan,
         )
+
+    # ── Test data sufficiency check ──
+    # Per-scope verdict (READY / AUGMENT / SYNTHESIZE / REQUEST_MORE / DEGRADE)
+    # surfaced as a single SSE event so the frontend can render advisories +
+    # request_more prompts before Agent 3F or Agent 3 fires. Pure observability;
+    # never blocks the run.
+    try:
+        from puzzleeval.test_data_sufficiency import (
+            assess_sufficiency, summarize_verdicts,
+        )
+        from puzzleeval.tool_plugins import list_plugins as _list_plugins
+        avail_plugins = {p.name for p in _list_plugins() if p.is_available()[0]}
+        verdicts: dict[str, Any] = {}
+        for sub in file_subtasks:
+            scope_id = getattr(sub, "id", None) or sub.description[:30]
+            verdicts[scope_id] = assess_sufficiency(
+                scope_id=scope_id,
+                input_type="document_content",
+                output_type=getattr(sub, "output_format", "structured_json"),
+                requires_test_files=True,
+                file_paths=list(test_file_paths),
+                available_plugin_names=avail_plugins,
+            )
+        if verdicts:
+            summary = summarize_verdicts(verdicts)
+            state.event_bus.emit("test_data_sufficiency", {
+                "trace_id": state.trace_id,
+                "summary": summary,
+                "verdicts": [
+                    {
+                        "scope_id": v.scope_id,
+                        "action": v.action,
+                        "reason": v.reason,
+                        "advisories": v.advisories,
+                        "request_message": v.request_message,
+                        "degraded_confidence": v.degraded_confidence,
+                        "plugin_for_augment": v.plugin_for_augment,
+                        "file_count": v.inventory.total_count,
+                    }
+                    for v in verdicts.values()
+                ],
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("test data sufficiency check failed: %s", exc)
 
     file_result = None
     text_result = None

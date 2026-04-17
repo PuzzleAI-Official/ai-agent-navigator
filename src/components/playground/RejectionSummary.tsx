@@ -1,11 +1,11 @@
 // ============================================================================
-// RejectionSummary — Phase 6.5 forward-compat, null-safe scaffold
+// RejectionSummary — per-scope rejection counts from deep-verify
 // ============================================================================
-// Shows per-scope rejection counts + expandable detail after Phase 6.5's
-// deep-verify runs. Until Phase 6.5 ships, `rejections` is always an
-// empty array and this component renders nothing (collapsed null state).
+// Shows per-scope rejection counts + expandable detail after the Phase 6.5
+// deep-verify pass. Null-safe: renders nothing when `rejections` is empty
+// (e.g. every selected candidate passed deep-verify).
 //
-// When data arrives (via `candidate_rejected` SSE events from Phase 6.5):
+// Data arrives via `candidate_rejected` SSE events:
 //   - Collapsed header: "2 rejections across 3 scopes"
 //   - Expanded: per-scope grouped list with reason category + one-line
 //     explanation so the user sees exactly why a pick failed deep-verify

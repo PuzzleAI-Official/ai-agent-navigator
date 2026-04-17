@@ -863,15 +863,195 @@ npx vite --port 8081
 ### Key endpoints
 - `GET /api/health` — backend status
 - `POST /api/runs` — create run
-- `POST /api/runs/{id}/chat` — Agent 1 turn
-- `POST /api/runs/{id}/files` — upload files
-- `GET /api/runs/{id}/events` — SSE stream
+- `POST /api/runs/{id}/chat` — Agent 1 turn (returns HTTP 402 with `reason="budget_exceeded"` when run cap is crossed)
+- `POST /api/runs/{id}/files` — upload files (capped at `PUZZLEEVAL_MAX_UPLOAD_BYTES`, default 100 MiB; HTTP 413 on overflow)
+- `GET /api/runs/{id}/events` — SSE stream (supports `last_event_id` for reconnect)
 - `DELETE /api/runs/{id}` — cancel run
 - `GET /api/runs/{id}` — get run state (for reconnection)
+- `POST /api/runs/{id}/select-candidates` — submit scope_picks + user_added providers (Phase 6 gate)
+- `GET /api/runs/{id}/report` — **NEW** — `EvaluationReport` dict (see §17). Reads persisted `evaluation_report.json` first, falls back to on-demand assembly.
 
 ### Key files to know
-- `services/pipeline_runner.py` — everything important is here
-- `services/run_manager.py` — RunState dataclass
+- `services/pipeline_runner.py` — pipeline orchestration + SSE events + new `_record_agent_cost_and_emit()` helper + `coverage_gap` emit + report assembly
+- `services/run_manager.py` — `RunState` + new `budget: RunBudget` field + `record_cost()` helper
 - `services/event_bus.py` — thread-safe SSE queue
-- `PuzzleEval-local/puzzleeval/agents/implement_test_env.py` — Agent 5 (3500 lines)
+- `main.py` — **NEW** `lifespan` handler shuts down plugin HTTP/SMTP servers cleanly on uvicorn restart
+- `routes/runs.py` — includes new `GET /runs/{id}/report` endpoint
+- `routes/files.py` — `_read_with_cap()` stream-reader with size guard
+- `routes/chat.py` — catches `BudgetExceededError` → HTTP 402
+- `PuzzleEval-local/puzzleeval/agents/implement_test_env.py` — Agent 5 (4,515 lines)
 - `PuzzleEval-local/puzzleeval/schemas.py` — Pydantic models for all agents
+- `PuzzleEval-local/puzzleeval/anthropic_client.py` — **NEW** central client factory (timeout + retries + model fallback ladder)
+- `PuzzleEval-local/puzzleeval/budget.py` — **NEW** `RunBudget` + `BudgetExceededError`
+- `PuzzleEval-local/puzzleeval/structured_output.py` — **NEW** `parse_with_fallback()` for grammar-budget recovery
+- `PuzzleEval-local/puzzleeval/test_data_sufficiency.py` — **NEW** per-scope data-readiness verdict analyzer
+- `PuzzleEval-local/puzzleeval/report.py` — **NEW** final `EvaluationReport` assembler
+
+---
+
+## Section 17. Resilience + cost wiring (current session additions)
+
+All three pieces are live chokepoints every agent flows through — not observability gloss.
+
+### Central Anthropic client factory (`puzzleeval/anthropic_client.py`)
+
+Every agent used to construct its own `anthropic.Anthropic(api_key=...)` with bare defaults (10-min timeout, no retries). A flaky TCP socket hung the whole pipeline; a single transient 429/5xx killed runs. Now every agent calls:
+
+```python
+from puzzleeval.anthropic_client import build_client
+client = build_client(api_key=ANTHROPIC_API_KEY)          # 120 s timeout + max_retries=3
+# Agent 5 extends timeout for deep thinking:
+client = build_client(api_key=ANTHROPIC_API_KEY, timeout=240)
+```
+
+`call_with_model_fallback(fn, primary_model, ...)` wraps a call in an Opus→Sonnet→Haiku ladder on persistent 429. Currently wired into Agent 1's `parse_with_fallback` path; other agents rely on SDK-level retries only (known gap).
+
+### Cost budget circuit-breaker (`puzzleeval/budget.py` + `RunState.record_cost()`)
+
+Every cost-accumulation site calls `state.record_cost(amount_usd, reason)` — drives BOTH `state.total_cost_usd` AND the budget's internal accumulator. When the run crosses `PUZZLEEVAL_MAX_RUN_COST_USD` (default $25), `BudgetExceededError` is raised.
+
+**Outward surfacing:**
+- `routes/chat.py` catches it during Agent 1 turns → HTTP 402 with `{reason, spent_usd, cap_usd, message}`.
+- `services/pipeline_runner.py` catches it in the outer handler → `pipeline_failed` SSE with `{reason: "budget_exceeded", spent_usd, cap_usd, last_charge_reason, recovery}`.
+
+**Where costs are recorded:**
+- Agent 1 chat turns — `real_agent1_turn()` after result parse
+- Agents 2/3/4 completion — `_record_agent_cost_and_emit("agent_N", cost)`
+- Agent 5 completion — aggregates `total_build_cost_usd + total_test_cost_usd`
+
+Every `_record_agent_cost_and_emit()` call also emits a `cost_update` SSE so the frontend meter updates between agent boundaries (previously it was frozen during multi-minute agents).
+
+### Structured-output grammar fallback (`puzzleeval/structured_output.py`)
+
+Wrapped around ALL 6 structured-output call sites (Agents 1, 2, 3, 3F, 4, and Agent 5's LLM evaluator).
+
+Anthropic's `client.messages.parse(output_format=PydanticModel)` compiles the schema into a token-level grammar — fast and guaranteed valid, but size-capped. Several schemas (`Agent1Result`, `Agent2Result`, `Agent3Result`) sit near the cap. A single field addition can trip 400 errors:
+- `"The compiled grammar is too large, which would cause performance issues."`
+- `"Grammar compilation timed out."`
+
+`parse_with_fallback(...)` catches those 400s and falls through to `client.messages.create()` with a non-strict tool whose `input_schema` is the same JSON Schema. Post-processes model output: (a) unwraps `{"input": {...}}` over-nesting, (b) coerces Python-repr strings (`"frozenset({'x'})"`) back to arrays before Pydantic validation. Returns a shim object with the same attributes the strict path would have — callers don't branch.
+
+The fallback strips `thinking` + `output_config` (Anthropic forbids those with `tool_choice` forcing a specific tool). Graceful degradation — strict path tried first so normal runs keep adaptive thinking.
+
+### Plugin lifecycle (`puzzleeval-api/main.py:lifespan`)
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: ensure plugins register (auto-import)
+    from puzzleeval.tool_plugins import list_plugins
+    logger.info("startup: %d tool plugins registered", len(list_plugins()))
+    yield
+    # Shutdown: close every plugin's background server
+    for plugin in list_plugins():
+        shutdown_fn = getattr(plugin, "shutdown", None)
+        if callable(shutdown_fn):
+            shutdown_fn()
+```
+
+The 3 new local plugins (webhook_receiver, outbound_delivery, voice_realtime) spin up HTTP/SMTP servers on 127.0.0.1 lazily. Without this handler, `uvicorn --reload` leaks threads + sockets; the second start falls to ephemeral ports and silently breaks harnesses with hardcoded port references. All `_ThreadedHTTPServer` subclasses set `allow_reuse_address = True` for restart resilience.
+
+### Evaluation report assembler (`puzzleeval/report.py`)
+
+At `pipeline_completed` time, the pipeline runner assembles an `EvaluationReport` from Agents 1/2/4/5 outputs + total cost:
+
+```json
+{
+  "run_id": "...", "trace_id": "...",
+  "user_summary": "...", "domain": "construction",
+  "monthly_volume": 100, "total_cost_usd": 4.53,
+  "candidate_count": 3, "test_count": 24,
+  "coverage": {
+    "blueprint_step_ids": ["step_1", "step_2"],
+    "covered_step_ids": ["step_1", "step_2"],
+    "missing_step_ids": [], "coverage_percent": 1.0
+  },
+  "winners_by_scope": {"step_1": "Mindee", "step_2": "QuickBooks"},
+  "overall_winner": "Mindee",
+  "candidate_reports": [
+    {
+      "name": "Mindee", "provider": "Mindee", "rank": 1,
+      "overall_score": 0.92, "pass_rate": 0.875,
+      "passed_count": 7, "total_count": 8,
+      "avg_latency_ms": 1240, "cost_usd_per_call": 0.012,
+      "monthly_cost_projection_usd": 1.20,
+      "auth_method": "api_key", "requirements": ["requests"],
+      "auth_env_vars": ["MINDEE_API_KEY"], "sandbox_used": false,
+      "failure_evidence": [{"test_case_id": "t3", "scenario": "damaged invoice", "passed": false, "score": 0.2, "reasoning_excerpt": "..."}],
+      "success_evidence": [...],
+      "pros": ["Top-tier overall score (92%)"], "cons": [...]
+    }
+  ],
+  "advisories": []
+}
+```
+
+Tolerates partial inputs — emits advisories for missing pieces rather than crashing. Data reaches the user via three paths:
+- Persisted to `runs/<trace>/evaluation_report.json`
+- Emitted as `evaluation_report` SSE event (→ `EvaluationReportCard`)
+- Served via `GET /runs/{id}/report` (reads disk first, falls back to on-demand)
+
+### Upload + SMTP DoS caps
+
+- `routes/files.py:_read_with_cap()` — 1 MiB chunk reads with running tally, HTTP 413 on overflow.
+- `outbound_delivery.py:_SMTPRequestHandler` — `readline(SMTP_MAX_LINE_BYTES)` (8 KB per RFC 5321) + total DATA cap `SMTP_MAX_DATA_BYTES` (25 MiB). Overflow returns SMTP 552 cleanly.
+
+### `.env` autoload empty-shadow fix (`puzzleeval/__init__.py:_autoload_dotenv`)
+
+Before calling `load_dotenv(override=False)`, walks the keys defined in the `.env` file and evicts any whose `os.environ` value is empty or whitespace-only. Fixes the CI footgun where `ANTHROPIC_API_KEY=` (empty placeholder) silently shadowed the real value. Real non-empty shell values still win (override=False preserved).
+
+---
+
+## Section 18. New SSE events
+
+Frontend handlers in `src/hooks/usePipelineRun.ts`; event type registration in `src/services/api.ts:eventTypes`.
+
+| Event | Trigger | Payload | UI effect |
+|---|---|---|---|
+| `test_data_sufficiency` | After Agent 1's sub-tasks, before Agent 3F | `{summary, verdicts[{scope_id, action, reason, advisories, request_message, degraded_confidence, plugin_for_augment, file_count}]}` | Chat note — READY / AUGMENT / SYNTHESIZE / REQUEST_MORE / DEGRADE per scope |
+| `coverage_gap` | After `candidates_found` if zero candidates OR any scope uncovered | `{candidate_count, blueprint_step_ids, missing_scopes, covered_scopes, user_message}` | Chat warning with broaden-search guidance |
+| `cost_update` | After every agent completion + Agent 1 turns | `{source, delta_usd, total_cost_usd, budget: {spent_usd, cap_usd, remaining_usd, utilization}}` | Live cost meter |
+| `evaluation_report` | At `pipeline_completed` | Full `EvaluationReport` dict (see §17) | Renders via `EvaluationReportCard` |
+| `pipeline_failed` with `reason="budget_exceeded"` | `BudgetExceededError` caught at pipeline boundary | `{error, reason, spent_usd, cap_usd, last_charge_reason, recovery}` | Distinct error path — suggests raising `PUZZLEEVAL_MAX_RUN_COST_USD` |
+
+---
+
+## Section 19. Environment variable reference
+
+Every configurable knob. Defaults shown.
+
+**Required:** `ANTHROPIC_API_KEY`
+
+**Plugin credentials (any-of):** `OPENAI_API_KEY`, `DEEPGRAM_API_KEY`, `ASSEMBLYAI_API_KEY`, `ELEVENLABS_API_KEY`
+
+**Anthropic client:**
+- `PUZZLEEVAL_ANTHROPIC_TIMEOUT_S=120`
+- `PUZZLEEVAL_ANTHROPIC_MAX_RETRIES=3`
+- `PUZZLEEVAL_EFFORT=high` (low / medium / high / xhigh / max)
+- `PUZZLEEVAL_MODEL=claude-sonnet-4-6`
+- `PUZZLEEVAL_AGENT1_MODEL=claude-opus-4-7`
+
+**Cost budget:** `PUZZLEEVAL_MAX_RUN_COST_USD=25.0`
+
+**Agent 5 feature flags:**
+- `PUZZLEEVAL_HYBRID_EVAL_ENABLED=0`
+- `PUZZLEEVAL_PROGRAMMATIC_TOOLS_ENABLED=0`
+- `PUZZLEEVAL_AGENT5_FALLBACK_ENABLED=1`
+- `PUZZLEEVAL_AGENT5_FALLBACK_MAX=3`
+
+**Uploads + sufficiency:**
+- `PUZZLEEVAL_MAX_UPLOAD_BYTES=104857600` (100 MiB)
+- `PUZZLEEVAL_MIN_FILES_PER_SCOPE=3`
+- `PUZZLEEVAL_IDEAL_FILES_PER_SCOPE=6`
+
+**New plugin tuning:**
+- `PUZZLEEVAL_WEBHOOK_PORT=8765` / `PUZZLEEVAL_WEBHOOK_BIND=127.0.0.1` / `PUZZLEEVAL_WEBHOOK_MAX_BODY=1048576`
+- `PUZZLEEVAL_TUNNEL_URL=` (optional public URL for offsite candidates)
+- `PUZZLEEVAL_SMTP_PORT=2525` / `PUZZLEEVAL_SMTP_BIND=127.0.0.1` / `PUZZLEEVAL_SMTP_MAX_LINE_BYTES=8192` / `PUZZLEEVAL_SMTP_MAX_DATA_BYTES=26214400`
+- `PUZZLEEVAL_SLACK_MOCK_PORT=8766` / `PUZZLEEVAL_SMS_MOCK_PORT=8767` / `PUZZLEEVAL_OUTBOUND_BIND=127.0.0.1` / `PUZZLEEVAL_OUTBOUND_HTTP_MAX_BODY=1048576`
+- `PUZZLEEVAL_VOICE_PORT=8768` / `PUZZLEEVAL_VOICE_BIND=127.0.0.1` / `PUZZLEEVAL_VOICE_MAX_AUDIO=26214400`
+- `PUZZLEEVAL_TTS_PROVIDER=` (auto / openai_tts / elevenlabs) / `PUZZLEEVAL_ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM`
+
+**Plugin registry strictness:** `PUZZLEEVAL_STRICT_PLUGIN_REGISTRY=0` (set `1` to raise on duplicate names)
+
+**Frontend (Vite):** `VITE_API_BASE=/pzapi` — override to point the SPA at a different backend URL without rebuilding

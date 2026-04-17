@@ -169,6 +169,120 @@ Each test case must have 2-5 weighted criteria. Rules:
   - "subjective_quality" — for tone, helpfulness, completeness
 - Be SPECIFIC. "Good response" is too vague. "Must mention the 30-day return policy" is testable.
 
+## Plugin-shaped test cases (REQUIRED for code / conversation / audio modalities)
+
+The Agent 5 evaluator dispatches test cases to specialized plugins based on
+input_type / output_type. Plugins need STRUCTURED payloads, not free-form
+text. Generate the right shape per modality so the plugin can score
+deterministically — otherwise the LLM judge falls back, which is fine for
+text/json but loses precision on code (does it run?), conversation (did
+it stay on intent across turns?), audio (does the transcript match?).
+
+### When output_type == "code" (or input_type == "code")
+
+The code_execution plugin runs the generated code and scores by execution
+success against test inputs/outputs. Populate:
+
+- **input_data**: a JSON string describing the prompt + language, e.g.
+  `{"prompt": "Write a function fizzbuzz(n) that ...", "language": "python"}`.
+- **expected_output**: a JSON string with the executable contract:
+  `{"expected_function": "<function_name_to_call>", "test_inputs": [...arg-tuples...], "test_outputs": [...expected_returns...], "language": "python"}`.
+
+Choose at least 3 test_inputs covering happy path + edge case + boundary.
+Languages supported by the plugin today: python (always), javascript,
+typescript, go, rust, bash (when host toolchain installed).
+
+### When input_type == "conversation"
+
+The conversation_simulator plugin replays a multi-turn script against the
+candidate's harness and checks per-turn assertions. Populate:
+
+- **input_data**: a JSON string with the conversation script:
+  `{"conversation_script": {"user_turns": ["Hi", "What can you help with?", "Thanks"], "assertions": [{"turn_index": 0, "check_type": "contains", "value": "help", "weight": 1.0}, {"turn_index": -1, "check_type": "not_contains", "value": "error", "weight": 1.0}]}}`.
+
+`turn_index` is 0-based for the agent's reply to user turn N; -1 means the
+final agent turn. `check_type` is one of `contains` / `not_contains` /
+`regex_match` / `intent_match`. Generate 3-5 user turns per script and 2-4
+assertions per turn-index that exercise the agent's state-keeping +
+clarifying-question behavior.
+
+### When input_type == "audio_content"
+
+Agent 5's stage hook calls the TTS plugin to synthesize an actual audio file
+when test_file_path is null. Populate **input_data** with the EXACT spoken
+text the user is supposed to utter ("Hello, I need to schedule an
+appointment for next Tuesday at 2 PM"). The TTS plugin records the text as
+ground truth so the transcription plugin can compare the agent's audio
+response back to expected text.
+
+### When output_type == "media_url" (image generation, audio generation)
+
+The vision plugin scores image responses; transcription scores audio
+responses. Populate **expected_output** with a one-line natural-language
+description of what the response should contain ("a sunset over a beach
+with palm trees" for image; "a 5-15 second polite greeting acknowledging
+the caller" for audio).
+
+### When input_type == "webhook_event" OR output_type == "webhook_callback"
+
+Inbound agents are tested by the webhook_receiver plugin. It captures
+HTTP POSTs the candidate sends and verifies the body. Populate:
+
+- **input_data**: a JSON string carrying the inbound payload shape +
+  expected agent reaction, e.g.
+  `{"shape": "slack", "message": "What's our refund policy?", "expected_callback_substring": "30 days"}`.
+  `shape` is one of `slack` / `intercom` / `twilio_sms` / `stripe` /
+  `github` / `generic`. The plugin synthesizes a provider-shaped
+  envelope wrapping `message` and gives the candidate a callback URL.
+- **expected_output**: a JSON string with the verification contract:
+  `{"expected_text_substring": "30 days", "shape": "slack"}`. The
+  plugin scores 0.6 for "any callback received" and 0.4 for substring
+  match.
+
+Generate 3-5 cases covering: simple intent, multi-line message, edge
+case (empty body, oversized payload), and one provider-specific shape.
+
+### When output_type == "outbound_message"
+
+The outbound_delivery plugin spins up local mock SMTP (port 2525) /
+channel HTTP (port 8766) / SMS HTTP (port 8767) and verifies the
+agent's outbound message ACTUALLY landed at the mock receiver.
+Populate:
+
+- **input_data**: a JSON string describing the trigger + destination,
+  e.g. `{"channel": "email", "trigger": "user requested receipt",
+  "expected_recipient": "user@example.com"}`. `channel` is one of
+  `email` / `slack` / `sms`.
+- **expected_output**: a JSON string with the success criterion:
+  `{"channel": "email", "expected_recipient": "user@example.com",
+  "expected_text_substring": "receipt for $25.00"}`.
+
+Generate at least one test per channel the workflow uses. The plugin
+returns 0.0 (passed=false) when nothing landed — that's the right
+signal for "the API said 200 but the email never arrived."
+
+### When input_type == "voice_turn" OR output_type == "voice_turn"
+
+The voice_realtime plugin runs a local audio-loopback turn. It serves
+synthesized caller audio at `/audio/<token>` and captures the agent's
+TwiML / NCCO / JSON / audio-blob response at `/voice/<token>`.
+Populate:
+
+- **input_data**: a JSON string describing the caller's utterance +
+  the protocol the candidate speaks, e.g.
+  `{"shape": "twilio", "spoken_text": "What time do you close today?",
+  "expected_response_substring": "9 PM"}`. `shape` is one of `twilio`
+  (TwiML XML expected back), `vonage` (NCCO JSON array), or `generic`
+  (any JSON `{response_text}` or audio blob).
+- **expected_output**: a JSON string with the scoring contract:
+  `{"expected_response_substring": "9 PM", "shape": "twilio"}`.
+
+The plugin extracts text from `<Say>`/`<Play>` tags (TwiML), the
+`talk`/`stream` actions (NCCO), or transcribes audio blobs via the
+transcription plugin. Generate 2-4 cases per voice scope covering:
+information request, multi-step intent (the agent must ask a clarifying
+question), and one protocol-specific shape.
+
 ## Output
 
 Generate the complete test suite with:
@@ -237,6 +351,42 @@ def _format_test_plan(test_plan) -> str:
             lines.append(f"  UPSTREAM OUTPUT SHAPE (this scope receives data shaped like this):")
             lines.append(f"  {spec.upstream_output_shape}")
             lines.append(f"  Your input_data for this scope MUST match this shape — simulate upstream output.")
+
+        # Gap 30: scope-specific input_context parameters (e.g. target_language)
+        hints = getattr(spec, "input_context_hints", None)
+        if hints:
+            lines.append("")
+            lines.append(f"  INPUT_CONTEXT HINTS (copy into every test case's input_context):")
+            for k, v in hints.items():
+                lines.append(f"    - {k}: {v}")
+            lines.append(
+                "  Every test case you generate for this scope MUST include these keys "
+                "verbatim in TestCase.input_context — the harness needs them to route "
+                "the API call correctly."
+            )
+
+        # Gap 14: ground_truth vs exemplar scoring
+        ref_mode = getattr(spec, "reference_mode", "ground_truth")
+        if ref_mode == "exemplar":
+            lines.append("")
+            lines.append(
+                "  REFERENCE MODE: exemplar — sample_output is ONE valid answer, not THE "
+                "answer. Generate test cases whose expected_output is an exemplar the "
+                "LLM judge will use as a REFERENCE, not a target. Criteria should focus "
+                "on qualities (helpfulness, tone, coverage) rather than exact text match."
+            )
+
+        # Gap 9: destructive action steps
+        side_effects = getattr(spec, "side_effects", "read_only")
+        if side_effects != "read_only":
+            lines.append("")
+            lines.append(
+                f"  SIDE EFFECTS: {side_effects} — this scope WRITES to external "
+                "systems. Generate test inputs that exercise both happy-path AND "
+                "error-resilience (duplicate writes, invalid records, partial data) "
+                "but use SYNTHETIC / clearly-labeled test records so dry-run / "
+                "sandbox execution is easy to distinguish from real data."
+            )
 
         if spec.file_description:
             lines.append(f"  File description: {spec.file_description}")
@@ -412,7 +562,9 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
       client.messages.parse() with output_format=Agent3Result
     """
     # ★ CORE LINE 1: Create the API client
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Central factory — 120 s timeout + max_retries=3 (see anthropic_client.py).
+    from puzzleeval.anthropic_client import build_client
+    client = build_client(api_key=ANTHROPIC_API_KEY)
 
     # [logging] Set up logger for this agent
     logger = get_logger("agent_3_synthetic_tests")
@@ -428,14 +580,22 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
     # ======================================================================
 
     # ★ CORE LINE 3: Call Claude with structured output
+    # Wrapped in parse_with_fallback so a grammar-budget rejection on
+    # Agent3Result (TestCase[] with weighted criteria + plugin shapes) falls
+    # back to the non-strict tool path instead of failing the run.
     start_time = time.time()
     try:
-        response = client.messages.parse(
+        from puzzleeval.agent_preamble import with_preamble
+        from puzzleeval.structured_output import parse_with_fallback
+        response = parse_with_fallback(
+            client=client,
             model=DEFAULT_MODEL,
             max_tokens=GENERATION_MAX_TOKENS,
-            system=[{"type": "text", "text": SYSTEM_PROMPT}],
+            system=[{"type": "text", "text": with_preamble(SYSTEM_PROMPT)}],
             messages=[{"role": "user", "content": generation_message}],
             output_format=Agent3Result,
+            extra={},
+            trace_id=input_data.trace_id,
         )
 
     # [error handling] Same pattern as Agent 1 and Agent 2

@@ -83,9 +83,19 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
   const [isLoading, setIsLoading] = useState(false);
   const [activityEntries, setActivityEntries] = useState<ActivityEntry[]>([]);
   const [pipelineNodes, setPipelineNodes] = useState<PipelineNodeState[]>([]);
-  // Phase 3: workflow blueprint emitted by Agent 1 — null until the backend
-  // fires `workflow_blueprint`. The WorkflowDiagram reads this and renders
-  // a step chain; when null it renders nothing (legacy pre-Phase-3 flow).
+  // Final structured EvaluationReport delivered via the `evaluation_report`
+  // SSE event at pipeline_completed time. Same shape as GET /runs/{id}/report.
+  // Null until the report is ready; consumed by the results panel.
+  const [evaluationReport, setEvaluationReport] = useState<Record<string, unknown> | null>(null);
+  // SSE connection status — drives the "reconnecting…" banner in the UI.
+  const [sseStatus, setSseStatus] = useState<"connecting" | "open" | "reconnecting" | "closed">("connecting");
+  // Wall-clock of last SSE event received. The UI uses this to surface a
+  // "no progress for Xm — pipeline may be stuck" warning when nothing has
+  // arrived for a while during a long agent phase.
+  const [lastEventAt, setLastEventAt] = useState<number>(Date.now());
+  // Workflow blueprint emitted by Agent 1 — null until the backend fires
+  // `workflow_blueprint`. The WorkflowDiagram reads this and renders a
+  // step chain; when null it renders nothing.
   const [workflow, setWorkflow] = useState<WorkflowBlueprint | null>(null);
 
   // Phase 6: per-scope candidate selection state. Populated when the
@@ -97,7 +107,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
   >({});
   const [isSelectionSubmitting, setIsSelectionSubmitting] = useState(false);
 
-  // Phase 6.5 forward-compat: rejection entries after deep-verify.
+  // Per-candidate rejection entries from the Phase 6.5 deep-verify pass.
   // Populated by `candidate_rejected` SSE events; consumed by the
   // null-safe RejectionSummary component. Empty until 6.5 ships.
   const [rejections, setRejections] = useState<RejectionEntry[]>([]);
@@ -122,6 +132,10 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
   const handleSSEEvent = useCallback(
     (event: SSEEventData) => {
       const { type, data } = event;
+      // Bump the wall-clock so the stuck-pipeline warning resets — every
+      // event proves the backend is alive. Done first so even handlers
+      // that throw still update the heartbeat.
+      setLastEventAt(Date.now());
 
       switch (type) {
         case "pipeline_started":
@@ -142,7 +156,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
         }
 
         case "candidate_rejected": {
-          // Phase 6.5 forward-compat: per-candidate rejection after deep-verify.
+          // Per-candidate rejection from the deep-verify pass.
           const rName = data.candidate_name as string;
           const rScopeId = data.scope_id as string;
           const rReason = data.reason as RejectionEntry["reason"];
@@ -163,10 +177,123 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           break;
         }
 
+        case "cost_update": {
+          // Live cost-meter update emitted incrementally from agents that
+          // run for several minutes (Agent 5 builder loop in particular).
+          // Without this handler the user only sees cost climb at agent
+          // boundaries, which feels like the system is silent during the
+          // longest phase. Payload: {total_cost_usd, agent_name?, delta?}.
+          const total = data.total_cost_usd as number | undefined;
+          if (typeof total === "number") {
+            setCostAccumulator(total);
+          } else {
+            const delta = data.delta as number | undefined;
+            if (typeof delta === "number") {
+              setCostAccumulator((prev) => prev + delta);
+            }
+          }
+          break;
+        }
+
+        case "coverage_gap": {
+          // Backend warns the user when Agent 2 found 0 candidates OR when
+          // some workflow scopes have no covering candidates. Surface as a
+          // chat note so the user can BROADEN their request or add specific
+          // providers via the SelectionPanel — without this the pipeline
+          // would silently complete with no actual results, which reads as
+          // "the system broke."
+          const userMsg = data.user_message as string | undefined;
+          const missing = data.missing_scopes as string[] | undefined;
+          const candidateCount = data.candidate_count as number | undefined;
+          const lines: string[] = [];
+          lines.push(
+            candidateCount === 0
+              ? "**Coverage gap:** No candidates were found for your request."
+              : `**Coverage gap:** ${candidateCount ?? "?"} candidate(s) found, but ${missing?.length ?? 0} workflow scope(s) have no coverage.`,
+          );
+          if (missing && missing.length > 0) {
+            lines.push(`Missing scopes: ${missing.join(", ")}`);
+          }
+          if (userMsg) lines.push(userMsg);
+          setMessages((prev) => [
+            ...prev,
+            {
+              id: Date.now(),
+              role: "assistant" as const,
+              content: lines.join("\n\n"),
+            },
+          ]);
+          break;
+        }
+
+        case "evaluation_report": {
+          // Final structured report assembled at pipeline_completed time.
+          // Payload is the EvaluationReport dict (see puzzleeval/report.py).
+          // We store it in component state so the results page can render
+          // a rich comparison view; the frontend can also fetch it via
+          // GET /runs/{id}/report at any point.
+          // (State store wired below — see setEvaluationReport.)
+          setEvaluationReport(data as Record<string, unknown>);
+          const winner = (data as { overall_winner?: string }).overall_winner;
+          const candidateCount = (data as { candidate_count?: number }).candidate_count ?? 0;
+          if (winner) {
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                role: "assistant" as const,
+                content: `**Evaluation report ready.** ${candidateCount} candidate(s) tested, winner: **${winner}**. Open the results panel for the full breakdown.`,
+              },
+            ]);
+          }
+          break;
+        }
+
+        case "test_data_sufficiency": {
+          // Per-file-requiring-scope verdict from puzzleeval/test_data_sufficiency.py.
+          // Payload shape:
+          //   {
+          //     summary: { by_action, min_confidence, advisories[],
+          //                request_messages[{scope_id,message}], needs_user_action },
+          //     verdicts: [{
+          //       scope_id, action: "ready"|"augment"|"synthesize"|"request_more"|"degrade",
+          //       reason, advisories[], request_message, degraded_confidence,
+          //       plugin_for_augment, file_count
+          //     }, ...]
+          //   }
+          // The frontend turns it into a chat note so the user sees what the
+          // pipeline plans to do with their data BEFORE Agent 3F/3 runs.
+          // request_more verdicts are surfaced loud — those need user action.
+          const summary = data.summary as Record<string, unknown> | undefined;
+          const verdicts = data.verdicts as Array<Record<string, unknown>> | undefined;
+          if (verdicts && verdicts.length > 0) {
+            const lines = verdicts.map((v) => {
+              const action = String(v.action || "").toUpperCase();
+              return `- **${v.scope_id}**: ${action} — ${v.reason}`;
+            });
+            const advisoryCount = (summary?.advisories as unknown[] | undefined)?.length ?? 0;
+            const needsAction = Boolean(summary?.needs_user_action);
+            const tail = needsAction
+              ? "\n\n**Action needed:** one or more scopes need more / different sample files."
+              : advisoryCount > 0
+                ? `\n\n${advisoryCount} advisory note${advisoryCount === 1 ? "" : "s"} attached.`
+                : "";
+            setMessages((prev) => [
+              ...prev,
+              {
+                id: Date.now(),
+                role: "assistant" as const,
+                content: `**Test data sufficiency check:**\n${lines.join("\n")}${tail}`,
+              },
+            ]);
+          }
+          break;
+        }
+
         case "workflow_blueprint": {
-          // Phase 3: Agent 1's director output. Payload may be null for
-          // pre-Phase-3 mock artifacts — WorkflowDiagram handles null by
-          // rendering nothing, matching legacy behavior.
+          // Agent 1's director output. Payload may be null on mock runs
+          // that don't emit a blueprint — WorkflowDiagram treats null as
+          // "render nothing".
           const bp = data.workflow as WorkflowBlueprint | null | undefined;
           setWorkflow(bp ?? null);
 
@@ -266,11 +393,10 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           const rawCandidates = data.candidates as Array<Record<string, unknown>>;
           setCandidates(
             rawCandidates.map((c) => {
-              // Phase 4: dual-search coverage fields. Backend sends a list of
-              // step IDs and a dict of step_id -> "claimed"/"verified". When
-              // absent (pre-Phase-4 mock artifacts, or legacy single-pass
-              // search) default to empty — the UI falls back to the pre-Phase-4
-              // flat view with no coverage badges.
+              // Dual-search coverage fields. Backend sends a list of step IDs
+              // and a dict of step_id -> "claimed"/"verified". Default to
+              // empty on mock-mode payloads that don't populate coverage —
+              // the UI falls back to a flat view with no coverage badges.
               const coversRaw = c.covers_step_ids;
               const covers = Array.isArray(coversRaw)
                 ? coversRaw.filter((x): x is string => typeof x === "string")
@@ -280,10 +406,10 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
               for (const [sid, val] of Object.entries(confRaw)) {
                 coverageConfidence[sid] = val === "verified" ? "verified" : "claimed";
               }
-              // Phase 5: pricing_breakdown is null here (Agent 2 never fills
-              // it); Phase 6.5 populates via a separate `candidate_verified`
-              // event. Default to null so the PricingBlock stays hidden
-              // until then.
+              // pricing_breakdown is null here — Agent 2 never populates it.
+              // The Phase 6.5 deep-verify emits a `candidate_verified` event
+              // with the real pricing, and PricingBlock stays hidden until
+              // that fires.
               return {
                 name: (c.name as string) || "",
                 provider: (c.provider as string) || "",
@@ -313,11 +439,9 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
             return updated.map((c) => {
               const match = validated.find((v) => v.name === c.name);
               if (!match) return c;
-              // Phase 5 forward-compat: once Phase 6.5's 4B extraction
-              // populates pricing_breakdown server-side, it travels on
-              // this SSE payload (or its successor `candidate_verified`
-              // per-candidate event). Parse it null-safely so the field
-              // stays null when Phase 6.5 hasn't shipped yet.
+              // pricing_breakdown travels on this SSE payload when Phase 6.5's
+              // 4B extraction filled it in. Parse null-safely in case the
+              // field is absent (e.g. mock-mode runs or legacy artifacts).
               const maybePricing = match.pricing_breakdown;
               const pricing = maybePricing && typeof maybePricing === "object"
                 ? (maybePricing as unknown as typeof c.pricing_breakdown)
@@ -607,7 +731,15 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
 
         if (response.pipeline_started) {
           unsubscribeRef.current?.();
-          const unsub = subscribeToEvents(currentRunId, handleSSEEvent, () => {});
+          // Pass the SSE status callback so the UI can render reconnect
+          // banners. Without it, a network blip silently kills the stream
+          // and the user sees a hung "loading" state.
+          const unsub = subscribeToEvents(
+            currentRunId,
+            handleSSEEvent,
+            () => {},
+            (status) => setSseStatus(status),
+          );
           unsubscribeRef.current = unsub;
         }
       } catch (err) {
@@ -692,7 +824,11 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
     perScopeCandidates,
     isSelectionSubmitting,
     submitSelection,
-    // Phase 6.5 forward-compat: rejection entries from deep-verify
+    // Rejection entries from the deep-verify pass
     rejections,
+    // Robustness pass: SSE status + heartbeat + final report
+    sseStatus,
+    lastEventAt,
+    evaluationReport,
   };
 }

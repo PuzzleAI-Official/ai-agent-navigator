@@ -9,7 +9,434 @@ An AI agent evaluation platform. Users describe what they need AI to do in plain
 
 Target users: SMBs (small/medium businesses) who are overwhelmed by AI options and don't have the technical ability to evaluate them.
 
-## Current State (as of 2026-04-11)
+## Current State (as of 2026-04-17)
+
+**Production-ready for local hosting. 885 tests passing (816 core + 30 API
++ 39 generalizability bench). Zero regressions.** Production code: ~40,900
+LoC across PuzzleEval Python core (26,600), FastAPI backend (2,344), and
+React frontend (12,018). Full documentation set lives at:
+
+- `PuzzleEval-local/ARCHITECTURE.md` — module index + SSE event catalog + plugin ecosystem + honest gap list
+- `puzzleeval-api/BACKEND_ARCHITECTURE.md` — endpoints + resilience infrastructure (§17) + new SSE events (§18) + env vars (§19)
+- `AGENT_REFINEMENT_ROADMAP.md` — original 10-phase plan (all shipped) + status block at top
+- `POST_ROADMAP_ENHANCEMENTS.md` — post-roadmap sections 1-22 incl. plugin pass (§21) + current session resilience pass (§22)
+- `PLUGIN_KEYS.md` — credential surfaces + the 8 plugins + production knobs
+- `README.md` (root) — 30-second quickstart + documentation index
+
+Latest pass dispatched six parallel deep audits (robustness, bandaids,
+Claude-Code-parity, plugin edges, test-data-quality, frontend errors) and
+shipped fixes for every production-blocking finding plus high-leverage
+capability boosts:
+
+(NEW-L) **`puzzleeval/anthropic_client.py` — central client factory** —
+Every agent used to construct its own `anthropic.Anthropic()` with bare
+defaults (10-min timeout, no retries). A flaky TCP socket would hang the
+entire pipeline for 10 minutes; a single transient 429 / 5xx killed the
+run. The new factory wires `timeout=120s` (Agent 5 gets 240s for deep
+thinking) and `max_retries=3` (covers transient 5xx + connection drops at
+the SDK level). All 6 production agents now build clients through
+`build_client(...)`. Includes a `call_with_model_fallback(...)` helper
+that does Opus → Sonnet → Haiku degradation on persistent 429 — the
+ladder is data-driven so any agent can opt in.
+
+(NEW-M) **`puzzleeval/budget.py` — `RunBudget` cost circuit-breaker** —
+Threadsafe per-run cost cap that raises `BudgetExceededError` when a run
+exceeds `PUZZLEEVAL_MAX_RUN_COST_USD` (default $25). Prevents pathological
+Agent 5 builder loops from running up unbounded $$. Snapshot-friendly for
+SSE event surfacing; on-spend callback hook for live cost meters. 11 unit
+tests including thread-safety + deadlock-free snapshot.
+
+(NEW-N) **`schemas.py` — `frozenset[str]` → `list[str]`** — The deep
+audit caught that `Candidate.covers_step_ids` and
+`ScreenedCandidate.covers_step_ids` declared `frozenset[str]`. JSON
+Schema has no native frozenset type, so LLM structured output couldn't
+emit it correctly; the strict-grammar path always failed (forcing the
+non-strict fallback) and the model occasionally emitted `"frozenset({'x'})"`
+strings that Pydantic iterated char-by-char. Migrated both fields to
+`list[str]` with sorted+deduped caller-side enforcement. Eliminates a
+whole class of bugs at the source instead of patching downstream. All
+upstream call sites in research.py / deep_verify_runner.py / pipeline.py
+/ selection.py updated to use sorted-set list operations.
+
+(NEW-O) **FastAPI lifespan handler + `allow_reuse_address` everywhere** —
+The new plugins (webhook_receiver, outbound_delivery, voice_realtime)
+spin up background HTTP/SMTP servers. Without explicit teardown, threads
++ sockets leaked across uvicorn restarts — the second start failed to
+rebind the configured port and fell to ephemeral, silently breaking any
+harness with hardcoded ports. New `lifespan` context manager calls
+`shutdown()` on every plugin at app exit; all `_ThreadedHTTPServer`
+subclasses now set `allow_reuse_address = True` so port re-bind works
+across `uvicorn --reload` cycles.
+
+(NEW-P) **DoS protection** — Three real OOM/exhaustion vectors closed:
+  * `routes/files.py:upload_files` now stream-reads with `MAX_UPLOAD_BYTES_PER_FILE`
+    cap (default 100 MiB), aborts with HTTP 413 instead of buffering an
+    unbounded blob. Previous code did `await upload_file.read()` with no
+    check — a 1 GB upload would exhaust server memory before any
+    validation ran.
+  * `outbound_delivery.py` SMTP handler now caps `_read_line` at
+    `SMTP_MAX_LINE_BYTES` (8 KB per RFC 5321) AND total DATA at
+    `SMTP_MAX_DATA_BYTES` (25 MiB matching Gmail's ceiling). Previously
+    a malicious sender could stream a single line forever.
+  * `outbound_delivery.py` HTTP receivers use `HTTP_MAX_BODY_BYTES`
+    (1 MiB) instead of a hardcoded literal.
+
+(NEW-Q) **Coverage gap detection** — When Agent 2 returns 0 candidates
+OR when one or more workflow scopes have no covering candidates, the
+pipeline now emits a `coverage_gap` SSE event with the `missing_scopes`
+list and a user-facing message ("No candidates found — try broadening
+your description"). Previously the pipeline silently completed with no
+results, which the user reads as "the system broke." Frontend renders
+the gap as a chat note immediately after research finishes.
+
+(NEW-R) **`puzzleeval/report.py` — `EvaluationReport` assembler** —
+Before this pass, the "final report" was the raw `agent_5_output.json`
+artifact and a hardcoded recommendation sentence in the React UI. The
+new assembler produces a structured `EvaluationReport` with: per-candidate
+ranking by overall_score, per-scope winners (best covering candidate),
+pass/fail counts, evidence (top 3 failures + top 3 successes per
+candidate), monthly cost projection (uses `puzzleeval.pricing` with the
+user's stated `monthly_volume`), deterministic pros/cons heuristics,
+sandbox-disclosure flags, and coverage-gap advisories. Tolerates
+partial inputs — emits informative advisories rather than crashing when
+upstream agents returned empty. Persisted to
+`runs/<trace>/evaluation_report.json` AND emitted via
+`evaluation_report` SSE event AND served via new `GET /runs/{id}/report`
+endpoint. 16 unit tests.
+
+(NEW-S) **Plugin registry guard against silent name overrides** —
+`register_plugin()` previously did `_REGISTRY[name] = plugin` with no
+duplicate check. Two plugins with the same name silently fought for the
+modality slot. Now: re-registering the SAME instance is a no-op
+(idempotent), but registering a DIFFERENT instance under an existing
+name logs a warning (or raises with `PUZZLEEVAL_STRICT_PLUGIN_REGISTRY=1`).
+
+(NEW-T) **Frontend SSE auto-reconnect with backoff** — `subscribeToEvents`
+wraps EventSource with exponential backoff (1s → 2s → … → 30s cap) and
+preserves `lastEventId` across reconnects. New `onStatusChange` callback
+surfaces `connecting | open | reconnecting | closed` so the UI can render
+a "reconnecting…" banner instead of silently going dead on a network
+blip.
+
+(NEW-U) **Frontend handlers for `cost_update`, `coverage_gap`,
+`evaluation_report`** — `cost_update` now drives the live cost meter
+(was previously subscribed but never handled). `coverage_gap` renders as
+an immediate chat warning. `evaluation_report` populates the new
+`evaluationReport` state object that the results panel consumes. The
+hook also exposes `sseStatus` and `lastEventAt` (heartbeat) for
+"pipeline may be stuck" warnings during long agent phases.
+
+(NEW-V) **`VITE_API_BASE` env override** — Frontend `API_BASE` reads
+`import.meta.env.VITE_API_BASE` first, falling back to the dev-proxy
+mount `/pzapi`. Deployers can point the SPA at any backend URL without
+rebuilding.
+
+(NEW-W) **Anthropic `parse_with_fallback` wired into all 6 structured-
+output call sites** — Previously only Agent 1 used it. Now Agents 1, 2,
+3, 3F, 4, AND 5 all route through `parse_with_fallback`, so any of them
+hitting the compiled-grammar limit gracefully degrades to non-strict
+tool-call mode. All 6 also benefit from the central client factory's
+timeouts + retries.
+
+Combined: **+33 PuzzleEval tests** (778 → 811). Zero regressions across
+existing tests, the 30-case API suite, the 39-case generalizability
+bench, or TypeScript. Vite production build clean. Backend boot via
+TestClient + lifespan handler verified clean. Plugin readiness still
+8/8.
+
+(Earlier, NEW-A through NEW-K) closed a batch of audit-found gaps and
+shipped the durable fix for Anthropic's compiled-grammar size limit on
+large structured outputs:
+
+(NEW-F) **`puzzleeval/structured_output.py` — `parse_with_fallback()`** —
+drop-in replacement for `client.messages.parse(output_format=...)` that
+falls back to `messages.create()` with a non-strict tool when the
+strict-grammar path returns a 400 ("compiled grammar is too large" /
+"Grammar compilation timed out"). Wired into ALL six structured-output
+call sites: Agent 1 (user_understanding), Agent 2 (research structuring
+step), Agent 3 (synthetic_tests), Agent 3F (synthetic_tests_file),
+Agent 4 (screening structuring step), Agent 5 (LLM evaluator). The
+fallback path also defends against two model-output quirks that the
+strict path's grammar would have prevented: (a) over-nesting of the
+result under an extra `input`/`result`/`arguments` key (defensive
+unwrap), and (b) emitting Python repr strings like
+`"frozenset({'step_1'})"` for fields the schema declares as arrays
+(`_coerce_repr_strings_to_lists` walks and converts before Pydantic
+validation). 22 tests in `tests/test_structured_output.py`. Verified
+end-to-end: real pipeline run with REAL Agent 1 + REAL Agent 2 + REAL
+Agent 4 verify reached `status: completed` cleanly with the fallback
+firing 4+ times across the run.
+
+(NEW-G) **`puzzleeval-api/services/pipeline_runner.py` — `_save_json` +
+`_coerce_coverage` hardening** — the previous serializer used
+`json.dumps(data, default=str)` which would call `str(frozenset(...))`
+on any frozenset in the dict, producing the literal repr string
+`"frozenset({'step_1'})"` on disk. Replaced with `_jsonify` that walks
+the dict and converts frozenset/set/tuple to JSON-friendly equivalents.
+`_coerce_coverage` extended with defensive string-pattern matching so
+any path that did stringify a frozenset upstream still recovers cleanly.
+
+(NEW-H) **`puzzleeval/agents/research.py` — `RESEARCH_MAX_TOKENS` bump
++ `_salvage_findings_from_tool_uses`** — Agent 2's Step 1 web-research
+loop ran out of token budget mid-search on real workloads (one observed
+run hit `stop_reason=max_tokens` with 8 tool_use blocks and zero text
+findings), causing a hard pipeline failure. Bumped from 5000 → 12000
+tokens for headroom; added a salvage helper that synthesizes a
+findings paragraph from issued search queries when no text block is
+present, so the Step 2 structuring pass still gets useful input.
+
+(NEW-I) **Frontend SSE handler for `test_data_sufficiency`** —
+`src/services/api.ts` adds the new event to `eventTypes`;
+`src/hooks/usePipelineRun.ts` adds a switch case that turns the verdict
+payload into a chat-rendered message ("Test data sufficiency check: …"
+with READY/AUGMENT/SYNTHESIZE/REQUEST_MORE/DEGRADE per scope and
+advisories rolled up). Without this the SSE event was being silently
+dropped by the frontend.
+
+(NEW-J) **Schema field descriptions de-bloated** — long Pydantic class
+docstrings on `SubTask`, `InfoStatus`, `WorkflowBlueprint`, `TestPlan`
+were trimmed to one-liners (the verbose explanations were duplicated
+in agent system prompts anyway). Stale enum lists in `ScopeTestSpec` /
+`TestCase` / `TestHarness` now reference `puzzleeval.validators` as
+the canonical source instead of inlining the full enum, removing the
+documentation drift risk surfaced in the audit.
+
+(NEW-K) **Agent 1 wired through `parse_with_fallback`** — the audit
+caught that Agent 1 had neither extended thinking nor effort. Now wired
+with `thinking={"type":"adaptive"}` + `output_config_for_request()` AND
+the grammar fallback. Set `PUZZLEEVAL_EFFORT=xhigh` for the deepest
+planning on Opus 4.7. Source-grep regression guards in
+`tests/test_agent1_thinking.py` (8 cases).
+
+Combined: **+24 tests** (754 → 778 in core), zero regressions across
+existing tests, the 30-case API suite, the 39-case generalizability
+bench, or TypeScript. Vite build clean. Real end-to-end pipeline
+verified through the FastAPI backend reaches `status: completed` with
+real Agent 1 + Agent 2 + Agent 4 hitting the live Anthropic API.
+
+The previous pass closes the
+"sub-scenarios our pipeline can't fully test today" gap by shipping three
+new local-only plugins, hardens Agent 1 with adaptive thinking + the
+xhigh effort tier, and turns "is the user's test data sufficient?" into
+a first-class structured verdict surfaced in every run:
+
+(NEW-A) **`puzzleeval/test_data_sufficiency.py`** — the single source of
+truth for "do we have enough test files, and what do we do if not." Pure
+module (no Claude calls, no network) that returns a structured
+`SufficiencyVerdict` per scope with one of five actions: READY, AUGMENT
+(plugin synthesizes inputs), SYNTHESIZE (text fallback), REQUEST_MORE
+(pause + ask user with concrete copy), DEGRADE (proceed with reduced
+confidence). Wired into both the CLI (printed before Agent 3F fires) and
+the FastAPI runner (emitted as a `test_data_sufficiency` SSE event with
+per-scope verdicts + summary advisories). Detects wrong-extension uploads
+("you sent .mp4 but this is OCR"), single-source variety risk (all files
+share a 6-char prefix), and below-min counts (< 3 files / < 6 ideal).
+12 test cases in `tests/test_test_data_sufficiency.py`.
+
+(NEW-B) **`puzzleeval/tool_plugins/webhook_receiver.py`** — first-class
+fix for the inbound sub-scenario (Slack `app_mention`, Intercom widget,
+Stripe events, GitHub webhooks, Twilio SMS replies, generic webhooks).
+Runs an in-process HTTP server bound to 127.0.0.1 (configurable port via
+`PUZZLEEVAL_WEBHOOK_PORT`, default 8765). `synthesize_input()` returns a
+unique-token callback URL + a provider-shaped envelope (slack /
+intercom / twilio_sms / stripe / github / generic).
+`evaluate_output()` inspects captured POSTs, scoring 0.6 for
+"received at all" + 0.4 for substring match. Optional
+`PUZZLEEVAL_TUNNEL_URL` advertises a public URL when an operator runs
+ngrok / cloudflared out-of-band. 16 tests in
+`tests/test_webhook_receiver.py`.
+
+(NEW-C) **`puzzleeval/tool_plugins/outbound_delivery.py`** — first-class
+fix for the outbound sub-scenario ("did the email actually land in the
+inbox?"). Three local mock receivers spun lazily on first request:
+SMTP (hand-rolled pure-socket implementation since `smtpd` was removed
+in Python 3.12 — supports HELO/EHLO/MAIL/RCPT/DATA/RSET/NOOP/QUIT,
+RFC 5321 transparency rule), channel HTTP (Slack-shaped), SMS HTTP
+(Twilio-shaped form-encoded). Default ports 2525 / 8766 / 8767;
+configurable via `PUZZLEEVAL_SMTP_PORT` / `PUZZLEEVAL_SLACK_MOCK_PORT`
+/ `PUZZLEEVAL_SMS_MOCK_PORT`. Each receiver returns 200 + provider-
+shaped JSON ack so candidates expecting normal responses stay happy.
+Buffers are recipient/channel-keyed for filtered evaluation.
+13 tests in `tests/test_outbound_delivery.py` exercise full SMTP send,
+form-encoded SMS, JSON Slack messages, and recipient-filtered
+verification.
+
+(NEW-D) **`puzzleeval/tool_plugins/voice_realtime.py`** — local
+audio-loopback that takes the voice/phone agent scenario as far as it
+can go without a public phone number / TURN server. `synthesize_input()`
+calls TTS (when available) to produce caller audio, exposes it at
+`/audio/<token>`, and gives the candidate harness a `/voice/<token>`
+callback URL plus a `/voice/<token>/recording` upload URL. `evaluate_output()`
+extracts agent text from TwiML (`<Say>`/`<Play>`), Vonage NCCO (`talk` /
+`stream` actions), generic JSON (`response_text`/`text`/`message`/`reply`),
+or — when the response is an audio blob — invokes the transcription
+plugin to STT it. 18 tests in `tests/test_voice_realtime.py`. Real
+WebRTC/SIP fidelity is still cloud-deferred (needs publicly reachable
+phone numbers); local loopback covers intent + response shape.
+
+(NEW-E) **Agent 1 model + reasoning hardening** — Agent 1 now wires
+`thinking={"type": "adaptive"}` and `output_config_for_request()` (same
+pattern as Agents 2/4/5 since the reasoning-knobs pass). Default model
+is Opus 4.7 (`AGENT1_MODEL=claude-opus-4-7`); default effort is `high`;
+flip to `PUZZLEEVAL_EFFORT=xhigh` for deeper planning on complex
+multi-step demands. Validated by source-grep regression guards in
+`tests/test_agent1_thinking.py` (7 cases).
+
+Combined: **+71 PuzzleEval tests** (684 → 755). Zero regressions across
+existing tests, the 30-case API suite, the 39-case generalizability
+bench, or TypeScript. New schema enums (`webhook_event`, `voice_turn`,
+`webhook_callback`, `outbound_message`) extend `VALID_INPUT_TYPES` /
+`VALID_OUTPUT_TYPES` and are taught to Agent 1's prompt so blueprints
+can declare these scopes by name. Modality dispatcher routes them to the
+right plugin automatically — no hardcoded `if scope_role == "voice"`
+branches anywhere.
+
+What's still cloud-deferred (needs a public endpoint or a real PSTN
+number): real WebRTC/SIP bidirectional calls; outbound sequences
+spanning multiple days (needs virtual-clock layer); chatbot widgets
+clicked in a real browser (needs Playwright wrapper, ~1 day); code
+generation in Node/Go/Rust without the host toolchain installed (one-time
+user setup). Everything else from the original "what we can't do" gap
+list is now testable locally with no extra infrastructure.
+
+The previous pass adds four
+performance + reasoning knobs from the Anthropic platform docs:
+(1) `PUZZLEEVAL_EFFORT={low|medium|high|xhigh|max}` config knob applies
+`output_config.effort` across every adaptive-thinking call (Agent 2
+research, Agent 4 verify, Agent 5 builder + ask_research, deep_verify
+runner) so users dial reasoning depth per workload; (2) Adaptive
+thinking audit — every multi-turn agent now has both
+`thinking={"type":"adaptive"}` and `output_config_for_request()` wired,
+verified by source-grep regression guard tests; (3)
+`puzzleeval/hybrid_evaluator.py` — opt-in via
+`PUZZLEEVAL_HYBRID_EVAL_ENABLED=1` — when deterministic dispatch yields
+no plugin for a test case, exposes all 5 plugins as Anthropic-callable
+tools (via new `puzzleeval/plugin_tools.py`), lets Claude pick + invoke
+one if it sharpens the verdict, falls through to LLM judge on plugin
+fallback. Records `hybrid_evaluator` + actual plugin name in
+`tools_used`. (4) Programmatic tool calling for Agent 5 builder via
+`_build_tools_with_programmatic()` adapter — opt-in via
+`PUZZLEEVAL_PROGRAMMATIC_TOOLS=1` — adds Anthropic's
+`code_execution_20260120` tool and marks all custom builder tools
+(write_file/patch_file/run_code/read_file) with
+`allowed_callers=["direct", "code_execution_20260120"]`. Server tools
+stay direct-only. Claude can write Python that chains many tool calls
+in one container, estimated 30-50% cost + latency savings on multi-step
+builds. Both new opt-in flags default OFF for behavioral parity until
+soaked on real runs. Two follow-ups in this
+pass: (1) **`PLUGIN_KEYS.md` + `puzzleeval-api/.env.example`** are the
+single source of truth for where every API key goes — `.env` for
+system-level keys (Anthropic + plugin providers like Whisper/Deepgram/
+ElevenLabs), `provider_registry.json` for candidate API keys (Mindee,
+Veryfi, OAuth flows), `os.environ` for overrides + diagnostic flags.
+The CLI now auto-loads `.env` so users running `python -m puzzleeval.cli`
+get the same credential surface as the FastAPI backend with zero manual
+exports. (2) **Agent 3 + Agent 3F now use plugins for synthesis** —
+Agent 3's system prompt teaches plugin-shaped test generation (code
+tests get structured `{expected_function, test_inputs, test_outputs}`,
+conversation tests get `{conversation_script: {user_turns, assertions}}`,
+audio tests get exact spoken text as ground truth). Agent 3F handles
+audio file uploads via the transcription plugin to extract spoken
+content as ground truth, then the LLM generates test cases against
+the transcript. §20 closed the
+honesty gap on the §19 plugin shipment: plugins are now ACTUALLY
+invoked during evaluation (`detect_for_test_case` runs first; plugin
+scores or falls back to LLM judge) and during test-input synthesis
+(TTS produces real audio files for audio_content scopes;
+conversation_simulator generates default scripts; code_execution
+generates FizzBuzz seeds). New `puzzleeval/plugin_status.py` is the
+single source of truth for "what's wired, what's READY, which
+credential to set" — surfaced in the CLI as a readiness matrix and in
+`pipeline_summary.json` as `plugins` + `plugin_advisories`. New
+`TestCaseResult.tools_used: list[str]` records which plugin (or
+"llm_judge") scored each case for end-user observability. Tool
+selection is fully deterministic by schema enum (input_type /
+output_type) — no model-driven non-determinism in scoring. §19 shipped a
+**tool-plugin architecture** for cross-modality test generation +
+evaluation that closes the structural gap on the six product
+categories: voice/phone agents (TTS plugin synthesizes audio inputs;
+transcription plugin STTs audio responses for evaluation), code
+generation (code_execution plugin runs generated code in sandboxed
+subprocess across Python/JS/TS/Go/Rust/Bash), inbound + chatbot
+agents (conversation_simulator plugin replays multi-turn scripts with
+assertion checking and adapts to messages/conversation/history payload
+shapes), document parsing (existing LLM judge), and image generation
+(vision plugin formalizes the existing `vision_judge.py`). New module
+`puzzleeval/modality.py` detects required plugins per test case
+purely from the schema enums (input_type / output_type) — no `if
+capability == X` branches anywhere. Plugins self-register at package
+import; new plugins require zero changes to Agent 5. The builder's
+initial message names the active plugins and the contract: "match your
+response shape to the plugin's expected input." §18 closed the last
+seven case-specific bandaids and shipped four capability extensions: (1)
+adaptive timeouts that scale to 10 minutes when a candidate's atlas
+declares async_polling/batch_file (no more silent OCR-sized timeouts on
+video/ML/batch APIs); (2) generic `_role_tokens()` replaces the
+hardcoded `_ROLE_KEYWORD_MAP` so any novel role (genome assembly,
+music composition, climate modeling) matches OpenAPI operations
+correctly; (3) `_format_atlas_context_for_builder()` injects every
+populated atlas field (sandbox URL, interaction modes, upstream
+provider, user-selectable params, spec path) into Agent 5's initial
+message — the builder now ACTS on what Phase 6.5 already extracted;
+(4) `file_parsers.py` accepts audio/video/archive/binary via
+structured `file_reference` text — no more hard fail on `.mp3`, `.mp4`,
+`.zip`; (5) new `puzzleeval/manual_atlas.py` ingests user-supplied
+OpenAPI JSON or markdown spec for private/internal/auth-walled APIs
+that web_fetch can't reach; (6) `OAuthCredentials` in
+`provider_registry.py` supports OAuth client_credentials flow
+alongside API-key env vars; (7) Agent 3F falls back to text-only
+synthesis when no sample files supplied. New modules:
+`puzzleeval/manual_atlas.py`. The codebase is now principle-based
+across all 5 agents — no `if provider == X` branches, no
+capability-specific prompt carveouts, no hardcoded brand lists. §17 closed the deeper
+forms of Q3 + Q4: (Q3-deep) `puzzleeval/provider_atlas.py` extracts the
+EXHAUSTIVE per-provider API surface — every endpoint, every request /
+response shape, every error code, doc page map, openapi_url, SDKs — so
+the cross-run cache lets ANY future user testing ANY scope of the same
+provider hit a fully-warm cache. (Q4-deep) Build resilience via four
+mechanisms: `puzzleeval/api_patterns.py` injects a 10-pattern catalog
+into the builder prompt (REST+Bearer / multipart / async-polling /
+OAuth / SSE / etc — copy-paste skeletons so the builder doesn't
+rediscover trivial patterns); `puzzleeval/openapi_harness.py` mechanically
+generates the harness when an openapi_url exists (zero LLM build turns);
+`STRUCTURED_PIVOT_PROMPT` replaces the easy "give up" tier-3 reassessment
+with a forced 3-different-approaches structured pivot; `LIVE_TEST_BATTERY_PROMPT`
+makes happy/minimal/boundary/invalid_credential probes mandatory before
+HARNESS_COMPLETE. New modules: `puzzleeval/provider_atlas.py`,
+`puzzleeval/openapi_harness.py`, `puzzleeval/api_patterns.py`. §16 closed four
+whole-picture gaps: (Q1) wired the previously-defined-but-unused
+`DEEP_VERIFY_SYSTEM_PROMPT` into production via new
+`puzzleeval/deep_verify_runner.py` so every new ScreenedCandidate field
+(interaction_model, user_selectable_params, upstream_provider, sandbox_*,
+api_spec_path) actually gets populated; (Q2) per-scope coverage_confidence
+upgraded to "verified" only for scopes the ROUTING_TABLE confirms;
+(Q3) provider-URL deduplication + cross-run memdir cache — three
+same-URL candidates share ONE deep-verify call, and previously-verified
+providers skip research within a 14-day TTL; (Q4) Agent 5 build-failure
+fallback that pulls next-ranked verified candidates when all user picks
+fail — guarantees a testable environment back instead of a hard "Zero
+harnesses" failure. Toggleable via `PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED`,
+`PUZZLEEVAL_AGENT5_FALLBACK_ENABLED`. Post-roadmap §13 closed
+sixteen local-relevant gaps. §14 refactored remaining case-based bandaids
+into domain-agnostic principles. §15 cribbed five generalization
+mechanisms from Claude Code's source (`src/tools/AgentTool/built-in/*`,
+`src/services/compact/microCompact.ts`, `src/memdir/`,
+`src/tools/AgentTool/built-in/verificationAgent.ts`):
+(A) shared cross-cutting agent preamble injected into every agent;
+(B) adaptive thinking on Agents 2 + 4 (multi-turn reasoning loops);
+(C) server-side `context_management` on Agent 4's per-candidate verify;
+(D) cross-run memory directory (`puzzleeval/memdir.py`) for api_specs
+and quirks recall across runs; (E) adversarial verification battery
+(`puzzleeval/adversarial_verifier.py`) — six PRINCIPLE-BASED probes
+(empty / max / malformed / idempotency / concurrency / auth_error)
+that gate harness readiness BEFORE Agent 3 cases run. New modules:
+`puzzleeval/rate_limiter.py`, `puzzleeval/vision_judge.py`,
+`puzzleeval/memdir.py`, `puzzleeval/agent_preamble.py`,
+`puzzleeval/adversarial_verifier.py`. Gaps 4, 5, 17 (full
+streaming/webhook enum), 24 remain cloud-deferred because webhook
+reception requires a publicly-reachable callback URL.
+
+### Original state (2026-04-11, before the production-ready pass)
 
 **Agents 1, 2, 3, 4, and 5 are fully built and tested. Agent 5 builds thin API client harnesses AND executes all test cases, with LLM-judged evaluation** — harnesses send files/data and return raw API responses. A separate LLM judge compares raw responses against Agent 3F ground truth. Agents 7-9 are not yet built. The CLI supports running Agent 1 → Agent 2 via `--agent2`, Agent 1 → Agent 3 via `--agent3`, Agent 1 → Agent 2 → Agent 4 via `--agent4`, and Agent 1 → Agent 2 → Agent 4 → Agent 3 → Agent 5 via `--agent5`. When `--agent5` is used, Agent 2→4 and Agent 3F run in parallel for faster wall-clock time.
 
@@ -22,7 +449,7 @@ For Agent 5 testing, a temporary shim injects all `provider_registry.json` provi
 2. Delete the 2 shim lines + comments at ~line 222 in `puzzleeval/cli.py`
 3. Remove `, inject_registry_candidates` from the import on `puzzleeval/cli.py` line 39
 
-The frontend is being built separately by another person using Lovable. There is no backend API yet — agents are tested via CLI.
+(Historical context: at the time of this original-state snapshot the frontend was being built separately via Lovable, and there was no backend API — agents were tested via CLI only. Both the FastAPI backend and the React/Vite frontend have since shipped and live in `puzzleeval-api/` and `src/` respectively.)
 
 ### Phase 1 Refinement: Cloudflare / Web Fetch Hardening (2026-04-14)
 
@@ -1530,9 +1957,15 @@ When building Agent 4+, add a `validate_agent{N}_output()` function to `validato
 2. Distinguish errors (blocking) from warnings (non-blocking)
 3. Cross-reference with upstream agent output when needed
 
-## API Integration Path (Not Yet Built)
+## API Integration Path (historical note — the FastAPI backend shipped)
 
-All five agent functions are ready for thin FastAPI wrappers:
+The FastAPI backend is built and live in `puzzleeval-api/` (2,344 LoC, 30
+passing tests — see `puzzleeval-api/BACKEND_ARCHITECTURE.md` for the full
+endpoint surface). The sketch below is the original plan for how the five
+agent functions could be wrapped; the actual backend landed differently
+(single conversational `/chat` endpoint + a pipeline task that streams SSE
+events, rather than one endpoint per agent). Kept here for historical
+context:
 
 ```python
 @app.post("/evaluate/understand", response_model=Agent1Result)
@@ -2113,11 +2546,13 @@ When `--agent5` is set, the CLI runs Agent 1's conversation loop, then Agent 2�
 
 ## What's Next
 
-Build Agent 7 (Analyze Agent). Agent 5 produces test execution results natively. Agent 7 does cross-candidate quality analysis.
-
-- **Input:** Test results from Agent 5's `candidate_runs` + Agent 3's judgement criteria
-- **Output:** Per-candidate quality scores, strengths/weaknesses analysis
-- **Key:** Agent 7 instances are ISOLATED — no cross-product context to avoid bias
+The original "build Agent 7 / 8 / 9" roadmap has been superseded. Agent 5
+now produces per-candidate test results AND cross-candidate analysis; a
+dedicated `puzzleeval/report.py` assembles the final `EvaluationReport`
+with deterministic ranking, per-scope winners, evidence, and monthly cost
+projection. The 9 Claude-Code-parity gaps documented in
+`POST_ROADMAP_ENHANCEMENTS.md` §22 are the current open items (all are
+wiring work, none architectural).
 
 ### How to Build a New Agent (Checklist)
 
@@ -2127,4 +2562,27 @@ Build Agent 7 (Analyze Agent). Agent 5 produces test execution results natively.
 4. **Add CLI flag** to `puzzleeval/cli.py`
 5. **Write tests** at `tests/`
 6. **Update CLAUDE.md** — document key design decisions
-7. Run `ANTHROPIC_API_KEY=dummy python -m pytest tests/ -v` — all tests must pass (currently 353 + 39 generalizability deselected)
+7. Run `ANTHROPIC_API_KEY=dummy python -m pytest tests/ -v` — all tests must pass (currently 816 + 39 generalizability deselected)
+
+
+Cancellation propagation into Agent 5 builder loop: real fix requires threading a cancel_event through 4 nested function signatures + ~30 turn-loop iterations. Will land in a focused next pass — current state.cancel_requested works at agent boundaries which is most of the user-visible value.
+Idempotency keys / DRY_RUN propagation / cleanup-after-write: requires Agent 5 builder prompt redesign + per-candidate teardown protocol. Real fix; not a bandaid candidate. Defer until you've actually run a real Stripe / Slack write workflow and felt the pain.
+Agent 2 per-scope parallel research: real wall-clock win but requires restructuring research.py's single-call pattern. Defer until you have concrete latency complaints.
+Streaming agent text + agent_thinking SSE: requires switching messages.create() to stream=True + delta extraction. Real UX win but ~1 day of focused work that's better tackled standalone.
+AWS SigV4 / mTLS / WebSocket patterns in api_patterns.py: rare provider auth methods; defer until a real candidate needs them so we test against a real API contract.
+
+
+Cancellation doesn't propagate into Agent 5's builder loop. The cancel button works at agent boundaries. In the middle of an 8-minute Agent 5 build, it's ignored. Fixing requires threading cancel_event through ~4 function signatures + ~30 loop iterations. I deferred this explicitly.
+No idempotency keys on write operations. If Agent 5 retries a Stripe/Slack write on a 5xx, you could get duplicate records in the real provider's account.
+No DRY_RUN propagation into harness generation. side_effects=creates_records scopes could leak test data into real accounts unless the candidate provider happens to have a sandbox URL the builder uses.
+No sub-agent parallelism in Agent 2. For a 3-scope blueprint, research runs serially instead of 3 parallel calls. Wall-clock cost, not correctness.
+No agent_thinking SSE streaming. Extended thinking blocks exist but aren't surfaced — you see spinners during Opus planning, not live reasoning.
+No Agent 5 builder model fallback. I added call_with_model_fallback() as a reusable helper but only Agent 1 currently uses it (via parse_with_fallback). Agent 5 still hard-fails on persistent 429 at Opus 4.7.
+Schema grammar size. The Agent1Result schema still sits near the compiled-grammar limit. The fallback path catches it, but every Opus call on Agent 1/2/3/4/5 pays the "try strict, fail, retry non-strict" tax. The real fix is splitting ScreenedCandidate into base + enrichment delta — deferred.
+
+Stream Agent 5's messages.create() calls and emit agent_thinking deltas (~4 hours, biggest UX win)
+Wire call_with_model_fallback into Agent 5 (~1 hour, biggest reliability win)
+Thread cancel_event through _build_single_harness's 25-turn loop (~2 hours, real user-visible UX)
+In-memory web_fetch cache in _verify_single_candidate (~1 hour, small $$ win)
+Parallelize Agent 2 per-scope specialist searches (~3 hours, wall-clock win on multi-scope requests)
+Emit ThinkingBlock content as SSE (~1 hour, lets users SEE reasoning during long phases)

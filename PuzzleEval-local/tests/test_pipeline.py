@@ -274,7 +274,7 @@ class TestPhase4DerivedMetadata:
             input_data, result = self._make_agent2_with_coverage()
             # Strip coverage to simulate legacy flow
             for c in result.candidates:
-                c.covers_step_ids = frozenset()
+                c.covers_step_ids = []
                 c.coverage_confidence = {}
             run.save_agent_result("agent_2", input_data, result, duration_ms=100)
             assert "phase4_dual_search_active" not in run.agents[0].metadata
@@ -296,7 +296,7 @@ class TestPhase4DerivedMetadata:
         with tempfile.TemporaryDirectory() as tmpdir:
             run = PipelineRun("phase4-d", output_dir=tmpdir)
             input_data, result = self._make_agent2_with_coverage()
-            result.candidates[0].covers_step_ids = frozenset()
+            result.candidates[0].covers_step_ids = []
             result.candidates[0].coverage_confidence = {}
             run.save_agent_result("agent_2", input_data, result, duration_ms=100)
             # At least one has coverage → phase4 block activates

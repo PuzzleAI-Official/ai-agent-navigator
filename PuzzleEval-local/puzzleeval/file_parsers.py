@@ -23,7 +23,6 @@
 
 import base64
 import csv
-import io
 import os
 from typing import Any
 
@@ -241,15 +240,68 @@ def parse_txt(file_path: str) -> str:
 # Main Dispatcher
 # ============================================================================
 
+# Audio / video / archive / binary extensions we can REFERENCE but not
+# semantically parse from this Python layer. Claude vision/document reading
+# doesn't natively process these inside the API; what we can do is:
+#   - confirm the file exists and is readable
+#   - emit a structured `file_reference` text describing it
+#   - hand the absolute path to Agent 5 so the harness uploads the file directly
+# That's a complete general-purpose path: we never silently fail on an unknown
+# extension. The agent reasons about how to USE the reference based on the
+# input_type (audio_content / file_reference) and the candidate's API.
+PASS_THROUGH_EXTENSIONS: dict[str, str] = {
+    # Audio
+    ".mp3": "audio/mpeg", ".wav": "audio/wav", ".m4a": "audio/mp4",
+    ".flac": "audio/flac", ".ogg": "audio/ogg", ".aac": "audio/aac",
+    ".opus": "audio/opus", ".aiff": "audio/aiff",
+    # Video
+    ".mp4": "video/mp4", ".mov": "video/quicktime", ".avi": "video/x-msvideo",
+    ".webm": "video/webm", ".mkv": "video/x-matroska", ".flv": "video/x-flv",
+    # Archives
+    ".zip": "application/zip", ".tar": "application/x-tar",
+    ".gz": "application/gzip", ".7z": "application/x-7z-compressed",
+    # Generic binary fallbacks
+    ".bin": "application/octet-stream", ".dat": "application/octet-stream",
+}
+
+
+def describe_pass_through_file(file_path: str) -> str:
+    """Build a structured text description of a non-text file we can't parse
+    inline but CAN hand off as a file reference to a downstream API.
+
+    Returns a multi-line string the caller appends to the prompt. Includes
+    the absolute path so Agent 5's harness builder can upload directly.
+    """
+    if not os.path.exists(file_path):
+        raise AgentFileParseError(f"File not found: {file_path}")
+    abs_path = os.path.abspath(file_path)
+    ext = os.path.splitext(file_path)[1].lower()
+    media_type = PASS_THROUGH_EXTENSIONS.get(ext, "application/octet-stream")
+    try:
+        size_bytes = os.path.getsize(abs_path)
+    except OSError as exc:
+        raise AgentFileParseError(f"Cannot stat {file_path}: {exc}") from exc
+    return (
+        f"## File reference\n"
+        f"  - path: {abs_path}\n"
+        f"  - extension: {ext}\n"
+        f"  - media_type: {media_type}\n"
+        f"  - size_bytes: {size_bytes}\n"
+        "  - note: this file is too large or non-textual to inline. The "
+        "downstream test harness should upload it directly to the API "
+        "(multipart/form-data or base64 JSON, depending on what the "
+        "candidate's atlas reports).\n"
+    )
+
+
 def parse_file(file_path: str) -> str | dict[str, Any]:
     """
     Parse any supported file type. Detects the format from the file extension
     and calls the appropriate parser.
 
     Returns EITHER:
-      - A string (for DOCX, CSV, TXT) — text content to include in the prompt
-      - A dict (for PDF, images) — an Anthropic content block to include in the
-        message's content array directly
+      - A string (for DOCX, CSV, TXT, audio/video/archive/binary references)
+      - A dict (for PDF, images) — an Anthropic content block
 
     The caller (the agent) needs to handle these two cases differently:
       - Strings get appended to the text prompt
@@ -261,16 +313,26 @@ def parse_file(file_path: str) -> str | dict[str, Any]:
       - .docx → text extraction via python-docx
       - .csv  → text extraction via stdlib csv
       - .txt  → raw text reading
+      - audio (mp3/wav/m4a/flac/ogg/aac/opus/aiff) → file_reference text
+      - video (mp4/mov/avi/webm/mkv/flv) → file_reference text
+      - archive (zip/tar/gz/7z) → file_reference text
+      - any other extension → file_reference text (generic binary)
+
+    Pass-through formats produce a STRUCTURED file_reference description
+    (path + media_type + size) so Agent 5's harness builder can hand the
+    file off to whatever API endpoint accepts it.
 
     Args:
         file_path: Path to the file to parse.
 
     Returns:
-        Either a string (text content) or a dict (Anthropic content block).
+        Either a string (text content / file reference) or a dict
+        (Anthropic content block).
 
     Raises:
-        AgentFileParseError: If the file doesn't exist, can't be read, or
-                            has an unsupported extension.
+        AgentFileParseError: If the file doesn't exist or can't be read.
+        Never raises on unknown extension — pass-through always returns a
+        file_reference string.
     """
     ext = os.path.splitext(file_path)[1].lower()
 
@@ -286,7 +348,6 @@ def parse_file(file_path: str) -> str | dict[str, Any]:
     elif ext == ".txt":
         return parse_txt(file_path)
     else:
-        supported = [".pdf", ".docx", ".csv", ".txt"] + list(IMAGE_EXTENSIONS.keys())
-        raise AgentFileParseError(
-            f"Unsupported file format: '{ext}'. Supported formats: {supported}"
-        )
+        # Audio / video / archive / unknown binary: emit a file_reference text
+        # rather than raising. The downstream harness handles the upload.
+        return describe_pass_through_file(file_path)

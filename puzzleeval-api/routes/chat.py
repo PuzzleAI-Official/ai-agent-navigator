@@ -17,11 +17,29 @@ async def chat(run_id: str, req: ChatRequest):
 
     state.status = "agent1_conversation"
 
-    # Route to mock or real Agent 1
-    if state.agent_modes.get("agent1") == "mock":
-        result = await mock_agent1_turn(state, req.message)
-    else:
-        result = await real_agent1_turn(state, req.message)
+    # Route to mock or real Agent 1. BudgetExceededError is raised by
+    # state.record_cost() when the run crosses its configured cap — catch
+    # here and surface a clear HTTP 402 (Payment Required) so the frontend
+    # renders a different error path than generic server errors.
+    from puzzleeval.budget import BudgetExceededError
+    try:
+        if state.agent_modes.get("agent1") == "mock":
+            result = await mock_agent1_turn(state, req.message)
+        else:
+            result = await real_agent1_turn(state, req.message)
+    except BudgetExceededError as exc:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "reason": "budget_exceeded",
+                "spent_usd": exc.spent,
+                "cap_usd": exc.cap,
+                "message": (
+                    f"Run budget exhausted: ${exc.spent:.4f} of ${exc.cap:.2f} cap. "
+                    f"Raise PUZZLEEVAL_MAX_RUN_COST_USD and start a new run."
+                ),
+            },
+        )
 
     pipeline_started = False
 

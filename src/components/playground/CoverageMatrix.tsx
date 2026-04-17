@@ -134,11 +134,10 @@ export function CoverageMatrix({ candidates, workflowSteps }: Props) {
                 {workflowSteps.map((step) => {
                   const covered = candidate.covers_step_ids.includes(step.id);
                   const conf = candidate.coverage_confidence[step.id];
-                  // Phase 5: per-scope unit cost overlay. Shown underneath
-                  // the coverage dot when pricing varies by scope AND this
-                  // candidate covers this scope. Null-safe — when
-                  // pricing_breakdown is missing (pre-Phase-6.5) the
-                  // overlay is silent.
+                  // Per-scope unit-cost overlay shown under the coverage dot
+                  // when pricing varies by scope AND this candidate covers
+                  // this scope. Null-safe — the overlay is silent when
+                  // pricing_breakdown is missing (deep-verify hasn't run).
                   const perScope = covered
                     ? perScopeUnitCost(candidate.pricing_breakdown ?? null, step.id)
                     : null;

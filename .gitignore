@@ -28,5 +28,12 @@ puzzleeval-api/.env
 puzzleeval-api/uploads/
 puzzleeval-api/runs/
 
+# Python bytecode + test caches (keep .pyc out of git)
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
 # PuzzleEval
 PuzzleEval-local/

@@ -21,18 +21,39 @@ import os
 # ---------------------------------------------------------------------------
 # Anthropic API Key
 # ---------------------------------------------------------------------------
-# This is your secret key for calling Claude's API.
-# Get one at: https://console.anthropic.com/
-# The agent will fail immediately with a clear error if this is not set.
+# Your secret key for calling Claude's API. Get one at
+# https://console.anthropic.com/. Put it in puzzleeval-api/.env or export
+# it in your shell.
+#
+# Read at import but deliberately NOT enforced here — raising at module
+# import time would break anything that wants to inspect / register /
+# list parts of the library without actually calling Claude (plugin
+# registry, plugin status reporter, unit tests). Call
+# `require_anthropic_key()` at the top of any function that's about to
+# instantiate an Anthropic client — it raises a clear EnvironmentError
+# when the key is missing.
 # ---------------------------------------------------------------------------
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
-if not ANTHROPIC_API_KEY:
-    raise EnvironmentError(
-        "ANTHROPIC_API_KEY environment variable is not set. "
-        "Get your API key from https://console.anthropic.com/ and set it:\n"
-        "  export ANTHROPIC_API_KEY='sk-ant-...'"
-    )
+
+def require_anthropic_key() -> str:
+    """Return the Anthropic API key; raise a clear error if unset.
+
+    Call this at the start of any function that's about to instantiate
+    `anthropic.Anthropic(...)`. Lazy check by design — we want imports
+    to succeed in environments where Claude isn't actually called
+    (CLI status commands, plugin readiness inspection, unit tests).
+    """
+    key = os.environ.get("ANTHROPIC_API_KEY")
+    if not key:
+        raise EnvironmentError(
+            "ANTHROPIC_API_KEY environment variable is not set. "
+            "Get your API key from https://console.anthropic.com/ and "
+            "either:\n"
+            "  - put it in puzzleeval-api/.env (auto-loaded by CLI + FastAPI)\n"
+            "  - or `export ANTHROPIC_API_KEY=sk-ant-...` in your shell"
+        )
+    return key
 
 
 # ---------------------------------------------------------------------------
@@ -51,20 +72,17 @@ DEFAULT_MODEL = os.environ.get("PUZZLEEVAL_MODEL", "claude-sonnet-4-6")
 
 
 # ---------------------------------------------------------------------------
-# Agent 1 Model (promoted in Phase 3)
+# Agent 1 Model
 # ---------------------------------------------------------------------------
-# Before Phase 3, Agent 1 was a parser — extract sub-tasks from user text.
-# Sonnet 4.6 was sufficient. Phase 3 promotes Agent 1 to a DIRECTOR role:
-# decompose the user's demand into an ordered WorkflowBlueprint with
-# step ordering, data flow, role assignment, and architecture options
-# (all-in-one vs best-per-step). This requires real planning reasoning —
-# the kind of task Opus 4.7 is materially better at than Sonnet.
+# Agent 1 is the DIRECTOR of the pipeline — it decomposes the user's demand
+# into an ordered WorkflowBlueprint with step ordering, data flow, role
+# assignment, and architecture options (all-in-one vs best-per-step).
+# That's a planning task that benefits from Opus 4.7's deeper reasoning.
 #
 # Cost impact: Agent 1 runs in ~1-3 turns with ~4K in + ~0.5-1K out per turn.
-# Sonnet -> Opus roughly doubles the Agent 1 cost from ~$0.05 to ~$0.10 per
-# evaluation. At the pipeline scale (~$6 total), this is a ~1% rounding error.
-#
-# Override with: export PUZZLEEVAL_AGENT1_MODEL="claude-sonnet-4-6" to revert.
+# Opus vs Sonnet adds ~$0.05/evaluation — a ~1% rounding error at pipeline
+# scale (~$6 total). Override with PUZZLEEVAL_AGENT1_MODEL if you want to
+# run Agent 1 on Sonnet to shave that cost.
 # ---------------------------------------------------------------------------
 AGENT1_MODEL = os.environ.get("PUZZLEEVAL_AGENT1_MODEL", "claude-opus-4-7")
 
@@ -309,7 +327,19 @@ AGENT5_MAX_BUDGET_TOTAL = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_TOTAL", "20.0")
 )
 AGENT5_MAX_PARALLEL = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_PARALLEL", "5"))
-AGENT5_CODE_TIMEOUT = int(os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT", "120"))  # 120s for async APIs that poll (Mindee, DocuClipper)
+# AGENT5_CODE_TIMEOUT = baseline subprocess timeout in seconds.
+# 120s suits sync APIs and most async-polling jobs. Long-running operations
+# (video encoding, ML training, large-batch processing, async jobs with
+# documented SLA > 2 min) need more — use the *_LONG values below, or let
+# the Agent 5 builder scale dynamically per candidate based on
+# `interaction_model.async_polling` / `batch_file` flags from the atlas.
+AGENT5_CODE_TIMEOUT = int(os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT", "120"))
+# When the candidate's atlas reports async_polling OR batch_file, scale the
+# timeout to this value. Defaults to 10 minutes — covers video encoding,
+# ML model inference queues, batch document processing, large file uploads.
+AGENT5_CODE_TIMEOUT_LONG = int(
+    os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT_LONG", "600")
+)
 AGENT5_MAX_OUTPUT_TOKENS = int(
     os.environ.get("PUZZLEEVAL_AGENT5_MAX_TOKENS", "8192")
 )
@@ -329,9 +359,16 @@ AGENT5_MAX_CANDIDATES = int(
 # quality evaluation.
 # ---------------------------------------------------------------------------
 AGENT6_EVAL_MODEL = os.environ.get("PUZZLEEVAL_AGENT6_EVAL_MODEL", DEFAULT_MODEL)
+# AGENT6_TEST_TIMEOUT = per-test-case subprocess timeout in seconds.
+# Same scaling rule as AGENT5_CODE_TIMEOUT: 120s baseline for sync APIs;
+# long-running operations (any provider whose atlas reports async_polling
+# or batch_file) automatically scale to AGENT6_TEST_TIMEOUT_LONG.
 AGENT6_TEST_TIMEOUT = int(
     os.environ.get("PUZZLEEVAL_AGENT6_TEST_TIMEOUT", "120")
-)  # Seconds per test case — some OCR APIs poll for up to 120s
+)
+AGENT6_TEST_TIMEOUT_LONG = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_TEST_TIMEOUT_LONG", "600")
+)
 AGENT6_RATE_LIMIT_BACKOFF = int(
     os.environ.get("PUZZLEEVAL_AGENT6_RATE_LIMIT_BACKOFF", "3")
 )  # Seconds to wait on rate limit before retry
@@ -361,6 +398,148 @@ AGENT6_MIN_TESTS_BEFORE_ABORT = int(
 PROVIDER_REGISTRY_PATH = os.environ.get(
     "PUZZLEEVAL_PROVIDER_REGISTRY", "provider_registry.json"
 )
+
+
+# ---------------------------------------------------------------------------
+# Rate limiting (Gap 13 + Gap 25)
+# ---------------------------------------------------------------------------
+# Free-tier providers (Mindee, Veryfi, Klippa, Nanonets) will throttle or
+# block a test harness that fires without pacing. Shared upstream LLMs
+# (OpenAI, Anthropic) will do the same when several candidates wrap the
+# same upstream.
+#
+# The limiter (puzzleeval/rate_limiter.py) runs in two layers:
+#   1. Per-candidate token bucket — respects each candidate's own docs.
+#   2. Per-upstream-provider global bucket — groups candidates that wrap
+#      the same LLM and caps shared throughput.
+#
+# Both default to ON. Disable with PUZZLEEVAL_RATE_LIMIT_ENABLED=0 for
+# diagnosis (tests will then run as fast as they can and may fail on
+# throttled free tiers).
+# ---------------------------------------------------------------------------
+RATE_LIMIT_ENABLED = os.environ.get(
+    "PUZZLEEVAL_RATE_LIMIT_ENABLED", "1"
+).lower() not in ("0", "false", "no")
+
+DEFAULT_RPS = float(os.environ.get("PUZZLEEVAL_DEFAULT_RPS", "2.0"))
+UPSTREAM_RPS = float(os.environ.get("PUZZLEEVAL_UPSTREAM_RPS", "5.0"))
+
+# ---------------------------------------------------------------------------
+# Adversarial verification (Gap E — Claude Code-style verification agent)
+# ---------------------------------------------------------------------------
+# After Agent 5 builds a harness and signals HARNESS_COMPLETE on smoke +
+# one live call, run a battery of adversarial probes (empty input, max
+# input, malformed input, idempotency, concurrency, auth-error). When the
+# battery surfaces a critical failure (crash or silent corruption), the
+# harness is marked NOT READY and Agent 3 test cases skip it.
+#
+# Disable via PUZZLEEVAL_ADVERSARIAL_PROBES_ENABLED=0 to fall back to the
+# legacy behavior (smoke-test-only verification).
+# ---------------------------------------------------------------------------
+ADVERSARIAL_PROBES_ENABLED = os.environ.get(
+    "PUZZLEEVAL_ADVERSARIAL_PROBES_ENABLED", "1"
+).lower() not in ("0", "false", "no")
+
+
+# ---------------------------------------------------------------------------
+# Agent 5 build-failure fallback (Q4 closure)
+# ---------------------------------------------------------------------------
+# When EVERY selected candidate fails to produce a working harness, the
+# pipeline used to surface a hard failure ("Zero harnesses built — pipeline
+# cannot continue"). The user is left with no testable environment.
+#
+# With AGENT5_FALLBACK_ENABLED=1 (default), Agent 5 instead pulls
+# AGENT5_FALLBACK_MAX additional candidates from Agent 4's verified pool
+# (those NOT in the user's pick list, ranked by relevance + adoption_difficulty)
+# and tries to build them. The resulting harnesses are tagged was_fallback=True.
+#
+# Disable for diagnosis or when reproducibility matters more than guarantee.
+# ---------------------------------------------------------------------------
+AGENT5_FALLBACK_ENABLED = os.environ.get(
+    "PUZZLEEVAL_AGENT5_FALLBACK_ENABLED", "1"
+).lower() not in ("0", "false", "no")
+
+AGENT5_FALLBACK_MAX = int(
+    os.environ.get("PUZZLEEVAL_AGENT5_FALLBACK_MAX", "3")
+)
+
+
+# ---------------------------------------------------------------------------
+# Adaptive thinking effort (Anthropic API output_config.effort)
+# ---------------------------------------------------------------------------
+# Soft guidance for how much extended thinking Claude does per request.
+# Applies to every agent that calls Claude with `thinking={"type": "adaptive"}`.
+#
+# Levels (from Anthropic docs):
+#   low    - skip thinking on simple queries, prioritize latency
+#   medium - moderate thinking, may skip for very simple cases
+#   high   - default; always think, deep reasoning on complex tasks
+#   xhigh  - deeper exploration, available on Opus 4.7
+#   max    - no constraint on thinking depth, available on Opus 4.7+
+#
+# When unset (empty string), no effort is sent and the API uses its model
+# default (high on adaptive-capable models).
+# ---------------------------------------------------------------------------
+EFFORT = os.environ.get("PUZZLEEVAL_EFFORT", "high").lower().strip()
+_VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max", ""}
+if EFFORT not in _VALID_EFFORTS:
+    # Unknown value — log and reset to default so downstream API calls don't
+    # fail with a 400. We don't raise because config import shouldn't crash.
+    import sys as _sys
+    print(
+        f"warning: PUZZLEEVAL_EFFORT={EFFORT!r} not in "
+        f"{sorted(_VALID_EFFORTS)} — defaulting to 'high'",
+        file=_sys.stderr,
+    )
+    EFFORT = "high"
+
+
+def output_config_for_request() -> dict | None:
+    """Build the `output_config` dict to pass to client.messages.create.
+
+    Returns None when EFFORT is unset (don't send the field at all so the
+    API's default applies). Otherwise returns ``{"effort": EFFORT}``.
+    """
+    if not EFFORT:
+        return None
+    return {"effort": EFFORT}
+
+
+# ---------------------------------------------------------------------------
+# Hybrid evaluator (Claude-picked plugins for ambiguous modalities)
+# ---------------------------------------------------------------------------
+# When the deterministic dispatch in _run_tests_for_candidate yields no
+# plugin (modality is ambiguous, output is generic free_text but might
+# benefit from plugin inspection), this flag enables a SECOND-LOOK pass:
+# expose all plugins as Claude-callable tools + adaptive thinking, let
+# Claude decide whether any plugin would sharpen the verdict.
+#
+# Off by default — opt in when you want extra precision for ambiguous
+# modalities at the cost of non-determinism in the fallback path.
+# Modality-clear cases (audio→audio, code→code, etc.) remain deterministic
+# regardless of this flag.
+# ---------------------------------------------------------------------------
+HYBRID_EVAL_ENABLED = os.environ.get(
+    "PUZZLEEVAL_HYBRID_EVAL_ENABLED", "0"
+).lower() not in ("0", "false", "no", "")
+
+
+# ---------------------------------------------------------------------------
+# Programmatic tool calling (Agent 5 builder)
+# ---------------------------------------------------------------------------
+# When enabled, the Agent 5 builder loop adds `code_execution_20260120` to
+# its tool list and marks write_file/patch_file/run_code/read_file as
+# `allowed_callers=["direct", "code_execution_20260120"]` — Claude can
+# write Python that chains tool calls in a single container instead of
+# sampling between every call. Estimated savings: 30-50% on builder cost
+# and latency for multi-step builds.
+#
+# Off by default while we soak this on real builds; flip to 1 for the
+# faster path. Requires Opus 4.7 or Sonnet 4.6 (which we already use).
+# ---------------------------------------------------------------------------
+PROGRAMMATIC_TOOLS_ENABLED = os.environ.get(
+    "PUZZLEEVAL_PROGRAMMATIC_TOOLS", "0"
+).lower() not in ("0", "false", "no", "")
 
 
 MIN_CACHEABLE_TOKENS = {

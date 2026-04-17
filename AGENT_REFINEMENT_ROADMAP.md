@@ -1,5 +1,34 @@
 # PuzzleEval Agent Refinement — Phased Implementation Roadmap
 
+> ## Status as of current session (read this first)
+>
+> **All 9 phases from the original plan (1, 1.5, 2, 3, 4, 5, 6, 6.5, 7, 8) have shipped.** The document below is preserved as the design record of each phase's rationale and schema changes; it is NOT a plan — it is history.
+>
+> After the phased plan shipped, **two additional capability passes** landed in the same repo:
+>
+> 1. **Cross-modality tool plugin + hybrid evaluator pass** — `puzzleeval/tool_plugins/` ecosystem (code_execution, vision, transcription, tts, conversation_simulator, webhook_receiver, outbound_delivery, voice_realtime), modality dispatcher, test-data sufficiency analyzer, programmatic tool calling for Agent 5, adaptive-thinking effort tiers, hybrid evaluator for ambiguous modalities. Tracked in `PuzzleEval-local/POST_ROADMAP_ENHANCEMENTS.md`.
+>
+> 2. **Production-resilience audit pass** (current session) — central Anthropic client factory with timeout + retries + model fallback ladder (`anthropic_client.py`), structured-output grammar fallback (`structured_output.py`), cost circuit-breaker (`budget.py` + `RunState.record_cost`), FastAPI lifespan handler for plugin teardown, upload + SMTP DoS caps, empty-env-var shadow fix, `coverage_gap` SSE event, final `EvaluationReport` assembler (`report.py`) + `GET /runs/{id}/report`, frontend SSE auto-reconnect, live `cost_update` meter, `EvaluationReportCard` UI. Detailed in the same `POST_ROADMAP_ENHANCEMENTS.md` under "Production audit + resilience pass".
+>
+> **Current test count:** 816 core + 30 API + 39 generalizability = **885 tests passing**. TypeScript clean. Vite build clean.
+>
+> **Current production code size (excluding tests):** ~40,900 LoC (26,600 Python core + 2,344 FastAPI + 12,018 frontend TypeScript).
+>
+> **Known Claude-Code-parity gaps still open** (none architectural; all are wiring):
+> 1. Agent 5 mid-turn cancellation — `cancel_event` stops at agent boundaries, not inside the 25-turn builder loop
+> 2. Agent 5 model fallback — `call_with_model_fallback()` helper exists but is only wired into Agent 1
+> 3. Live `agent_thinking` streaming — extended-thinking blocks are produced but not surfaced to SSE
+> 4. Incremental token streaming — Agent 5 uses blocking `messages.create()`, not `stream=True`
+> 5. Agent 2 per-scope parallelism — one serial research call for N-scope blueprints
+> 6. In-run web_fetch URL cache — same doc re-fetched per candidate
+> 7. Idempotency keys + DRY_RUN propagation on candidate writes
+> 8. Structured provider-quirk registry (Stripe-Version, OpenAI-Beta, anthropic-version)
+> 9. AWS SigV4 / OAuth2 authorization_code / mTLS auth patterns in `api_patterns.py`
+>
+> These are documented in detail in `POST_ROADMAP_ENHANCEMENTS.md`. Closing them is ~1 focused day of work — none require architectural changes.
+
+---
+
 ## Context
 
 PuzzleEval is an AI agent evaluation platform with a 5-agent pipeline (User Understanding → Research → Test Cases → Screening → Build & Test) wrapped by a FastAPI backend (`puzzleeval-api/`) with SSE streaming and a Vite/React frontend (`src/`). Today the pipeline runs end-to-end automatically once Agent 1 says `is_clear=true` — there is no user pause, no workflow-aware research, no API-tier handling, and no benchmark across domains beyond invoice OCR.

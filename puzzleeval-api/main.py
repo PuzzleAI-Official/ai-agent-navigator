@@ -18,6 +18,9 @@ if not os.environ.get("PUZZLEEVAL_PROVIDER_REGISTRY"):
     if registry_path.exists():
         os.environ["PUZZLEEVAL_PROVIDER_REGISTRY"] = str(registry_path)
 
+import logging
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -27,7 +30,57 @@ from routes.files import router as files_router
 from routes.events import router as events_router
 from routes.monitoring import router as monitoring_router  # Phase 2: enterprise-gated stubs
 
-app = FastAPI(title="PuzzleEval API", version="0.1.0")
+logger = logging.getLogger("puzzleeval-api")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """FastAPI lifespan handler — clean startup + plugin teardown.
+
+    The new plugins (webhook_receiver, outbound_delivery, voice_realtime)
+    each spin up background HTTP/SMTP servers bound to 127.0.0.1 ports on
+    first synthesize_input() call. Without an explicit shutdown hook, those
+    threads + sockets leak across uvicorn restarts (common during
+    development with --reload, and during production deploys). Restarts
+    fail to rebind the requested port, fall to ephemeral, and any harness
+    pointing at the original port silently breaks.
+
+    This handler:
+      1. (startup) Touches the plugin registry so every plugin imports
+         and registers, but doesn't bind ports yet (plugins are lazy).
+      2. (shutdown) Calls shutdown() on every registered plugin that
+         exposes one, so background servers close cleanly. Idempotent —
+         each plugin's shutdown() handles being called multiple times.
+    """
+    # Startup: ensure plugins register (auto-imported via tool_plugins/__init__)
+    try:
+        from puzzleeval.tool_plugins import list_plugins
+        plugin_count = len(list_plugins())
+        logger.info("startup: %d tool plugins registered", plugin_count)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("startup: plugin registry import failed: %s", exc)
+
+    yield
+
+    # Shutdown: close every plugin's background server
+    try:
+        from puzzleeval.tool_plugins import list_plugins
+        for plugin in list_plugins():
+            shutdown_fn = getattr(plugin, "shutdown", None)
+            if callable(shutdown_fn):
+                try:
+                    shutdown_fn()
+                    logger.info("shutdown: closed plugin %s", plugin.name)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        "shutdown: plugin %s.shutdown() raised: %s",
+                        plugin.name, exc,
+                    )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("shutdown: plugin teardown loop failed: %s", exc)
+
+
+app = FastAPI(title="PuzzleEval API", version="0.1.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,

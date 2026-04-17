@@ -497,3 +497,172 @@ UserInput (+ optional test files)
 - **Agent-to-Agent Hiring:** Programmatic interface where an AI agent (not a human) submits evaluation requests via API. Same pipeline, different input interface.
 - **Continuous Monitoring:** Re-run evaluations periodically to catch provider regressions.
 - **User Data Privacy:** Sandboxed test environments, data encryption, no real user data in test cases.
+
+---
+
+# Current module index (beyond the 5 agents)
+
+The agents describe *what the pipeline does*; the modules below describe *how it stays resilient, accurate, and honest* while doing it. Every module listed is production code exercised by the 885-test suite and the FastAPI runner.
+
+## Core infrastructure
+
+| Module | Lines | Role |
+|---|---:|---|
+| `puzzleeval/anthropic_client.py` | ~160 | Central client factory — every agent builds its Anthropic client here (120 s timeout, `max_retries=3`, Opus→Sonnet→Haiku fallback ladder via `call_with_model_fallback()`). Replaces the previous pattern of each agent instantiating its own bare-default client. |
+| `puzzleeval/structured_output.py` | ~260 | `parse_with_fallback()` — drop-in replacement for `client.messages.parse(output_format=...)` that degrades to a non-strict tool-call path when Anthropic's compiled-grammar size/timeout limit hits. Defensive coercion of Python-repr array strings. Wired into all 6 structured-output call sites. |
+| `puzzleeval/budget.py` | ~150 | `RunBudget` cost circuit-breaker. Threadsafe accumulator with a hard USD cap (default $25 via `PUZZLEEVAL_MAX_RUN_COST_USD`). Raises `BudgetExceededError` when crossed. Surfaced as HTTP 402 at the chat endpoint and as `pipeline_failed reason="budget_exceeded"` at the pipeline boundary. |
+| `puzzleeval/config.py` | ~700 | Every env-var configurable knob lives here. Effort tier (`PUZZLEEVAL_EFFORT`), model selection, caching toggles, feature flags for hybrid eval / programmatic tools / adaptive thinking. |
+| `puzzleeval/schemas.py` | ~2,800 | Every agent boundary's Pydantic contract. Recent migration: `Candidate.covers_step_ids` and `ScreenedCandidate.covers_step_ids` are now `list[str]` (not `frozenset[str]`) — JSON Schema has no native frozenset type, and the old choice forced the non-strict fallback path on every run. |
+| `puzzleeval/validators.py` | ~1,100 | Canonical enum definitions (`VALID_INPUT_TYPES` / `VALID_OUTPUT_TYPES`) and structural validation for every Pydantic output. Single source of truth — schemas' field `description`s reference this module by name to avoid drift. |
+| `puzzleeval/exceptions.py` | — | `AgentRateLimitError`, `AgentAPIError`, `AgentOutputError`, `AgentFileParseError`. Each classifies a recoverable vs fatal condition so the pipeline runner can emit the right SSE event. |
+
+## Accuracy & reporting
+
+| Module | Role |
+|---|---|
+| `puzzleeval/test_data_sufficiency.py` | First-class verdict per scope: `READY` / `AUGMENT` / `SYNTHESIZE` / `REQUEST_MORE` / `DEGRADE`. Walks the file inventory, detects wrong-extension uploads, variety risk (all files share a prefix), sub-minimum counts. Emitted as `test_data_sufficiency` SSE event. |
+| `puzzleeval/report.py` | Final `EvaluationReport` assembler — deterministic ranking, per-scope winners, evidence rows (top-3 failures + top-3 successes per candidate), monthly cost projection (uses `pricing.py` + user's `monthly_volume`), pros/cons heuristics, sandbox-disclosure flags, coverage-gap advisories. Persisted to `runs/<trace>/evaluation_report.json` + emitted as SSE + served at `GET /runs/{id}/report`. |
+| `puzzleeval/modality.py` | Dispatcher. Given a test case's `(input_type, output_type)`, queries the plugin registry for all plugins claiming to handle that modality. Fully data-driven — no `if scope_role == X` branches anywhere. |
+| `puzzleeval/hybrid_evaluator.py` | Opt-in (`PUZZLEEVAL_HYBRID_EVAL_ENABLED=1`) second-look pass for ambiguous modalities: exposes all plugins as Claude-callable tools, lets the model pick one. Only runs when the deterministic dispatch yields no plugin. |
+| `puzzleeval/pricing.py` | `estimate_monthly_cost(breakdown, monthly_volume)` — projects a candidate's claimed pricing breakdown against the user's stated volume. Called by the report assembler. |
+| `puzzleeval/plugin_tools.py` | `build_plugin_tool_definitions()` + `dispatch_plugin_tool()` — exposes plugins as Anthropic-callable tool schemas for the hybrid evaluator. |
+| `puzzleeval/plugin_status.py` | `PLUGIN_WIRING` registry + `snapshot_plugin()` — where each plugin is actually wired (synthesis, evaluation, builder context) plus per-credential advice when a plugin is missing keys. |
+
+## Research & verification
+
+| Module | Role |
+|---|---|
+| `puzzleeval/deep_verify_runner.py` | Phase 6.5 per-candidate deep-verify loop (4A→4B→4C→4D). Reads docs, writes provider atlas + spec to `memdir/`, confirms scope-by-scope which claimed coverage is real. |
+| `puzzleeval/deep_verify_prompt.py` | The deep-verify system prompts. |
+| `puzzleeval/provider_atlas.py` | Structured atlas of a provider's API surface (endpoints, auth, rate limits, sandbox). Cross-run reusable. |
+| `puzzleeval/memdir.py` | Per-category cross-run memory (`~/.puzzleeval/memdir/<category>/<provider>.md`). 14-day TTL, frontmatter + body. Used for api_specs, quirks, atlas. |
+| `puzzleeval/manual_atlas.py` | When Phase 6.5 can't auto-build an atlas, `manual_atlas_from_llm()` falls back to structured output from a plain research call. |
+| `puzzleeval/openapi_harness.py` | When a provider publishes an OpenAPI spec, we use it directly instead of asking Agent 5 to reconstruct. |
+| `puzzleeval/web_fetch_fallback.py` | Plain HTTPS GET when Anthropic's `web_fetch` tool returns nothing (some sites block it). |
+| `puzzleeval/adversarial_verifier.py` | Probes candidate harnesses with empty / max / malformed / idempotency / concurrency / auth-error inputs. |
+
+## Orchestration
+
+| Module | Role |
+|---|---|
+| `puzzleeval/pipeline.py` | CLI-side pipeline orchestrator. Mirrors `puzzleeval-api/services/pipeline_runner.py` but for standalone CLI runs. |
+| `puzzleeval/cli.py` | `python -m puzzleeval.cli` entrypoint — conversational Agent 1 loop + pipeline execution. |
+| `puzzleeval/selection.py` | Phase 7 per-scope top-K selection — picks the default candidate set the UI shows in the SelectionPanel. |
+| `puzzleeval/scope_routing.py` | Per-scope test routing — maps tests to candidates via blueprint scope IDs. |
+| `puzzleeval/rate_limiter.py` | Per-provider concurrency + request-rate caps. Used inside Agent 5's test execution pool. |
+| `puzzleeval/file_parsers.py` | PDF / DOCX / CSV / TXT / image parsing for Agent 1 and Agent 3F. |
+| `puzzleeval/agent_preamble.py` | Shared preamble text every agent's system prompt gets prefixed with. |
+| `puzzleeval/logging_setup.py` | Structured JSON logging with cost/latency/token extras. |
+| `puzzleeval/provider_registry.py` | Read-only accessor for the user's `provider_registry.json` credential store. Tolerates missing/corrupt files (returns empty registry, logs a warning). |
+
+---
+
+# Tool plugin ecosystem (8 plugins)
+
+The plugin architecture lets each modality plug in input synthesis + output evaluation without touching Agent 5. Plugins auto-register at import time via `puzzleeval/tool_plugins/__init__.py`; the modality detector queries the registry by capability.
+
+| Plugin | Required credential(s) | Synthesizes | Evaluates | Role |
+|---|---|:---:|:---:|---|
+| `code_execution` | (none) | ✓ | ✓ | Runs generated code in a sandbox; scores by exit code + output match |
+| `vision` | `ANTHROPIC_API_KEY` | — | ✓ | Scores image responses via Claude vision |
+| `transcription` | `OPENAI_API_KEY` OR `DEEPGRAM_API_KEY` OR `ASSEMBLYAI_API_KEY` | — | ✓ | STTs audio responses, scores transcript against expected |
+| `tts` | `OPENAI_API_KEY` OR `ELEVENLABS_API_KEY` | ✓ | — | Synthesizes audio test inputs for voice agents |
+| `conversation_simulator` | (none) | ✓ | ✓ | Multi-turn scripted conversations with per-turn assertions |
+| `webhook_receiver` (NEW) | (none — local) | ✓ | ✓ | Captures inbound HTTP callbacks (Slack / Intercom / Stripe / Twilio / GitHub / generic shapes). Binds 127.0.0.1:8765 lazily. `PUZZLEEVAL_TUNNEL_URL` for offsite candidates. |
+| `outbound_delivery` (NEW) | (none — local) | ✓ | ✓ | Mock SMTP (port 2525), Slack-webhook HTTP (8766), SMS-Twilio HTTP (8767). Verifies messages actually landed. |
+| `voice_realtime` (NEW) | (none; STT needs transcription key) | ✓ | ✓ | Local audio loopback — serves synthesized caller audio, captures TwiML / NCCO / JSON / audio-blob responses. |
+
+**Registry guards:** `register_plugin()` warns on duplicate-name conflicts (or raises with `PUZZLEEVAL_STRICT_PLUGIN_REGISTRY=1`). Plugin bind-addresses default to `127.0.0.1` for security. All HTTP servers set `allow_reuse_address=True` so uvicorn restarts rebind cleanly. DoS caps: SMTP per-line 8 KB / total DATA 25 MiB, HTTP body 1 MiB.
+
+---
+
+# Resilience infrastructure
+
+Everything in this section is why a real run won't silently corrupt or hang.
+
+### `.env` autoload (`puzzleeval/__init__.py:_autoload_dotenv`)
+- Walks from CWD + package location to find `.env` or `puzzleeval-api/.env`.
+- **Empty-string shadow defense:** if a key declared in the `.env` file is already in `os.environ` as an empty/whitespace-only value, that entry is evicted before `load_dotenv` runs — so `ANTHROPIC_API_KEY=` (CI placeholder) doesn't silently shadow the real value. Real non-empty shell values still win (`override=False`).
+
+### Structured-output fallback (`puzzleeval/structured_output.py`)
+- Strict path first: `client.messages.parse(output_format=PydanticModel)`.
+- On "compiled grammar too large" / "Grammar compilation timed out" 400s, fall through to `client.messages.create()` with a non-strict tool whose `input_schema` is the same JSON Schema.
+- Defensive post-processing: unwrap `{"input": {...}}` over-nesting, coerce Python-repr strings (`"frozenset({'x'})"`) back to real arrays before Pydantic validation.
+- Wired into Agents 1, 2, 3, 3F, 4, and 5's LLM evaluator.
+
+### Budget circuit-breaker (`puzzleeval/budget.py` + `RunState.record_cost()`)
+- Every cost-recording site (agent completions, Agent 1 chat turns, aggregate) calls `state.record_cost(usd, reason)`.
+- Raises `BudgetExceededError` when the running total crosses the cap.
+- Chat endpoint surfaces HTTP 402; pipeline runner surfaces `pipeline_failed reason="budget_exceeded"` with spent/cap/recovery hint.
+
+### Plugin lifecycle (`puzzleeval-api/main.py:lifespan`)
+- On startup: touches the plugin registry so every plugin imports/registers.
+- On shutdown: calls `shutdown()` on every plugin that exposes one — HTTP/SMTP servers close cleanly across `uvicorn --reload` and redeploys.
+
+### Upload + SMTP DoS caps
+- `routes/files.py:_read_with_cap` — stream-reads with `MAX_UPLOAD_BYTES_PER_FILE` (100 MiB default), aborts with HTTP 413.
+- `outbound_delivery.py` — `SMTP_MAX_LINE_BYTES` (8 KB) + `SMTP_MAX_DATA_BYTES` (25 MiB).
+
+### Frontend SSE resilience (`src/services/api.ts:subscribeToEvents`)
+- Exponential backoff reconnect (1s → 2s → ... → 30s cap).
+- Preserves `lastEventId` across reconnects.
+- Surfaces `connecting/open/reconnecting/closed` status to the UI.
+- "No progress for Xm" banner in `Playground.tsx` when `stage === "pipeline"` and `Date.now() - lastEventAt > 2min`.
+
+---
+
+# SSE event catalog
+
+Every event the backend emits, and which UI component consumes it.
+
+| Event | Payload | Consumer |
+|---|---|---|
+| `pipeline_started` | `{trace_id}` | sets `stage="pipeline"` |
+| `workflow_blueprint` | `{workflow, test_plan}` | `WorkflowDiagram`, chat message |
+| `test_data_sufficiency` | `{summary, verdicts[]}` | chat message — READY / AUGMENT / SYNTHESIZE / REQUEST_MORE / DEGRADE per scope |
+| `agent_started` | `{agent, name}` | pipeline nodes + activity feed |
+| `agent_activity` | `{agent, message, status}` | activity feed |
+| `agent_thinking` | reserved | (subscribed; emission deferred — known gap) |
+| `agent_completed` | `{agent, cost_usd}` | pipeline nodes |
+| `agent_blocked` | `{agent, reason}` | Phase 2 billing gate |
+| `candidates_found` | `{candidates[]}` | `CandidateCard` + `CoverageMatrix` |
+| `coverage_gap` (NEW) | `{candidate_count, missing_scopes, user_message}` | chat message — fires when zero candidates or any scope has no coverage |
+| `selection_required` | `{run_id, trace_id, ...}` | `SelectionPanel` pause |
+| `candidates_selected` | `{scope_picks, user_added}` | post-selection resume |
+| `candidate_verified` | `{candidate, scope_id, ...}` | Phase 6.5 per-scope deep-verify result |
+| `candidate_rejected` | `{candidate, reason}` | Phase 6.5 |
+| `scope_verified_complete` | `{scope_id, verified, rejected}` | Phase 6.5 summary |
+| `candidates_verified` | `{validated, rejected}` | Agent 4 complete |
+| `test_cases_ready` | `{test_count}` | Agent 3 complete |
+| `harness_started` | `{candidate}` | Agent 5 per-candidate |
+| `harness_completed` | `{candidate}` | Agent 5 per-candidate |
+| `harness_failed` | `{candidate, reason}` | Agent 5 per-candidate |
+| `test_execution_started` | `{candidate, test_count}` | Agent 5 |
+| `test_result` | `{candidate, test_case_id, passed, score}` | Agent 5 per-test |
+| `candidate_results_ready` | `{candidate, scores}` | Agent 5 per-candidate |
+| `cost_update` (NEW) | `{source, delta_usd, total_cost_usd, budget: {spent_usd, cap_usd, remaining_usd, utilization}}` | live cost meter in `usePipelineRun` |
+| `report_generating` | `{}` | shows "Generating evaluation report..." |
+| `evaluation_report` (NEW) | full `EvaluationReport` dict | `EvaluationReportCard` renders winner + per-scope + evidence |
+| `pipeline_completed` | `{total_cost_usd, budget, summary}` | sets `stage="results"` |
+| `pipeline_failed` | `{error, reason?, spent_usd?, cap_usd?, recovery?}` | error banner; `reason="budget_exceeded"` gets special UI |
+| `pipeline_cancelled` | `{}` | cancel confirmation |
+| `done` | `{}` | closes SSE stream |
+
+---
+
+# Honest gap list (what's NOT production-grade yet)
+
+These are acknowledged gaps from the Claude-Code-parity audit. None are fundamental; all are wiring exercises.
+
+1. **Agent 5 cancellation** — `state.cancel_requested` is checked at agent boundaries but not inside `_build_single_harness`'s 25-turn loop. An 8-minute build is uninterruptible once started.
+2. **Agent 5 model fallback** — `call_with_model_fallback()` is the reusable helper but Agent 5 still hard-fails on persistent Opus 4.7 rate-limits (only uses SDK-level retries).
+3. **Live `agent_thinking` streaming** — extended-thinking blocks exist in responses but are never extracted to SSE. User sees silent spinners during Opus planning.
+4. **Incremental token-level streaming** — Agent 5 builder calls are blocking `messages.create()`, not `stream=True`. Cost/progress only updates at turn boundaries (~30-60 s).
+5. **Agent 2 per-scope parallelism** — one serial research call for N-scope blueprints. Wall-clock cost, not correctness.
+6. **In-run web_fetch URL cache** — same doc fetched per-candidate pays per-candidate.
+7. **Idempotency keys on writes** — a retried Stripe/Slack write could create duplicates in the real provider's account.
+8. **DRY_RUN propagation into harness generation** — `side_effects=creates_records` scopes could leak test data unless the candidate publishes a sandbox URL.
+9. **Provider-quirk registry** — Stripe-Version, OpenAI-Beta, anthropic-version headers aren't in a structured registry; Agent 5 re-discovers from docs each build.
+10. **AWS SigV4 / OAuth2 authorization_code / mTLS auth patterns** — not in `api_patterns.py`; rare auth flows will fall back to generic HTTP patterns and likely fail.
+
+These are tracked in `POST_ROADMAP_ENHANCEMENTS.md`.

@@ -333,7 +333,7 @@ class TestAgent2Validator:
         # 5 candidates but nobody claims step_3 → validator warns.
         candidates = self._make_candidates(5, ["A", "B", "C", "D", "E"])
         for c in candidates:
-            c.covers_step_ids = frozenset({"step_1", "step_2"})
+            c.covers_step_ids = sorted({"step_1", "step_2"})
             c.coverage_confidence = {"step_1": "claimed", "step_2": "claimed"}
         result = Agent2Result(
             candidates=candidates,
@@ -349,14 +349,14 @@ class TestAgent2Validator:
         candidates = self._make_candidates(5, ["A", "B", "C", "D", "E"])
         # All cover step_1
         for c in candidates:
-            c.covers_step_ids = frozenset({"step_1", "step_3"})
+            c.covers_step_ids = sorted({"step_1", "step_3"})
             c.coverage_confidence = {"step_1": "claimed", "step_3": "claimed"}
         # Only 2 ALSO cover step_2
-        candidates[0].covers_step_ids = frozenset({"step_1", "step_2", "step_3"})
+        candidates[0].covers_step_ids = sorted({"step_1", "step_2", "step_3"})
         candidates[0].coverage_confidence = {
             "step_1": "claimed", "step_2": "claimed", "step_3": "claimed",
         }
-        candidates[1].covers_step_ids = frozenset({"step_1", "step_2", "step_3"})
+        candidates[1].covers_step_ids = sorted({"step_1", "step_2", "step_3"})
         candidates[1].coverage_confidence = {
             "step_1": "claimed", "step_2": "claimed", "step_3": "claimed",
         }
@@ -373,7 +373,7 @@ class TestAgent2Validator:
         # coverage_confidence key not in covers_step_ids → structural drift.
         candidates = self._make_candidates(5, ["A", "B", "C", "D", "E"])
         for c in candidates:
-            c.covers_step_ids = frozenset({"step_1", "step_2", "step_3"})
+            c.covers_step_ids = sorted({"step_1", "step_2", "step_3"})
             c.coverage_confidence = {
                 "step_1": "claimed", "step_2": "claimed", "step_3": "claimed",
             }
@@ -382,7 +382,7 @@ class TestAgent2Validator:
             "step_1": "claimed",
             "step_99": "claimed",  # not in covers
         }
-        candidates[0].covers_step_ids = frozenset({"step_1"})
+        candidates[0].covers_step_ids = sorted({"step_1"})
         result = Agent2Result(
             candidates=candidates,
             search_approach="...",
@@ -395,7 +395,7 @@ class TestAgent2Validator:
     def test_invalid_confidence_value_is_error(self):
         candidates = self._make_candidates(5, ["A", "B", "C", "D", "E"])
         for c in candidates:
-            c.covers_step_ids = frozenset({"step_1", "step_2", "step_3"})
+            c.covers_step_ids = sorted({"step_1", "step_2", "step_3"})
             c.coverage_confidence = {
                 "step_1": "claimed", "step_2": "claimed", "step_3": "claimed",
             }
@@ -450,7 +450,7 @@ class TestAgent2Validator:
         candidates = self._make_candidates(5, ["A", "B", "C", "D", "E"])
         # Give every candidate coverage so Phase 4 block activates.
         for c in candidates:
-            c.covers_step_ids = frozenset({"step_1", "step_2", "step_3"})
+            c.covers_step_ids = sorted({"step_1", "step_2", "step_3"})
             c.coverage_confidence = {
                 "step_1": "claimed", "step_2": "claimed", "step_3": "claimed",
             }
@@ -537,7 +537,7 @@ class TestAgent2Validator:
         # Phase 5 checks. This is the default state pre-Phase-6.5.
         candidates = self._make_candidates(5, ["A", "B", "C", "D", "E"])
         for c in candidates:
-            c.covers_step_ids = frozenset({"step_1", "step_2", "step_3"})
+            c.covers_step_ids = sorted({"step_1", "step_2", "step_3"})
             c.coverage_confidence = {
                 "step_1": "claimed", "step_2": "claimed", "step_3": "claimed",
             }

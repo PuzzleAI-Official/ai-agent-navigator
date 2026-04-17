@@ -47,8 +47,28 @@ class ValidationResult(BaseModel):
 # Allowed values for Agent 3 enum-like fields
 # ============================================================================
 
-VALID_INPUT_TYPES = {"text", "structured_data", "document_content", "conversation", "image_description", "audio_content", "file_reference"}
-VALID_OUTPUT_TYPES = {"free_text", "structured_json", "classification", "extraction", "action", "media_url"}
+VALID_INPUT_TYPES = {
+    "text", "structured_data", "document_content", "conversation",
+    "image_description", "audio_content", "file_reference", "code",
+    # Inbound / outbound / voice modalities — wired in by the
+    # webhook_receiver, outbound_delivery, voice_realtime plugins.
+    "webhook_event", "voice_turn",
+}
+# `code` and `audio_content` added so Agent 1's TestPlan can declare
+# code-generation and voice-agent scopes whose outputs are dispatched to
+# the code_execution / transcription tool plugins. Without these, the
+# modality detector falls back to LLM judging for those modalities even
+# when the right plugin is registered + ready.
+#
+# `webhook_event`, `voice_turn`, `webhook_callback`, `outbound_message`
+# extend the enum so Agent 1 can declare scopes that the webhook_receiver
+# / outbound_delivery / voice_realtime plugins handle. Each value maps to
+# a real plugin via puzzleeval/test_data_sufficiency.py and modality.py.
+VALID_OUTPUT_TYPES = {
+    "free_text", "structured_json", "classification", "extraction",
+    "action", "media_url", "code", "audio_content",
+    "webhook_callback", "outbound_message", "voice_turn",
+}
 VALID_EVAL_TYPES = {"exact_match", "semantic_similarity", "contains_key_info", "format_compliance", "subjective_quality"}
 VALID_DIFFICULTIES = {"easy", "medium", "hard"}
 

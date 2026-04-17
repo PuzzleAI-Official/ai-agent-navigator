@@ -62,12 +62,12 @@ export interface TestResult {
 export type CoverageConfidence = "claimed" | "verified";
 
 // ---------------------------------------------------------------------------
-// Phase 5: PricingBreakdown — structured pricing (populated by Phase 6.5)
+// PricingBreakdown — structured pricing for a candidate.
 // ---------------------------------------------------------------------------
 // Mirrors puzzleeval/schemas.py::PricingBreakdown + PricingTier. Agent 2
-// never fills this — Phase 6.5's 4B extraction step populates it during
-// deep-verify. Every field is optional-ish so the UI renders gracefully
-// before 6.5 ships (pricing_breakdown = null everywhere today).
+// never fills this; Phase 6.5's 4B extraction during deep-verify populates
+// it. Every field is optional so the UI renders gracefully when the
+// extractor couldn't infer a field (e.g. sparse docs).
 // ---------------------------------------------------------------------------
 
 export type PricingConfidence = "high" | "medium" | "low";
@@ -99,11 +99,11 @@ export interface PipelineCandidate {
   relevance_score: number;
   adoption_difficulty: "easy" | "medium" | "hard";
   claimed_capabilities: string[];
-  // Phase 4: dual-search coverage
+  // Dual-search coverage (Phase 4)
   covers_step_ids: string[];                                  // blueprint step IDs this candidate claims to cover
-  coverage_confidence: Record<string, CoverageConfidence>;    // keyed by step_id; all "claimed" until Phase 6.5
-  // Phase 5: structured pricing (populated by Phase 6.5's 4B extraction)
-  pricing_breakdown?: PricingBreakdown | null;                // null until Phase 6.5 deep-verifies this candidate
+  coverage_confidence: Record<string, CoverageConfidence>;    // keyed by step_id; "claimed" until deep-verify upgrades to "verified"
+  // Structured pricing populated by the deep-verify 4B extraction step
+  pricing_breakdown?: PricingBreakdown | null;                // null when the candidate hasn't been deep-verified yet
   // Agent 4 enrichment
   confirmed_capabilities: string[];
   auth_method?: string;
@@ -219,8 +219,8 @@ export interface SelectCandidatesResponse {
   scope_coverage: Record<string, number>;   // scope_id -> count picked
 }
 
-// Phase 6.5 forward-compat: rejection entries shown by RejectionSummary
-// after deep-verify. Null-safe scaffold — no data flows until Phase 6.5.
+// Rejection entries shown by RejectionSummary after the deep-verify pass.
+// Populated from `candidate_rejected` SSE events.
 export interface RejectionEntry {
   name: string;
   provider: string;

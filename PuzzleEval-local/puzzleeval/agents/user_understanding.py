@@ -34,7 +34,12 @@ from typing import Any
 
 import anthropic
 
-from puzzleeval.config import AGENT1_MODEL, ANTHROPIC_API_KEY, MAX_TOKENS
+from puzzleeval.config import (
+    AGENT1_MODEL,
+    ANTHROPIC_API_KEY,
+    MAX_TOKENS,
+    output_config_for_request,
+)
 from puzzleeval.exceptions import (
     AgentAPIError,
     AgentOutputError,
@@ -120,10 +125,11 @@ When you set is_clear=true, you MUST also produce the `workflow` field (unless t
   - `description` — one sentence a user would read.
   - `capability` — EXACT SAME STRING as the matching SubTask.capability. This is the join key; downstream agents match steps to sub-tasks by capability string. Keep them identical.
   - `input_from` — where this step's input comes from. Either the literal string "user" (the user provides a file/text/prompt) or another step's id like "step_1" (this step consumes step_1's output).
-  - `output_format` — one of: "free_text", "structured_json", "classification", "extraction", "action". Match the TestCase.output_type enum.
+  - `output_format` — one of: "free_text", "structured_json", "classification", "extraction", "action", "media_url", "code", "audio_content", "webhook_callback", "outbound_message", "voice_turn". Match the TestCase.output_type enum. Modality-specific guidance: use `"code"` when the step generates source code (the code_execution tool plugin will run it); `"audio_content"` when the step generates speech (the transcription plugin will STT the response); `"media_url"` when the step generates an image / audio file / document the user downloads (the vision plugin handles images, transcription handles audio); `"action"` only when the step performs an external write with NO meaningful body to evaluate; `"webhook_callback"` when the step is INBOUND-driven (Slack mention, Intercom widget message, Stripe event, generic webhook) and we verify by inspecting captured callbacks via the webhook_receiver plugin; `"outbound_message"` when the step's success criterion is "did the message actually land at the destination" — email / Slack / SMS — verified by the outbound_delivery plugin's mock receivers; `"voice_turn"` for voice/phone agents tested via the voice_realtime plugin's local audio loopback. Picking the right output_format here is what enables the right tool plugin downstream — get it wrong and the LLM judge takes over (less precise for these modalities).
   - `depends_on` — list of step ids that must finish first. Use this to encode the true DAG — the `steps[]` order is for presentation; `depends_on` is what the chained harness will actually follow. IMPORTANT: two steps that DON'T list each other in `depends_on` are implicitly parallel — they can run concurrently. Only serialize steps (B depends_on A) when B genuinely needs A's OUTPUT as INPUT. Don't artificially serialize independent branches.
   - `parallel_group` — optional string tag. Use the SAME tag on steps that belong to one intentional fan-out (e.g. `"ingest_branch"` on three steps that all read the user's file and feed a single merge step). Purely a UI hint so those steps render side-by-side in one visual cluster. Omit (leave null) for linear chains and single-step blueprints. `depends_on` is still authoritative for DAG semantics; `parallel_group` only affects layout.
-  - `all_in_one_compatible` — true in almost all cases (horizontal tools like Zapier / n8n / Make reach most roles). Set false ONLY for niche roles no horizontal tool covers (e.g., a proprietary enterprise integration).
+  - `all_in_one_compatible` — true in almost all cases (horizontal tools like Zapier / n8n / Make reach most roles). Set false ONLY for niche roles no horizontal tool covers (e.g., a proprietary enterprise integration). ALSO set false when the user references an UNSPECIFIED integration ("my system", "our platform", "our CRM" — without naming it): no candidate can be matched to an unnamed target, so all-in-one is not a valid option for that step. Record the ambiguity in `notes` so Agent 4 knows to flag it.
+  - `side_effects` — default "read_only". Set to "creates_records" / "modifies_records" / "deletes_records" when the step performs an external WRITE: "create bill in QuickBooks", "post message to Slack", "update contact in HubSpot", "delete subscriber from Mailchimp". Agent 5 uses this to prefer sandbox URLs or enable DRY_RUN mode during testing so real user data isn't touched.
 
 - `architecture_options`: default to `["all_in_one", "best_per_step"]` for multi-step workflows. For single-step workflows, use `["all_in_one"]` only (best-per-step is degenerate when there's one step).
 
@@ -197,6 +203,9 @@ For each scope (WorkflowStep), specify:
 - `requires_user_files`: True when the scope ideally tests with real files
 - `file_description`: what files the user should provide (null if requires_user_files is False)
 - `evaluation_focus`: list of what matters most (accuracy, completeness, format_compliance, latency, error_handling)
+- `reference_mode`: "ground_truth" (default) when the scope has ONE correct answer — extraction, classification, translation, code generation against a test suite. "exemplar" when many answers are valid — chatbot replies, creative writing, summarization, open-ended Q&A. The LLM judge branches on this: ground_truth mode tests semantic equivalence vs sample_output; exemplar mode treats sample_output as ONE good answer and judges criteria fulfillment instead. DO NOT use "exemplar" for objective tasks (OCR, extraction) — you'll lose the ability to fail wrong extractions.
+- `side_effects`: mirror the corresponding WorkflowStep.side_effects. Default "read_only"; set to the matching write mode for action steps.
+- `input_context_hints`: dict of scope-specific parameters that EVERY test case at this scope must carry on `input_context`. Use this whenever a step's behavior depends on a PARAMETER the step picks per-run (language, region, model variant, output format, target system ID, persona, glossary, style guide, etc.), especially in parallel fan-outs where multiple steps share the same `capability` string and differ ONLY by parameter. Leave empty `{}` for single-scope workflows or steps without per-scope parameters. The pattern is general — whatever parameter defines "this scope vs that scope" goes here so Agent 3 propagates it to every test case and Agent 5's harness can route/configure the API call accordingly.
 
 ### Example test_plan for "OCR invoices then sync to QuickBooks"
 
@@ -275,7 +284,9 @@ def _build_system_blocks(
     Binary files (PDF/image) are added as separate content blocks.
     """
     # ── CORE: Build prompt text, append text-based file if present ──
-    system_text = SYSTEM_PROMPT
+    # Cross-cutting rules apply to every agent — see agent_preamble.py
+    from puzzleeval.agent_preamble import with_preamble
+    system_text = with_preamble(SYSTEM_PROMPT)
     if isinstance(file_content, str):
         system_text += (
             "\n\n## Uploaded Workflow Document\n"
@@ -333,13 +344,18 @@ def _build_messages(
 #
 # ============================================================================
 
+
 def run_user_understanding_agent(input_data: Agent1Input) -> Agent1Result:
     """
     Run Agent 1. Takes user's request, returns structured understanding
     or clarifying questions.
     """
     # ★ CORE LINE 1: Create the API client
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Central factory: 120 s timeout + max_retries=3 (5xx + connection drops).
+    # Without this every agent shipped its own bare-default client and a
+    # single flaky TCP socket would hang the run for 10 minutes.
+    from puzzleeval.anthropic_client import build_client
+    client = build_client(api_key=ANTHROPIC_API_KEY)
 
     # [logging] Set up logger for this agent
     logger = get_logger("agent_1_user_understanding")
@@ -380,15 +396,40 @@ def run_user_understanding_agent(input_data: Agent1Input) -> Agent1Result:
     )
 
     # ★ CORE LINE 4: Call Claude with structured output
+    # Adaptive thinking + effort tier are wired in for Agent 1's director role
+    # — decomposing user demands into a WorkflowBlueprint is a planning task
+    # that benefits from extended reasoning. `output_config.effort` defaults to
+    # `high` (or whatever PUZZLEEVAL_EFFORT is set to). Set
+    # `PUZZLEEVAL_EFFORT=xhigh` for the deepest planning on Opus 4.7.
+    #
+    # The strict-grammar path (messages.parse + output_format) compiles the
+    # Pydantic schema into a token-level constraint grammar — fast and
+    # guaranteed-valid, but Anthropic enforces a max grammar size. Agent1Result
+    # has 9 nested types and 60+ fields; once Phase 9's TestPlan is included
+    # the compiled grammar exceeds the API limit. _call_with_fallback() runs
+    # the strict path first and, on the specific 400 "compiled grammar too
+    # large" error, falls back to messages.create() with a NON-strict tool
+    # whose input is the same JSON Schema. The model emits JSON freely; we
+    # validate the JSON through the Pydantic model post-hoc. Same Pydantic
+    # output object reaches the rest of the pipeline either way.
     start_time = time.time()
+    _ocfg = output_config_for_request()
+    _extra: dict[str, Any] = {"thinking": {"type": "adaptive"}}
+    if _ocfg is not None:
+        _extra["output_config"] = _ocfg
+    if CACHING_ENABLED:
+        _extra["cache_control"] = {"type": "ephemeral"}
     try:
-        response = client.messages.parse(
+        from puzzleeval.structured_output import parse_with_fallback
+        response = parse_with_fallback(
+            client=client,
             model=AGENT1_MODEL,
             max_tokens=MAX_TOKENS,
-            **({"cache_control": {"type": "ephemeral"}} if CACHING_ENABLED else {}),
             system=system_blocks,
             messages=messages,
             output_format=Agent1Result,
+            extra=_extra,
+            trace_id=input_data.trace_id,
         )
 
     # [error handling] Different error types for different retry strategies

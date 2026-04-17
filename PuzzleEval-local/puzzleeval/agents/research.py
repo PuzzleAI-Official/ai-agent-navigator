@@ -123,11 +123,26 @@ The user's request comes with a WorkflowBlueprint in the message. The blueprint 
 - Run 1 PER-SCOPE search for EACH step in the blueprint, focused on SPECIALISTS for that step's role: e.g. "best OCR APIs 2026" for step_1 role=ocr, "best Google Sheets API integration" for step_2 role=spreadsheet_sync.
 - Total searches = N+1 (one survey + one per scope). Hard cap.
 
+## Candidate-class separation (general principle — runs orthogonal to coverage)
+
+Training data has a gravity well toward whichever class of candidate has more SEO. For ANY capability, you should DELIBERATELY probe two orthogonal framings. These two classes exist for almost every capability — they serve different buyers and compete on different axes, so surfacing only one class systematically mislabels the real option set:
+
+- **Developer primitive.** A raw API the user's engineer would call from code to BUILD a custom flow. Exposes low-level controls, requires integration code, typically priced per-call/per-token. Relevant axes: request/response shape, rate limits, SDK quality, model choice. Search framings: `{capability} API`, `{capability} SDK`, `developer docs {capability}`, `{capability} REST endpoint`.
+- **Packaged product.** An end-to-end SaaS or platform the user's operator would CONFIGURE through a UI and deploy. Bundles opinionated defaults, admin dashboards, often priced per-seat/per-month. Relevant axes: setup time, vendor lock-in, UI features, included integrations. Search framings: `{capability} platform`, `best {capability} tool for {domain}`, `{capability} SaaS`, `no-code {capability}`.
+
+Apply the principle on EVERY capability in the blueprint, not only on the capabilities you personally associate with this duality:
+1. For each scope's per-scope search, mentally run both framings — if one yields nothing useful, the capability is single-class there and proceed normally. If both yield distinct candidates, include both.
+2. In each Candidate's `description`, lead with its class ("Developer API that ..." vs "Packaged product that ..."). Downstream comparison is within-class; the scoring dimensions are different.
+3. Do NOT blend them into one bucket, and do NOT invent a class label the docs don't support. The goal is to avoid the failure mode of "the user needed a packaged product but we returned only raw APIs (or vice versa)."
+
+This is a principle you apply, not an if-statement we prescribe. The duality is domain-agnostic — it applies to conversational agents, image generation, OCR, translation, transcription, analytics, payments, search, code generation, and every future capability we don't know about yet. You are the one who decides when the duality is live for a given capability. When in doubt, try both framings; the second search is cheap insurance.
+
 ## Collect + classify coverage
 
 For every tool/service mentioned across your searches, record:
 1. **Where it surfaced.** All-in-one survey? Per-scope search for step_k? Both?
-2. **What scopes it plausibly covers.** Read the search snippet. An all-in-one tool in the survey typically claims broad coverage — note which scopes the snippet mentions. A specialist in a per-scope search usually covers that one scope only. If a tool surfaces in BOTH an all-in-one search claiming scopes {1,2,3} AND a per-scope search for step_1, merge → {1,2,3}.
+2. **Class.** Developer primitive or packaged product (per the principle above).
+3. **What scopes it plausibly covers.** Read the search snippet. An all-in-one tool in the survey typically claims broad coverage — note which scopes the snippet mentions. A specialist in a per-scope search usually covers that one scope only. If a tool surfaces in BOTH an all-in-one search claiming scopes {1,2,3} AND a per-scope search for step_1, merge → {1,2,3}.
 
 There's NO "multi-step category" vs "specialist category" — coverage is just a SET. A tool may cover 1, 2, or all N scopes. Specialists and all-in-ones compete equally at every scope they claim.
 
@@ -222,7 +237,7 @@ Derive from the ADOPTION FIT dimensional score:
 
 This is an objective description of setup complexity, useful for the final report.
 
-### covers_step_ids (frozenset of step_id strings)  — Phase 4
+### covers_step_ids (list of unique step_id strings)  — Phase 4
 For each candidate, set `covers_step_ids` to the list of blueprint step IDs the research findings say that candidate covers. Sources of truth, in order:
 1. The findings explicitly list covered scopes per candidate in the scoring/selection tables.
 2. If a candidate surfaced ONLY in a per-scope search for step_k, covers_step_ids = [step_k].
@@ -241,6 +256,29 @@ Set ONE entry per step_id in covers_step_ids, always with value "claimed". Agent
 - pricing_model: "per-token", "per-request", "per-page", "monthly", "usage-based", "free-tier", or "freemium"
 - relevant_subtasks: Use the EXACT sub-task description strings from the user's request (KEEP this field populated for backwards compat — covers_step_ids is the new authoritative scope linkage, relevant_subtasks is a human-readable mirror)
 - source: URL where the candidate was found during research
+- api_interaction_pattern_hint: a best-effort signal for HOW the API returns results to the caller. If search snippets show plain request → response (single-call JSON reply), set "sync". If they show a job-submit-then-poll pattern (the caller submits, gets an id, polls a status endpoint until ready — common for any long-running operation: OCR, transcription, video, batch embedding, fine-tuning, large-doc analysis), set "async_polling". Use "unknown" when the snippets don't make it clear. This is a HINT — Phase 6.5 reads the actual docs and can overwrite it, and Phase 6.5 captures richer patterns (webhooks, SSE streaming, batch) that Agent 2 can't reliably discern from snippets.
+
+## Candidate-class separation (general principle)
+
+For ANY capability the user names, there are often TWO distinct classes of candidate that both legitimately solve the user's problem but serve DIFFERENT kinds of buyer. Surface both when both exist. Do NOT blend them. These are NOT domain-specific — the pattern applies to every capability:
+
+- **Developer primitive**: a raw API the user's engineer would call from code to BUILD a custom flow. Exposes low-level controls, requires writing integration code, typically priced per-call/per-token. Comparison axes that matter: request/response shape, rate limits, SDK quality, model choice.
+- **Packaged product**: an end-to-end SaaS or platform the user's operator would CONFIGURE through a UI and deploy. Includes opinionated defaults, admin dashboards, often priced per-seat/per-month. Comparison axes that matter: setup time, vendor lock-in, UI features, included integrations.
+
+Examples of the duality (illustrative — the principle applies to every capability, not just these):
+- A conversational-agent capability: language-model APIs (developer primitive) AND end-user chat platforms (packaged product).
+- An image-generation capability: image-generation APIs (developer primitive) AND creative-suite products that embed image gen (packaged product).
+- An OCR capability: OCR APIs (developer primitive) AND document-processing platforms with OCR built in (packaged product).
+- A translation capability: translation APIs (developer primitive) AND translation-workflow platforms with glossaries and reviewers (packaged product).
+- An analytics capability: analytics SDKs/APIs (developer primitive) AND BI dashboard products (packaged product).
+
+How to apply this principle on EVERY capability search:
+1. For each sub-task, run the search once with developer-primitive framing (e.g. "{capability} API", "{capability} SDK", "developer docs {capability}") and once with packaged-product framing (e.g. "{capability} platform", "best {capability} tool", "{capability} SaaS").
+2. If one framing returns nothing useful, it's a single-class capability — proceed as usual. If both return distinct candidates, include both classes.
+3. In each Candidate's `description`, name its class in the first clause ("Developer API that ..." vs "Packaged product that ..."). Downstream agents and the user can then compare within-class, not across-class (the scoring dimensions are different).
+4. The `adoption_difficulty` scoring already handles the cost/complexity gap naturally — a developer primitive with minimal setup is still "easy" for a developer-skilled user, and a packaged product is still "easy" for a non-technical user. Do not conflate class with difficulty.
+
+This is a principle, not an if-statement. You are the one who has to recognize when a capability has two classes — training data biases toward whichever class is better documented, so be deliberate about searching both framings.
 
 ## Coverage Notes
 In `coverage_notes`, write a per-scope summary: "step_1 (ocr): 4 candidates covering — Mindee, Google DocAI, AWS Textract, Zapier. step_2 (sheets_sync): 3 candidates — Zapier, Make, Google Sheets API." Flag scopes with thin coverage (<3 candidates) so the validator can warn.
@@ -309,7 +347,11 @@ CACHING_ENABLED = False
 # Max tokens for each step.
 # Step 1 is kept modest — Claude should summarize candidates concisely,
 # not write essays. Lower max_tokens also signals "be brief."
-RESEARCH_MAX_TOKENS = 5000  # Actual output ~3,100 tokens; 60% headroom
+RESEARCH_MAX_TOKENS = 12000  # Adaptive thinking + 4 web_searches + text synthesis;
+                              # 5000 was too tight (one observed real run hit
+                              # stop_reason=max_tokens with 8 tool_use blocks
+                              # and zero text findings — the loop was still
+                              # mid-search when budget ran out).
 STRUCTURE_MAX_TOKENS = 4096
 
 # ---------------------------------------------------------------------------
@@ -513,6 +555,40 @@ def _extract_text_from_response(response: anthropic.types.Message) -> str:
     return "\n\n".join(text_parts)
 
 
+def _salvage_findings_from_tool_uses(response: anthropic.types.Message) -> str:
+    """Extract usable text from tool_use queries when no text block is present.
+
+    When the agentic web-search loop runs out of token budget mid-search
+    (stop_reason=max_tokens with content blocks dominated by tool_use /
+    tool_result), there's no synthesized findings paragraph for Step 2 to
+    structure. Rather than failing the run, we walk the tool_use blocks and
+    surface the search queries the model issued. The structuring step can
+    still produce candidate names from those queries plus any partial text
+    fragments. Degraded but useful — better than a hard failure.
+    """
+    bits: list[str] = []
+    for block in response.content:
+        btype = getattr(block, "type", "")
+        if btype == "text":
+            txt = getattr(block, "text", "") or ""
+            if txt.strip():
+                bits.append(txt.strip())
+        elif btype == "server_tool_use":
+            tool_input = getattr(block, "input", None)
+            if isinstance(tool_input, dict):
+                query = tool_input.get("query") or tool_input.get("url") or ""
+                if query:
+                    bits.append(f"Web search query: {query}")
+    if not bits:
+        return ""
+    header = (
+        "Note: web research returned no synthesized findings (likely hit "
+        "max_tokens or pause_turn before completion). The following are the "
+        "raw queries the model issued — use them as a starting point.\n\n"
+    )
+    return header + "\n".join(f"- {b}" for b in bits)
+
+
 # ============================================================================
 # [CORE] Main function — this is the entry point
 # ============================================================================
@@ -537,7 +613,9 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
       Step 2: Structure the findings into Agent2Result via structured output
     """
     # ★ CORE LINE 1: Create the API client
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Central factory — 120 s timeout + max_retries=3 (see anthropic_client.py).
+    from puzzleeval.anthropic_client import build_client
+    client = build_client(api_key=ANTHROPIC_API_KEY)
 
     # [logging] Set up logger for this agent
     logger = get_logger("agent_2_research")
@@ -580,12 +658,24 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
     # [pause_turn] Allow limited continuations if the API pauses mid-research
     for continuation in range(MAX_CONTINUATIONS + 1):
         try:
+            from puzzleeval.agent_preamble import with_preamble
+            from puzzleeval.config import output_config_for_request
+            _kwargs_research: dict[str, object] = {}
+            _ocfg = output_config_for_request()
+            if _ocfg:
+                _kwargs_research["output_config"] = _ocfg
             research_response = client.messages.create(
                 model=RESEARCH_MODEL,  # Sonnet 4.6 for better search quality
                 max_tokens=RESEARCH_MAX_TOKENS,
-                system=[{"type": "text", "text": RESEARCH_SYSTEM_PROMPT}],
+                system=[{"type": "text", "text": with_preamble(RESEARCH_SYSTEM_PROMPT)}],
                 messages=messages,
                 tools=[web_search_tool],
+                # Adaptive thinking — Sonnet reasons between tool calls about which
+                # search to run next + how to interpret results. Same mechanism
+                # Agent 5's builder loop uses; Claude Code uses native thinking
+                # whenever the model is asked to plan multi-step work.
+                thinking={"type": "adaptive"},
+                **_kwargs_research,
             )
 
         # [error handling] Same pattern as Agent 1 — different error types
@@ -658,21 +748,40 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
     # ★ CORE LINE 4: Extract text findings from the mixed response
     findings_text = _extract_text_from_response(research_response)
 
-    # [error handling] If Step 1 produced no text, something went wrong
+    # [error handling] If Step 1 produced no text and we genuinely have
+    # nothing to structure, fall back gracefully: synthesize a minimal
+    # findings paragraph from any tool_use queries the model issued so
+    # downstream Step 2 has SOMETHING to structure. This converts a
+    # hard pipeline failure (one observed cause: stop_reason=max_tokens
+    # mid-tool-loop) into a degraded-but-useful result that surfaces
+    # whatever the model managed to research before running out.
     if not findings_text.strip():
-        logger.error("Research produced no text output", extra={
-            "operation": "research_extraction", "trace_id": input_data.trace_id,
-            "stop_reason": research_response.stop_reason,
-            "content_block_count": len(research_response.content),
-        })
-        raise AgentOutputError(
-            message=(
-                f"Web research returned no text findings. "
-                f"stop_reason={research_response.stop_reason}, "
-                f"content_blocks={len(research_response.content)}"
-            ),
-            agent_name="research", trace_id=input_data.trace_id,
-        )
+        salvaged = _salvage_findings_from_tool_uses(research_response)
+        if salvaged.strip():
+            logger.warning(
+                "Research returned no text — salvaged findings from tool_use queries",
+                extra={
+                    "operation": "research_salvage", "trace_id": input_data.trace_id,
+                    "stop_reason": research_response.stop_reason,
+                    "content_block_count": len(research_response.content),
+                    "salvaged_chars": len(salvaged),
+                },
+            )
+            findings_text = salvaged
+        else:
+            logger.error("Research produced no text output", extra={
+                "operation": "research_extraction", "trace_id": input_data.trace_id,
+                "stop_reason": research_response.stop_reason,
+                "content_block_count": len(research_response.content),
+            })
+            raise AgentOutputError(
+                message=(
+                    f"Web research returned no text findings. "
+                    f"stop_reason={research_response.stop_reason}, "
+                    f"content_blocks={len(research_response.content)}"
+                ),
+                agent_name="research", trace_id=input_data.trace_id,
+            )
 
     logger.info("Research findings extracted", extra={
         "operation": "research_extraction",
@@ -690,14 +799,22 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
     # ======================================================================
 
     # ★ CORE LINE 5: Call Claude with structured output to format findings
+    # Wrapped in parse_with_fallback so that when Agent2Result's compiled
+    # grammar exceeds Anthropic's size/timeout budget, we fall back to a
+    # non-strict tool-call shape and validate the JSON through Pydantic
+    # post-hoc — same final object, no hard failure.
     step2_start = time.time()
     try:
-        structure_response = client.messages.parse(
+        from puzzleeval.structured_output import parse_with_fallback
+        structure_response = parse_with_fallback(
+            client=client,
             model=DEFAULT_MODEL,
             max_tokens=STRUCTURE_MAX_TOKENS,
-            system=[{"type": "text", "text": STRUCTURE_SYSTEM_PROMPT}],
+            system=[{"type": "text", "text": with_preamble(STRUCTURE_SYSTEM_PROMPT)}],
             messages=[{"role": "user", "content": findings_text}],
             output_format=Agent2Result,
+            extra={},
+            trace_id=input_data.trace_id,
         )
 
     # [error handling] Same error pattern for Step 2
@@ -824,7 +941,10 @@ def _normalize_coverage(
             # Merge coverage: union covers, union confidence (prefer
             # 'verified' over 'claimed' if both exist — future-proof).
             existing = merged[key]
-            new_covers = frozenset(existing.covers_step_ids | c.covers_step_ids)
+            # Set-union via temporary set; covers_step_ids is now list[str]
+            # (the schema can't carry frozenset because LLM structured output
+            # has no native frozenset type — see schemas.py:Candidate).
+            new_covers = sorted(set(existing.covers_step_ids) | set(c.covers_step_ids))
             new_conf = dict(existing.coverage_confidence)
             for sid, conf in c.coverage_confidence.items():
                 if conf == "verified" or sid not in new_conf:
@@ -839,20 +959,23 @@ def _normalize_coverage(
             merged[key] = c
             order.append(key)
 
-    # Second pass: sanitize coverage on each merged candidate.
+    # Second pass: sanitize coverage + interaction-pattern hint on each merged candidate.
     out: list[Candidate] = []
+    _valid_hints = {"sync", "async_polling", "other", "unknown"}
     for key in order:
         c = merged[key]
-        # Drop hallucinated step IDs that aren't in the blueprint.
+        # Drop hallucinated step IDs that aren't in the blueprint. De-dup +
+        # sort so the output is deterministic across runs (callers don't
+        # rely on frozenset semantics anymore — schema is list[str]).
         if valid_ids:
-            cleaned = frozenset(s for s in c.covers_step_ids if s in valid_ids)
+            cleaned = sorted({s for s in c.covers_step_ids if s in valid_ids})
         else:
             # No blueprint → legacy flow; covers should be empty.
-            cleaned = frozenset()
+            cleaned = []
         # 1-scope blueprint: every candidate implicitly covers step_1.
         # (Catches LLM drift where the structuring pass forgot to set it.)
         if n_scopes == 1 and not cleaned:
-            cleaned = frozenset(blueprint_step_ids)
+            cleaned = sorted(blueprint_step_ids)
         c.covers_step_ids = cleaned
         # Normalize confidence: exactly one entry per covered scope,
         # value "claimed" unless already "verified" from a future pass.
@@ -864,6 +987,12 @@ def _normalize_coverage(
             if new_conf[sid] != "claimed":
                 new_conf[sid] = "claimed"
         c.coverage_confidence = new_conf
+        # Soft-coerce interaction-pattern hint into the documented vocabulary.
+        # Any unexpected string from the LLM becomes "unknown" rather than
+        # propagating into the harness template as garbage.
+        hint = getattr(c, "api_interaction_pattern_hint", "unknown")
+        if hint not in _valid_hints:
+            c.api_interaction_pattern_hint = "unknown"
         out.append(c)
     return out
 
@@ -929,7 +1058,9 @@ def inject_user_candidates(
             # Their intent is served by picking the existing entry in the
             # SelectionPanel.
             continue
-        covers = frozenset(ua.covers_step_ids)
+        # De-dup + sort so coverage stays deterministic regardless of how the
+        # caller authored the user-add.
+        covers = sorted(set(ua.covers_step_ids))
         confidence = {sid: "claimed" for sid in covers}
         new_candidates.append(Candidate(
             name=ua.name,
@@ -1012,9 +1143,9 @@ def apply_scope_picks(
         # backend stays permissive).
         original = set(c.covers_step_ids)
         if original:
-            new_covers = frozenset(picked_at & original) or frozenset(picked_at)
+            new_covers = sorted((picked_at & original) or picked_at)
         else:
-            new_covers = frozenset(picked_at)
+            new_covers = sorted(picked_at)
         new_conf = {
             sid: c.coverage_confidence.get(sid, "claimed") for sid in new_covers
         }

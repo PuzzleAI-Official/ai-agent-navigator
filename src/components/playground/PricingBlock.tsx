@@ -1,5 +1,5 @@
 // ============================================================================
-// PricingBlock — Phase 5 structured pricing surface on CandidateCard
+// PricingBlock — structured pricing surface on CandidateCard
 // ============================================================================
 // Renders the candidate's `pricing_breakdown` as:
 //   - a compact header line ("From $29/mo" / "$0.01/call pay-as-you-go" /
@@ -11,9 +11,8 @@
 //     to the cheapest tier's overage)
 //   - source URLs at the bottom so the user can verify the numbers
 //
-// All data comes from Phase 6.5's 4B extraction; until that lands, this
-// component is invisible (CandidateCard only mounts it when
-// pricing_breakdown is non-null).
+// Data comes from the deep-verify 4B extraction. CandidateCard only mounts
+// this component when pricing_breakdown is non-null.
 // ============================================================================
 
 import { useState } from "react";

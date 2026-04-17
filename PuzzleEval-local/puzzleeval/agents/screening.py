@@ -412,12 +412,38 @@ def _verify_single_candidate(
 
     for continuation in range(MAX_CONTINUATIONS + 1):
         try:
+            from puzzleeval.agent_preamble import with_preamble
+            from puzzleeval.config import output_config_for_request
+            _kwargs_verify: dict[str, object] = {}
+            _ocfg = output_config_for_request()
+            if _ocfg:
+                _kwargs_verify["output_config"] = _ocfg
             response = client.messages.create(
                 model=SCREENING_MODEL,
                 max_tokens=VERIFICATION_MAX_TOKENS,
-                system=[{"type": "text", "text": VERIFICATION_SYSTEM_PROMPT}],
+                system=[{"type": "text", "text": with_preamble(VERIFICATION_SYSTEM_PROMPT)}],
                 messages=messages,
                 tools=[WEB_FETCH_TOOL, WEB_SEARCH_TOOL],
+                # Adaptive thinking — Sonnet reasons about which search to run next
+                # and how to interpret pages between tool calls. Same pattern Agent 5
+                # uses; lifts per-candidate verification quality measurably.
+                thinking={"type": "adaptive"},
+                # Server-side context management — clears old tool results when
+                # context grows past 80K tokens (clear_tool_uses_20250919),
+                # summarizes at 150K (compact_20260112). Mirrors Agent 5's
+                # in-loop strategy. Without this, multi-page-fetch verification
+                # of complex APIs can blow the context window mid-loop.
+                extra_body={
+                    "context_management": {
+                        "edits": [
+                            {
+                                "type": "clear_tool_uses_20250919",
+                                "trigger": {"type": "input_tokens", "value": 80000},
+                            }
+                        ]
+                    }
+                },
+                **_kwargs_verify,
             )
 
         # [error handling] Per-candidate failure is graceful — don't kill the pipeline
@@ -569,7 +595,9 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
     Then one final structuring call formats all findings into Agent4Result.
     """
     # ★ CORE LINE 1: Create the API client
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Central factory — 120 s timeout + max_retries=3 (see anthropic_client.py).
+    from puzzleeval.anthropic_client import build_client
+    client = build_client(api_key=ANTHROPIC_API_KEY)
 
     # [logging] Set up logger for this agent
     logger = get_logger("agent_4_screening")
@@ -581,6 +609,93 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
         "candidate_count": len(candidates),
         "max_parallel": MAX_PARALLEL_VERIFICATIONS,
     })
+
+    # ──────────────────────────────────────────────────────────────────
+    # Phase 6.5 deep-verify path (Q1+Q2+Q3 closure):
+    #   - Provider-URL deduplication (multi-scope candidates share one verify)
+    #   - Cross-run memdir cache (skip re-research of recently-verified providers)
+    #   - Scope-aware coverage_confidence (per-candidate verified scopes)
+    #   - Populates new ScreenedCandidate fields (interaction_model,
+    #     user_selectable_params, upstream_provider, sandbox_*, api_spec_path)
+    #
+    # When PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED=0 falls through to the
+    # legacy shallow per-candidate verification path below.
+    # ──────────────────────────────────────────────────────────────────
+    from puzzleeval.config import AGENT4_DEEP_VERIFY_ENABLED
+    if AGENT4_DEEP_VERIFY_ENABLED:
+        try:
+            from pathlib import Path as _DVPath
+            from puzzleeval.deep_verify_runner import run_deep_verify_pass
+            from puzzleeval.schemas import RejectedCandidate
+            scope_roles: dict[str, str] = {}
+            workflow = getattr(input_data.user_understanding, "workflow", None)
+            if workflow and getattr(workflow, "steps", None):
+                scope_roles = {s.id: s.role for s in workflow.steps}
+            sandbox_root = _DVPath("runs") / input_data.trace_id / "agent4_specs"
+            verified, rejected_candidates, telem = run_deep_verify_pass(
+                client=client,
+                candidates=candidates,
+                scope_roles=scope_roles,
+                trace_id=input_data.trace_id,
+                sandbox_root=sandbox_root,
+            )
+            logger.info("deep_verify pass complete", extra={
+                "operation": "agent4_deep_verify_complete",
+                "trace_id": input_data.trace_id,
+                **telem,
+            })
+            # Build the Agent4Result directly without going through the
+            # legacy structuring call. The deep-verify path produces
+            # ScreenedCandidate instances with all enrichment fields populated;
+            # we just need to assemble RejectedCandidate / FailedToVerify lists.
+            rejected_list = [
+                RejectedCandidate(
+                    name=c.name,
+                    provider=c.provider,
+                    rejection_reason="deep_verify could not confirm public API access",
+                    rejection_category="docs_inaccessible",
+                    investigation_notes=(
+                        "Deep-verify directed loop did not produce a PASS decision. "
+                        "Either the docs URL was unreachable, the API does not exist, "
+                        "or the spec extraction failed. See agent4_specs/ for any partial spec."
+                    ),
+                )
+                for c in rejected_candidates
+            ]
+            scope_selections: dict[str, list[str]] = {}
+            for sc in verified:
+                for sid in sc.covers_step_ids:
+                    scope_selections.setdefault(sid, []).append(sc.name)
+            return Agent4Result(
+                validated_candidates=verified,
+                rejected_candidates=rejected_list,
+                screening_summary=(
+                    f"Deep-verify: {len(verified)} candidates passed across "
+                    f"{telem['groups']} URL group(s) "
+                    f"({telem['cache_hits']} cache hits, "
+                    f"{telem['cache_misses']} fresh). "
+                    f"Cost: ${telem['total_cost_usd']:.2f}."
+                ),
+                total_candidates_screened=len(candidates),
+                cost_usd=round(telem["total_cost_usd"], 4),
+                web_fetch_blocks=telem["total_web_fetch_blocks"],
+                failed_to_verify=[],
+                scope_selections=scope_selections,
+            )
+        except Exception as exc:
+            # Defensive: if anything in the deep-verify path crashes, fall
+            # back to the legacy shallow verification rather than failing
+            # the whole pipeline. The frontend still gets results; the
+            # warning surfaces in logs for follow-up.
+            logger.warning(
+                "deep_verify pass failed; falling back to shallow verification",
+                extra={
+                    "operation": "agent4_deep_verify_fallback",
+                    "trace_id": input_data.trace_id,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                },
+            )
 
     # ======================================================================
     # STEP 1: Per-Candidate Verification (N PARALLEL isolated API calls)
@@ -682,14 +797,22 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
 Structure these findings into the required JSON format. Every candidate must appear in either validated_candidates or rejected_candidates."""
 
     # ★ CORE: Call Claude with structured output to format findings
+    # Wrapped in parse_with_fallback for the same grammar-budget reason as
+    # Agents 1 / 2 — Agent4Result includes ScreenedCandidate[] with deep
+    # enrichment fields and can hit Anthropic's compiled-grammar size cap.
     step2_start = time.time()
     try:
-        structure_response = client.messages.parse(
+        from puzzleeval.agent_preamble import with_preamble
+        from puzzleeval.structured_output import parse_with_fallback
+        structure_response = parse_with_fallback(
+            client=client,
             model=DEFAULT_MODEL,
             max_tokens=STRUCTURE_MAX_TOKENS,
-            system=[{"type": "text", "text": STRUCTURE_SYSTEM_PROMPT}],
+            system=[{"type": "text", "text": with_preamble(STRUCTURE_SYSTEM_PROMPT)}],
             messages=[{"role": "user", "content": structure_message}],
             output_format=Agent4Result,
+            extra={},
+            trace_id=input_data.trace_id,
         )
 
     # [error handling] Structuring failures are fatal — we need the final output

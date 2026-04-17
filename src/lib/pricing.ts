@@ -6,9 +6,9 @@
 // backend. Kept intentionally literal with the Python implementation so
 // behavior stays in sync — any change here should land in pricing.py too.
 //
-// All functions accept `null | undefined` breakdowns gracefully because
-// Phase 5a ships the UI scaffold BEFORE Phase 6.5 populates data; every
-// call site needs a null-safe path.
+// All functions accept `null | undefined` breakdowns gracefully — the
+// deep-verify pass may not have populated pricing for every candidate,
+// so every call site needs a null-safe path.
 // ============================================================================
 
 import type { PricingBreakdown, PricingTier } from "@/types/pipeline";

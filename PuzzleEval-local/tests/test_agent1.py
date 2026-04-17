@@ -131,9 +131,34 @@ class TestFileParsers:
         finally:
             os.unlink(txt_path)
 
-    def test_unsupported_format_raises_error(self):
-        with pytest.raises(AgentFileParseError, match="Unsupported file format"):
-            parse_file("document.exe")
+    def test_unknown_extension_returns_file_reference(self):
+        """Generalized: unknown extensions no longer raise — they return
+        a structured file_reference text. Keeps the pipeline domain-agnostic
+        so audio/video/archive/binary all flow through one path."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".whatever", delete=False) as f:
+            f.write(b"binary data")
+            path = f.name
+        try:
+            result = parse_file(path)
+            assert isinstance(result, str)
+            assert "path:" in result
+            assert path in result
+        finally:
+            os.unlink(path)
+
+    def test_audio_file_returns_file_reference(self):
+        """Audio extension passes through with the right media_type."""
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            f.write(b"id3 tag bytes")
+            path = f.name
+        try:
+            result = parse_file(path)
+            assert "audio/mpeg" in result
+            assert path in result
+        finally:
+            os.unlink(path)
 
     def test_missing_file_raises_error(self):
         with pytest.raises(AgentFileParseError, match="not found"):

@@ -1,13 +1,11 @@
-import asyncio
+import logging
 
 from fastapi import APIRouter, HTTPException
 
 from models.api_models import (
     CancelRunResponse,
-    CandidateOut,
     CreateRunRequest,
     CreateRunResponse,
-    PipelineProgressOut,
     Quota,
     RunStateOut,
     SelectCandidatesRequest,
@@ -15,8 +13,8 @@ from models.api_models import (
 )
 from services.billing import quota_snapshot
 from services.run_manager import run_manager
-from services.pipeline_runner import run_pipeline
 
+logger = logging.getLogger("puzzleeval.routes.runs")
 router = APIRouter()
 
 
@@ -169,3 +167,58 @@ async def cancel_run(run_id: str):
     if not success:
         raise HTTPException(status_code=404, detail="Run not found")
     return CancelRunResponse(cancelled=True)
+
+
+@router.get("/runs/{run_id}/report")
+async def get_report(run_id: str):
+    """Return the final EvaluationReport assembled at pipeline-completion.
+
+    Two paths produce the report:
+      1. The pipeline runner persists ``runs/<trace_id>/evaluation_report.json``
+         once Agent 5 finishes. We try this first — it's the authoritative
+         artifact and matches what the SSE ``evaluation_report`` event carried.
+      2. If the file doesn't exist (run still in flight, or pre-report-feature
+         legacy run), assemble on demand from the in-memory state. The result
+         is the same shape so callers don't branch.
+
+    Always returns 404 when the run itself doesn't exist; never returns a
+    half-assembled report (assembler tolerates partial inputs and emits
+    advisories for missing pieces).
+    """
+    state = run_manager.get_run(run_id)
+    if not state:
+        raise HTTPException(status_code=404, detail="Run not found")
+
+    # Path 1: read the persisted artifact.
+    import json
+    from pathlib import Path
+    runs_root = Path(__file__).resolve().parent.parent / "runs" / state.trace_id
+    report_path = runs_root / "evaluation_report.json"
+    if report_path.exists():
+        try:
+            return json.loads(report_path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            # Fall through to on-demand assembly if the file is corrupt.
+            logger.warning(
+                "GET /runs/%s/report: failed to read persisted file: %s",
+                run_id, exc,
+            )
+
+    # Path 2: assemble on demand. Tolerates partial state.
+    from puzzleeval.report import assemble_report, report_to_dict
+    try:
+        report = assemble_report(
+            run_id=state.run_id,
+            trace_id=state.trace_id,
+            agent1_result=state.agent1_result,
+            agent2_result=state.agent2_result,
+            agent4_result=state.agent4_result,
+            agent5_result=state.agent5_result,
+            total_cost_usd=state.total_cost_usd,
+        )
+        return report_to_dict(report)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(
+            status_code=500,
+            detail=f"Report assembly failed: {exc}",
+        )

@@ -20,7 +20,7 @@
 // (e.g., when the panel grows as candidate cards arrive beneath).
 //
 // Behavior:
-//   - `blueprint === null` → renders nothing (pre-Phase-3 fallback).
+//   - `blueprint === null` → renders nothing (no blueprint available).
 //   - `blueprint.steps.length === 1` → single node, no edges (still shown
 //     so the user can sanity-check Agent 1's interpretation).
 //   - Multi-step linear chain → N layers of 1 node each (same visual

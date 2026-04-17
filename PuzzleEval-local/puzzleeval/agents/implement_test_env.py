@@ -30,6 +30,7 @@ from puzzleeval.config import (
     AGENT6_PASS_THRESHOLD,
     AGENT6_RATE_LIMIT_BACKOFF,
     AGENT6_TEST_TIMEOUT,
+    AGENT6_TEST_TIMEOUT_LONG,
     ANTHROPIC_API_KEY,
     ENABLE_FETCH_FALLBACK,
     MODEL_PRICING,
@@ -43,7 +44,6 @@ from puzzleeval.schemas import (
     Agent5Result,
     CandidateTestRun,
     CriterionScore,
-    CriterionScoreOutput,
     EvaluationBatchResult,
     FailedCandidateRun,
     FailedHarness,
@@ -73,6 +73,242 @@ from puzzleeval.web_fetch_fallback import (
 # decides when to search for more docs, when to write code, when to test,
 # and when it's done.
 # ============================================================================
+
+# Local helper — wires the shared cross-cutting preamble (parallel tool use,
+# no narration, reason about errors, verify against source, commit and
+# course-correct) onto each system prompt. Defined here to avoid an
+# import-time cycle when implement_test_env is partially imported by tests.
+def _with_shared_preamble(prompt: str) -> str:
+    from puzzleeval.agent_preamble import with_preamble
+    return with_preamble(prompt)
+
+
+def _format_modality_context_for_builder(input_data: "Agent5Input") -> str:
+    """Tell the builder which tool plugins will evaluate its harness output.
+
+    When the test cases declare audio_content / code / conversation /
+    media_url modalities, the modality detector identifies the plugin
+    that will run during evaluation. Naming the plugin in the builder
+    prompt makes the builder ACT on the contract — e.g. "your harness
+    must return an audio URL or path the transcription plugin can
+    download" instead of guessing the response shape.
+    """
+    try:
+        from puzzleeval.modality import detect_for_test_case
+        from puzzleeval.tool_plugins import list_plugins
+    except Exception:
+        return ""
+
+    pairs: set[tuple[str, str]] = set()
+    for tc in input_data.test_cases.test_cases:
+        pairs.add((tc.input_type, tc.output_type))
+    if not pairs:
+        return ""
+
+    available_plugins = ", ".join(p.name for p in list_plugins())
+    lines: list[str] = ["", "## Modality plugins active for this run", ""]
+    lines.append(f"Available plugins in registry: {available_plugins}.")
+    for input_type, output_type in sorted(pairs):
+        reqs = detect_for_test_case(input_type=input_type, output_type=output_type)
+        synth_names = [p.name for p in reqs.input_synthesizers]
+        eval_names = [p.name for p in reqs.output_evaluators]
+        lines.append(
+            f"- ({input_type} → {output_type}): "
+            f"input_synthesizers={synth_names or 'none'}, "
+            f"output_evaluators={eval_names or 'none (LLM judge fallback)'}"
+        )
+        if reqs.unavailable:
+            for plugin_name, reason in reqs.unavailable:
+                lines.append(f"    UNAVAILABLE — {plugin_name}: {reason}")
+    lines.append("")
+    lines.append(
+        "If your harness returns audio (path or URL), the transcription "
+        "plugin will STT it and compare to expected text. If it returns "
+        "code, the code_execution plugin will run it. If it returns an "
+        "image URL, the vision plugin will judge it. Match your response "
+        "shape to the plugin's expected input — that's the contract."
+    )
+    return "\n".join(lines)
+
+
+def _format_atlas_context_for_builder(candidate: ScreenedCandidate) -> str:
+    """Format the structured ScreenedCandidate enrichment fields (sandbox,
+    interaction model, upstream provider, openapi URL, user-selectable
+    params) into a builder-readable context block.
+
+    Phase 6.5's deep-verify produces these fields but the builder
+    historically didn't see them in its initial message — so the builder
+    re-discovered everything via web research. This block ensures the
+    builder ACTS on what we already know:
+
+      - sandbox available → use the sandbox base URL during tests
+      - async_polling     → emit poll helper, set longer timeouts
+      - sse_streaming     → emit stream consumer
+      - openapi_url       → fetch and parse spec for endpoint exactness
+      - user_selectable_params → build tests that exercise the knobs
+    """
+    sections: list[str] = []
+
+    interaction = getattr(candidate, "interaction_model", None)
+    if interaction is not None:
+        active_modes = []
+        for flag in ("synchronous", "async_polling", "webhook_callback",
+                     "sse_streaming", "batch_file", "event_subscription"):
+            if getattr(interaction, flag, False):
+                active_modes.append(flag)
+        if active_modes:
+            sections.append(
+                "### Interaction model (from Phase 6.5 deep-verify)\n"
+                "- Active delivery modes: " + ", ".join(active_modes) + "\n"
+                + (
+                    "- This API uses async/long-running operations. Your harness "
+                    "MUST implement a polling loop or stream consumer; do not "
+                    "treat the first response as the final result. Use a longer "
+                    "timeout (5-10 min) for end-to-end test calls.\n"
+                    if any(m in active_modes for m in ("async_polling", "batch_file", "sse_streaming"))
+                    else ""
+                )
+                + (
+                    f"- Notes: {interaction.notes}\n" if getattr(interaction, "notes", "") else ""
+                )
+            )
+
+    if getattr(candidate, "sandbox_available", False):
+        sandbox_url = getattr(candidate, "sandbox_docs_url", None) or "(sandbox docs not captured)"
+        sections.append(
+            "### Sandbox available\n"
+            f"- This provider has a documented sandbox / test mode at: {sandbox_url}\n"
+            "- PREFER the sandbox base URL during testing — write_only/destructive "
+            "calls will not touch real customer data. The sandbox usually accepts "
+            "the same auth keys (or a separate test-key prefix like sk_test_*).\n"
+        )
+
+    upstream = getattr(candidate, "upstream_provider", None)
+    if upstream:
+        sections.append(
+            f"### Upstream provider\n- This API wraps `{upstream}`. Rate-limit "
+            "headroom is shared with every other candidate that wraps the same "
+            "upstream — keep test request volume modest.\n"
+        )
+
+    params = getattr(candidate, "user_selectable_params", None) or []
+    if params:
+        param_lines = "\n".join(
+            f"  - {p.name} ({p.allowed_values}): default {p.default or 'unset'}"
+            for p in params[:8]
+        )
+        sections.append(
+            "### User-selectable params (from atlas)\n"
+            f"{param_lines}\n"
+            "- These are the call-level knobs the API exposes. Your harness "
+            "should accept them via input_data so future test cases can "
+            "exercise different combinations.\n"
+        )
+
+    spec_path = getattr(candidate, "api_spec_path", None)
+    if spec_path:
+        sections.append(
+            f"### Pre-extracted spec available\n- File: {spec_path}\n"
+            "- Read this BEFORE doing any web fetches. It contains the "
+            "exhaustive endpoint inventory, auth modes, request/response "
+            "shapes, code examples, error codes, and (when present) the "
+            "openapi_url. If you only need to confirm one detail, read the "
+            "spec; reserve fetches for things the spec doesn't cover.\n"
+        )
+
+    if not sections:
+        return ""
+    return "\n---\n## STRUCTURED CONTEXT FROM PHASE 6.5\n\n" + "\n".join(sections)
+
+
+def _adaptive_test_timeout(harness) -> int:
+    """Pick the right test-case subprocess timeout for this harness.
+
+    Uses the LONG timeout when the candidate's atlas declared
+    async_polling or batch_file delivery — those operations regularly
+    exceed the 120s baseline (video encoding, ML inference queue, batch
+    document processing). Falls back to baseline for sync APIs.
+    """
+    spec_path = getattr(harness, "api_spec_path", None)
+    if not spec_path:
+        return AGENT6_TEST_TIMEOUT
+    p = Path(spec_path)
+    if not p.exists() or p.suffix != ".json":
+        return AGENT6_TEST_TIMEOUT
+    try:
+        atlas = json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return AGENT6_TEST_TIMEOUT
+    modes = {m.lower() for m in (atlas.get("interaction_modes") or [])}
+    if "async_polling" in modes or "batch_file" in modes or "polling" in modes:
+        return AGENT6_TEST_TIMEOUT_LONG
+    return AGENT6_TEST_TIMEOUT
+
+
+def _try_openapi_fastpath(
+    candidate, sandbox_dir, logger, trace_id: str
+) -> str | None:
+    """Q4b: when the candidate's atlas carries an openapi_url, generate
+    the harness mechanically and skip the LLM build loop entirely.
+
+    Returns the harness.py source on success, None on any failure
+    (no atlas, no openapi_url, fetch failed, no matching operation).
+    """
+    spec_path = getattr(candidate, "api_spec_path", None)
+    if not spec_path:
+        return None
+    p = Path(spec_path)
+    if not p.exists() or p.suffix != ".json":
+        return None
+    try:
+        atlas_data = json.loads(p.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.debug("openapi-fastpath: atlas read failed: %s", exc)
+        return None
+    openapi_url = atlas_data.get("openapi_url")
+    if not openapi_url:
+        return None
+    role = ""
+    covered = list(getattr(candidate, "covers_step_ids", []) or [])
+    if covered and atlas_data.get("endpoints"):
+        # Use the first scope's role hint from atlas endpoints when present
+        for ep in atlas_data["endpoints"]:
+            hints = ep.get("scope_hints") or []
+            if hints:
+                role = hints[0]
+                break
+    if not role:
+        # Fall back to the candidate's relevant_subtasks / claimed_capabilities
+        if getattr(candidate, "claimed_capabilities", None):
+            role = candidate.claimed_capabilities[0]
+        elif getattr(candidate, "relevant_subtasks", None):
+            role = candidate.relevant_subtasks[0]
+    try:
+        from puzzleeval.openapi_harness import generate_harness_for_candidate
+        return generate_harness_for_candidate(
+            openapi_url=openapi_url,
+            role=role,
+            candidate_name=candidate.name,
+            provider=candidate.provider,
+            server_fallback=(atlas_data.get("base_urls") or [None])[0],
+        )
+    except Exception as exc:
+        logger.debug("openapi-fastpath: generate crashed: %s", exc)
+        return None
+
+
+def _with_builder_appendix(prompt: str) -> str:
+    """Append the universal API-pattern catalog and live-test battery to
+    the builder system prompt. These two appendices give the builder
+    explicit knowledge of common patterns (so it doesn't rediscover REST
+    + Bearer / multipart / async polling on every harness) and a clear
+    pre-HARNESS_COMPLETE checklist."""
+    from puzzleeval.api_patterns import (
+        API_PATTERNS_CATALOG,
+        LIVE_TEST_BATTERY_PROMPT,
+    )
+    return prompt + "\n\n---\n" + API_PATTERNS_CATALOG + "\n\n---\n" + LIVE_TEST_BATTERY_PROMPT
+
 
 BUILDER_SYSTEM_PROMPT = """You have access to an `advisor` tool backed by a stronger reviewer model. It takes NO parameters -- when you call advisor(), your entire conversation history is automatically forwarded.
 
@@ -627,6 +863,49 @@ ADVISOR_TOOL = {
 # All tools passed to the API — server tools + custom tools + advisor
 ALL_TOOLS = [WEB_FETCH_TOOL, WEB_SEARCH_TOOL, ADVISOR_TOOL, WRITE_FILE_TOOL, PATCH_FILE_TOOL, RUN_CODE_TOOL, READ_FILE_TOOL, ASK_RESEARCH_TOOL]
 
+
+def _build_tools_with_programmatic(base_tools: list[dict]) -> list[dict]:
+    """Adapt the tool list to enable Anthropic programmatic tool calling.
+
+    When PUZZLEEVAL_PROGRAMMATIC_TOOLS=1, Claude can write Python that
+    chains multiple custom-tool invocations in a single code_execution
+    container. This compresses 5-10 sampling round-trips into 1, cutting
+    cost and latency on multi-step build/debug cycles.
+
+    The adaptation:
+      - Adds a `code_execution_20260120` tool to the list
+      - Marks every CUSTOM tool with `allowed_callers=["direct",
+        "code_execution_20260120"]` so Claude can call them either way
+      - Server tools (web_fetch, web_search, advisor) stay direct-only
+        because they execute on Anthropic's infrastructure already
+
+    When the flag is off, returns the input list unchanged.
+    """
+    from puzzleeval.config import PROGRAMMATIC_TOOLS_ENABLED
+    if not PROGRAMMATIC_TOOLS_ENABLED:
+        return base_tools
+
+    out: list[dict] = []
+    for t in base_tools:
+        # Server tools have a `type` field starting with one of the known
+        # server-tool prefixes. They cannot be called programmatically.
+        ttype = t.get("type", "")
+        if ttype.startswith(("web_fetch_", "web_search_", "advisor")):
+            out.append(t)
+            continue
+        # Custom tools — clone and add allowed_callers
+        adapted = dict(t)
+        adapted["allowed_callers"] = ["direct", "code_execution_20260120"]
+        out.append(adapted)
+
+    # Add the code_execution tool so Claude can write Python that chains
+    # the custom tools above
+    out.append({
+        "type": "code_execution_20260120",
+        "name": "code_execution",
+    })
+    return out
+
 # Custom tool names — used to identify which tool_use blocks need local dispatch
 CUSTOM_TOOL_NAMES = {"write_file", "patch_file", "run_code", "read_file", "ask_research"}
 
@@ -1148,17 +1427,23 @@ def _run_targeted_research(
             # Sonnet for research — handles web search/fetch cheaply.
             # No advisor here — the main builder loop has advisor for
             # strategic guidance. ask_research is for targeted fact-finding.
+            from puzzleeval.config import output_config_for_request
+            _kwargs_research_sub: dict[str, object] = {}
+            _ocfg = output_config_for_request()
+            if _ocfg:
+                _kwargs_research_sub["output_config"] = _ocfg
             response = client.beta.messages.create(
                 model=RESEARCH_MODEL,
                 max_tokens=4096,
                 betas=["context-management-2025-06-27"],
-                system=[{"type": "text", "text": TARGETED_RESEARCH_SYSTEM}],
+                system=[{"type": "text", "text": _with_shared_preamble(TARGETED_RESEARCH_SYSTEM)}],
                 messages=messages,
                 tools=[
                     {"type": "web_search_20250305", "name": "web_search", "max_uses": 2},
                     {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 2, "max_content_tokens": 15000},
                 ],
                 thinking={"type": "adaptive"},
+                **_kwargs_research_sub,
             )
         except (anthropic.RateLimitError, anthropic.APIConnectionError,
                 anthropic.APIStatusError, anthropic.BadRequestError) as e:
@@ -1316,6 +1601,8 @@ Use `{provider_slug}_API_KEY` as the environment variable name for the API key.
 a MODEL_ID variable typically means a newer API version that uses model UUIDs. Make sure
 your harness reads ALL of these variables and uses the correct API version that matches them.
 {registry_notes}
+{_format_atlas_context_for_builder(candidate)}
+{_format_modality_context_for_builder(input_data)}
 ---
 
 Start by fetching the API docs URL to understand the exact endpoints, authentication flow,
@@ -1377,6 +1664,67 @@ def _build_single_harness(
     staged_test_cases = _stage_test_files(
         input_data.test_cases.test_cases, sandbox_dir, logger, trace_id,
     )
+
+    # ──────────────────────────────────────────────────────────────────
+    # Q4b: OpenAPI auto-generation fast path. If the candidate's atlas
+    # carries an openapi_url, generate the harness mechanically — no LLM
+    # build turns. The build loop only runs when this fast path fails
+    # (no openapi spec, or no operation matched the role).
+    # ──────────────────────────────────────────────────────────────────
+    openapi_harness_text = _try_openapi_fastpath(candidate, sandbox_dir, logger, trace_id)
+    if openapi_harness_text:
+        # Write the generated harness + a tiny smoke test, prepare requirements.txt,
+        # and return a TestHarness without ever invoking the builder loop.
+        try:
+            (sandbox_dir / "harness.py").write_text(openapi_harness_text, encoding="utf-8")
+            (sandbox_dir / "requirements.txt").write_text("requests\n", encoding="utf-8")
+            (sandbox_dir / "smoke_test.py").write_text(
+                "from harness import run\n"
+                "result = run({'input_data': 'smoke'})\n"
+                "assert isinstance(result, dict)\n"
+                "assert 'success' in result\n"
+                "print('SMOKE OK')\n",
+                encoding="utf-8",
+            )
+            _create_venv(sandbox_dir, logger)
+            logger.info(
+                f"openapi-fastpath: harness generated for {candidate.name} without LLM",
+                extra={
+                    "operation": "openapi_fastpath_success",
+                    "trace_id": trace_id,
+                    "candidate_name": candidate.name,
+                },
+            )
+            if progress_callback:
+                progress_callback("openapi_fastpath_success", {
+                    "candidate_name": candidate.name,
+                })
+            return TestHarness(
+                candidate_name=candidate.name,
+                provider=candidate.provider,
+                harness_dir=str(sandbox_dir),
+                entry_file="harness.py",
+                requirements=["requests"],
+                auth_env_vars=[
+                    f"{re.sub(r'[^A-Z0-9]+', '_', candidate.provider.upper()).strip('_') or 'API'}_API_KEY"
+                ],
+                auth_method=candidate.auth_method or "api_key",
+                harness_code=openapi_harness_text,
+                smoke_test_passed=True,
+                build_turns=0,
+                build_cost_usd=0.0,
+                build_duration_sec=0.0,
+                supported_input_types=["text", "structured_data", "document_content"],
+                supported_output_types=["structured_json"],
+                validation_notes="auto-generated from OpenAPI spec",
+                api_spec_path=candidate.api_spec_path,
+            )
+        except Exception as exc:
+            logger.warning(
+                f"openapi-fastpath: write/setup failed for {candidate.name}: {exc} — "
+                f"falling back to LLM build",
+                extra={"operation": "openapi_fastpath_fallback", "trace_id": trace_id},
+            )
 
     # ★ Create isolated venv for this candidate
     venv_ok = _create_venv(sandbox_dir, logger, trace_id, candidate.name)
@@ -1474,6 +1822,11 @@ def _build_single_harness(
                 # Phase 2 (build): Opus + advisor — strong reasoning for code + debugging
                 # Transition: when api_spec.txt or harness.py is written, switch to Opus
                 current_model = AGENT5_BUILDER_MODEL if api_spec_written else RESEARCH_MODEL
+                from puzzleeval.config import output_config_for_request
+                _kwargs_builder: dict[str, object] = {}
+                _ocfg = output_config_for_request()
+                if _ocfg:
+                    _kwargs_builder["output_config"] = _ocfg
                 response = client.beta.messages.create(
                     model=current_model,
                     max_tokens=current_max_tokens,
@@ -1485,13 +1838,17 @@ def _build_single_harness(
                     cache_control={"type": "ephemeral"},
                     system=[{
                         "type": "text",
-                        "text": BUILDER_SYSTEM_PROMPT.replace(
-                            "__OS_TYPE__",
-                            "Windows" if sys.platform == "win32" else "Linux",
+                        "text": _with_shared_preamble(
+                            _with_builder_appendix(
+                                BUILDER_SYSTEM_PROMPT.replace(
+                                    "__OS_TYPE__",
+                                    "Windows" if sys.platform == "win32" else "Linux",
+                                )
+                            )
                         ),
                     }],
                     messages=messages,
-                    tools=ALL_TOOLS,
+                    tools=_build_tools_with_programmatic(ALL_TOOLS),
                     thinking={"type": "adaptive"},
                     context_management={
                         "edits": [
@@ -1529,6 +1886,7 @@ def _build_single_harness(
                             # on subsequent turns per Anthropic docs.
                         ],
                     },
+                    **_kwargs_builder,
                 )
                 break  # Success — exit retry loop
             except anthropic.BadRequestError as e:
@@ -2200,17 +2558,16 @@ def _build_single_harness(
                         + pattern_hint
                     )
                 else:
-                    # Tier 3: Different approach or fail
+                    # Tier 3: Structured pivot — three different approaches required
+                    from puzzleeval.api_patterns import STRUCTURED_PIVOT_PROMPT
                     reassessment = (
-                        f"\n\n## STRATEGIC REASSESSMENT (Tier 3 — last chance)\n\n"
-                        f"You have been stuck for {total_reassessments} reassessment cycles.\n"
-                        f"**Last error:** {last_errors[:300]}\n\n"
-                        f"Your current approach is NOT working. Choose ONE:\n"
-                        f"(a) Use `ask_research` to find a completely different endpoint, SDK, "
-                        f"or API version — then rebuild with `patch_file`\n"
-                        f"(b) Signal HARNESS_FAILED with a clear explanation of what you tried\n\n"
-                        f"Do NOT try the same approach again.\n"
+                        f"\n\n## STRATEGIC REASSESSMENT (Tier 3 — STRUCTURED PIVOT)\n\n"
+                        f"You have been stuck for {total_reassessments} reassessment cycles "
+                        f"on this harness. Variation-of-the-same-approach has not worked.\n\n"
+                        f"**Last error:** {last_errors[:300]}\n"
                         + pattern_hint
+                        + "\n"
+                        + STRUCTURED_PIVOT_PROMPT
                     )
 
                 messages.append({"role": "user", "content": reassessment})
@@ -2707,11 +3064,16 @@ def _execute_all_tests(
     credentials: dict[str, str] | None,
     logger: logging.Logger,
     trace_id: str,
+    rate_limiter: "GlobalProviderLimiter | None" = None,
+    upstream_provider: str | None = None,
 ) -> list[tuple[TestCase, dict]]:
     """
     Execute all test cases in randomized order with rate limiting.
     Returns list of (test_case, harness_result) tuples.
     Early aborts if error rate exceeds threshold.
+
+    When ``rate_limiter`` is provided (Gap 13/25), each test call waits on
+    the per-candidate bucket AND the per-upstream bucket before firing.
     """
     shuffled = list(test_cases)
     random.shuffle(shuffled)
@@ -2722,8 +3084,23 @@ def _execute_all_tests(
     for i, tc in enumerate(shuffled):
         adapted = _adapt_test_input(tc, harness)
 
+        # Gap 13 + 25: pace calls to respect per-candidate and upstream limits
+        if rate_limiter is not None:
+            waited = rate_limiter.acquire(harness.candidate_name, upstream_provider)
+            if waited > 0.5:
+                logger.info(
+                    f"rate_limiter waited {waited:.2f}s for {harness.candidate_name}",
+                    extra={
+                        "operation": "rate_limit_wait",
+                        "trace_id": trace_id,
+                        "candidate_name": harness.candidate_name,
+                        "wait_seconds": waited,
+                        "upstream_provider": upstream_provider,
+                    },
+                )
+
         result = _execute_single_test(
-            sandbox_dir, adapted, credentials, AGENT6_TEST_TIMEOUT
+            sandbox_dir, adapted, credentials, _adaptive_test_timeout(harness)
         )
 
         if not result["success"] and _is_rate_limit_error(result.get("error")):
@@ -2732,6 +3109,8 @@ def _execute_all_tests(
                 extra={"operation": "rate_limit_backoff", "trace_id": trace_id},
             )
             time.sleep(AGENT6_RATE_LIMIT_BACKOFF)
+            if rate_limiter is not None:
+                rate_limiter.acquire(harness.candidate_name, upstream_provider)
             result = _execute_single_test(
                 sandbox_dir, adapted, credentials, AGENT6_TEST_TIMEOUT
             )
@@ -2760,7 +3139,8 @@ def _execute_all_tests(
             )
             break
 
-        if i < len(shuffled) - 1:
+        if i < len(shuffled) - 1 and rate_limiter is None:
+            # Only apply the blind 0.5s sleep when no smart limiter is active
             time.sleep(0.5)
 
     return results
@@ -2992,12 +3372,16 @@ def _evaluate_with_llm(
 
     for attempt in range(2):
         try:
-            response = client.messages.parse(
+            from puzzleeval.structured_output import parse_with_fallback
+            response = parse_with_fallback(
+                client=client,
                 model=AGENT6_EVAL_MODEL,
                 max_tokens=AGENT6_EVAL_MAX_TOKENS,
-                system=EVALUATION_SYSTEM_PROMPT,
+                system=_with_shared_preamble(EVALUATION_SYSTEM_PROMPT),
                 messages=[{"role": "user", "content": prompt}],
                 output_format=EvaluationBatchResult,
+                extra={},
+                trace_id=trace_id,
             )
             cost += _calculate_call_cost(response, AGENT6_EVAL_MODEL)
 
@@ -3142,6 +3526,89 @@ def _compute_aggregate_metrics(
     }
 
 
+def _needs_plugin_synthesis(tc: TestCase) -> bool:
+    """Test cases for special modalities that didn't ship with file/payload
+    can be filled in by the plugin synthesizers (TTS for audio,
+    conversation_simulator for chat scripts, code_execution for code seeds)."""
+    if tc.test_file_path:
+        return False
+    if tc.input_data and tc.input_type not in {"audio_content"}:
+        # When input_data is already populated, plugin synthesis is only
+        # needed for audio (synthesize a real audio file from the text).
+        return False
+    return tc.input_type in {"audio_content", "conversation", "code"}
+
+
+def _synthesize_test_input_via_plugin(
+    tc: TestCase,
+    sandbox_dir: Path,
+    logger: logging.Logger,
+    trace_id: str,
+) -> TestCase:
+    """Try to synthesize this test case's input via a registered plugin.
+
+    Returns the test case unchanged when no plugin is available or the
+    synthesis failed — callers handle missing input downstream
+    (e.g., file_required tests already have the Gap 3 fallback).
+    """
+    from puzzleeval.tool_plugins import find_plugins_for_input_type
+    candidates_plugins = [
+        p for p in find_plugins_for_input_type(tc.input_type)
+        if p.capabilities().synthesizes_input
+    ]
+    if not candidates_plugins:
+        return tc
+    # Prefer TTS for audio_content, conversation_simulator for conversation,
+    # code_execution for code. Take the first available.
+    plugin = None
+    for p in candidates_plugins:
+        ok, _ = p.is_available()
+        if ok:
+            plugin = p
+            break
+    if plugin is None:
+        logger.info(
+            f"No available synthesizer plugin for {tc.input_type} on {tc.id}",
+            extra={"operation": "synthesis_unavailable", "trace_id": trace_id,
+                   "candidates": [p.name for p in candidates_plugins]},
+        )
+        return tc
+    try:
+        result = plugin.synthesize_input(
+            scope_role=tc.sub_task_ref,
+            ground_truth_hint=tc.input_data or None,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"Plugin {plugin.name} synthesis failed for {tc.id}: {exc}",
+            extra={"operation": "synthesis_crash", "trace_id": trace_id},
+        )
+        return tc
+    tc_dict = tc.model_dump()
+    if result.file_path:
+        tc_dict["test_file_path"] = result.file_path
+        # Promote the synthesized file's expected text into expected_output
+        # when the caller didn't already set one.
+        if not tc.expected_output and "text" in result.ground_truth:
+            tc_dict["expected_output"] = result.ground_truth["text"]
+    if result.inline_data:
+        # Inline payloads (conversation scripts, code prompts) flow through
+        # input_data so the harness sees them. We serialize as JSON for
+        # transport — the harness will decode based on input_type.
+        import json as _json
+        try:
+            tc_dict["input_data"] = _json.dumps(result.inline_data)
+        except (TypeError, ValueError):
+            pass
+    logger.info(
+        f"Plugin {plugin.name} synthesized input for {tc.id}",
+        extra={"operation": "synthesis_complete", "trace_id": trace_id,
+               "plugin": plugin.name, "file_path": result.file_path,
+               "has_inline": bool(result.inline_data)},
+    )
+    return TestCase(**tc_dict)
+
+
 def _stage_test_files(
     test_cases: list[TestCase],
     sandbox_dir: Path,
@@ -3194,6 +3661,12 @@ def _stage_test_files(
                     extra={"operation": "stage_test_file_missing", "trace_id": trace_id},
                 )
                 staged.append(tc)
+        elif _needs_plugin_synthesis(tc):
+            # Plugin dispatch: this test case wants a modality-specific
+            # input (audio, code prompt, multi-turn script) that no file
+            # path was provided for. Try the registered synthesizer plugin.
+            synthesized = _synthesize_test_input_via_plugin(tc, sandbox_dir, logger, trace_id)
+            staged.append(synthesized)
         else:
             staged.append(tc)
 
@@ -3229,7 +3702,12 @@ def run_implement_test_env_agent(
     Returns Agent5Result with successfully built harnesses and failures.
     """
     # ★ CORE LINE 1: Create the API client
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Agent 5 builder loop runs for several minutes per candidate with deep
+    # adaptive thinking — extend the per-call timeout to 240 s so a single
+    # long Opus thinking turn doesn't trip the default. max_retries=3 still
+    # bounds total time and covers transient 5xx / connection drops.
+    from puzzleeval.anthropic_client import build_client
+    client = build_client(api_key=ANTHROPIC_API_KEY, timeout=240)
 
     # [logging]
     logger = get_logger("agent_5_implement")
@@ -3381,10 +3859,104 @@ def run_implement_test_env_agent(
         else:
             failed.append(result)
 
+    # ──────────────────────────────────────────────────────────────────
+    # Q4: Build-failure fallback. When EVERY user-selected candidate failed,
+    # pull next-ranked verified candidates that the user did NOT pick and
+    # try them. Guarantees the user gets at least one testable environment
+    # back instead of a hard "Zero harnesses" failure.
+    # ──────────────────────────────────────────────────────────────────
+    from puzzleeval.config import AGENT5_FALLBACK_ENABLED, AGENT5_FALLBACK_MAX
+    if (
+        AGENT5_FALLBACK_ENABLED
+        and len(harnesses) == 0
+        and AGENT5_FALLBACK_MAX > 0
+    ):
+        picked_names = {c.name.strip().lower() for c in candidates}
+        fallback_pool = [
+            c for c in input_data.validated_candidates
+            if c.name.strip().lower() not in picked_names
+        ]
+        # Rank fallback pool by relevance score; ties broken by adoption_difficulty
+        # ("easy" first — quickest to build).
+        diff_rank = {"easy": 0, "medium": 1, "hard": 2}
+        fallback_pool.sort(
+            key=lambda c: (-c.relevance_score, diff_rank.get(c.adoption_difficulty, 3))
+        )
+        fallback_attempts = fallback_pool[:AGENT5_FALLBACK_MAX]
+        if fallback_attempts:
+            logger.warning(
+                f"All {len(candidates)} selected harnesses failed. "
+                f"Trying {len(fallback_attempts)} fallback candidates from the "
+                f"unselected verified pool.",
+                extra={
+                    "operation": "agent5_fallback_engaged",
+                    "trace_id": input_data.trace_id,
+                    "fallback_names": [c.name for c in fallback_attempts],
+                },
+            )
+            if progress_callback:
+                progress_callback("agent5_fallback_engaged", {
+                    "primary_failures": [c.name for c in candidates],
+                    "fallback_attempts": [c.name for c in fallback_attempts],
+                })
+
+            # Same parallel build pattern as the primary attempt
+            with ThreadPoolExecutor(max_workers=min(AGENT5_MAX_PARALLEL, len(fallback_attempts))) as executor:
+                fb_future_to_idx = {}
+                for j, fb_cand in enumerate(fallback_attempts):
+                    slug = _candidate_slug(fb_cand.name)
+                    fb_sandbox = harness_base / f"_fallback_{slug}"
+                    fb_sandbox.mkdir(parents=True, exist_ok=True)
+                    fb_future = executor.submit(
+                        _build_single_harness, client, fb_cand, input_data, fb_sandbox, logger,
+                        progress_callback=progress_callback,
+                    )
+                    fb_future_to_idx[fb_future] = j
+
+                for fb_future in as_completed(fb_future_to_idx):
+                    j = fb_future_to_idx[fb_future]
+                    fb_name = fallback_attempts[j].name
+                    try:
+                        fb_result = fb_future.result()
+                        if isinstance(fb_result, TestHarness):
+                            fb_result.was_fallback = True
+                            harnesses.append(fb_result)
+                            total_cost += fb_result.build_cost_usd
+                            if progress_callback:
+                                progress_callback("harness_completed", {
+                                    "candidate_name": fb_name,
+                                    "was_fallback": True,
+                                    "build_cost_usd": fb_result.build_cost_usd,
+                                })
+                        else:
+                            # Fallback also failed — record as a failed harness
+                            failed.append(fb_result)
+                    except Exception as exc:
+                        logger.warning(
+                            f"Fallback build crashed for {fb_name}: {exc}",
+                            extra={"operation": "agent5_fallback_thread_error", "trace_id": input_data.trace_id},
+                        )
+                        failed.append(FailedHarness(
+                            candidate_name=fb_name,
+                            provider=fallback_attempts[j].provider,
+                            failure_reason=f"Fallback build error: {exc}",
+                            failure_category="unknown",
+                            partial_code=None,
+                            turns_attempted=0,
+                            web_fetch_blocks=0,
+                        ))
+            # total_candidates_attempted should reflect the true number of
+            # builds attempted (primary + fallback) so the validator's count
+            # consistency check stays honest.
+            candidates = list(candidates) + fallback_attempts
+
     # Build summary
     summary_parts = [
         f"Built {len(harnesses)}/{len(candidates)} harnesses successfully."
     ]
+    fallback_count = sum(1 for h in harnesses if h.was_fallback)
+    if fallback_count:
+        summary_parts.append(f"({fallback_count} via auto-fallback after primary picks failed.)")
     if failed:
         failure_categories = {}
         for f in failed:
@@ -3421,6 +3993,81 @@ def run_implement_test_env_agent(
             "trace_id": input_data.trace_id,
         })
 
+        # Gap E: Adversarial verification battery (Claude Code-style verification
+        # pass). Run BEFORE Agent 3 cases so a fragile harness is caught and
+        # marked NOT READY rather than silently corrupting domain test results.
+        from puzzleeval.config import ADVERSARIAL_PROBES_ENABLED
+        if ADVERSARIAL_PROBES_ENABLED:
+            from puzzleeval.adversarial_verifier import (
+                run_adversarial_battery,
+                report_to_dict,
+            )
+            for h in list(harnesses_with_sandboxes):
+                # Use the first test case's adapted input as the probe basis;
+                # falls back to a minimal payload if no test cases match.
+                creds = _resolve_candidate_credentials(h, input_data.provider_credentials)
+                sample = None
+                for tc in test_cases:
+                    try:
+                        sample = _adapt_test_input(tc, h)
+                        if isinstance(sample, dict) and sample:
+                            break
+                    except Exception:
+                        continue
+                if not isinstance(sample, dict) or not sample:
+                    sample = {"input_data": "smoke"}
+                try:
+                    report = run_adversarial_battery(
+                        sandbox_dir=Path(h.harness_dir),
+                        sample_input=sample,
+                        credentials=creds,
+                    )
+                    h.adversarial_report = report_to_dict(report)
+                    if not report.harness_ready:
+                        logger.warning(
+                            f"adversarial battery: {h.candidate_name} marked NOT READY",
+                            extra={
+                                "operation": "adversarial_not_ready",
+                                "trace_id": input_data.trace_id,
+                                "candidate_name": h.candidate_name,
+                                "critical_failures": report.critical_failures,
+                            },
+                        )
+                        if progress_callback:
+                            progress_callback("harness_not_ready", {
+                                "candidate_name": h.candidate_name,
+                                "critical_failures": report.critical_failures,
+                            })
+                        # Drop from execution set — the harness will be reported
+                        # as built but not exercised.
+                        harnesses_with_sandboxes.remove(h)
+                except Exception as exc:
+                    logger.warning(
+                        f"adversarial battery error for {h.candidate_name}: {exc}",
+                        extra={"operation": "adversarial_error", "trace_id": input_data.trace_id},
+                    )
+                    # Defensive: record the failure but allow tests to proceed.
+                    h.adversarial_report = {
+                        "harness_ready": True,
+                        "probe_count": 0,
+                        "critical_failures": [],
+                        "warnings": [f"battery error: {exc}"],
+                        "probes": [],
+                    }
+
+        # Gap 13 + Gap 25: one rate limiter shared across candidates so both
+        # per-candidate AND per-upstream buckets pace the whole run.
+        from puzzleeval.rate_limiter import GlobalProviderLimiter
+        rate_limiter = GlobalProviderLimiter()
+        for c in input_data.validated_candidates:
+            rate_limiter.configure_candidate(c.name, c.rate_limit_info)
+
+        # Build candidate -> upstream_provider lookup once
+        upstream_by_name: dict[str, str | None] = {
+            c.name: getattr(c, "upstream_provider", None)
+            for c in input_data.validated_candidates
+        }
+
         def _run_tests_for_candidate(harness):
             """Execute all tests for one candidate. Thread-safe — each candidate
             has its own sandbox, credentials, and API provider."""
@@ -3435,6 +4082,8 @@ def run_implement_test_env_agent(
 
             raw_results = _execute_all_tests(
                 sandbox_dir, staged_test_cases, harness, creds, logger, input_data.trace_id,
+                rate_limiter=rate_limiter,
+                upstream_provider=upstream_by_name.get(harness.candidate_name),
             )
 
             eval_items = []
@@ -3517,9 +4166,166 @@ def run_implement_test_env_agent(
                     passed=False,
                 ))
 
-            # LLM judge evaluates ALL criteria by comparing raw API response
-            # against Agent 3F's ground truth. No mechanical eval needed.
+            # ──────────────────────────────────────────────────────────
+            # Plugin dispatch FIRST — when a test case's modality matches
+            # a registered plugin (audio, code, conversation, image), let
+            # the plugin score it natively. The LLM judge handles whatever
+            # the plugins didn't claim (general text/json) AND any case
+            # where a plugin returned `fallback_reason` (no credential,
+            # crashed, etc.).
+            #
+            # The split keeps the LLM judge's batch payload smaller +
+            # cheaper while routing modality-aware evaluation to the right
+            # tool. tools_used on each TestCaseResult tracks which plugin
+            # (or "llm_judge") scored each case.
+            # ──────────────────────────────────────────────────────────
+            from puzzleeval.modality import detect_for_test_case
+            plugin_handled_ids: set[str] = set()
+            for eval_item in list(eval_items):
+                tc_eval, result_eval, criteria_eval = eval_item
+                reqs = detect_for_test_case(
+                    input_type=tc_eval.input_type,
+                    output_type=tc_eval.output_type,
+                )
+                # First evaluator that claims the modality wins. Plugins
+                # whose is_available() returned False already filtered out
+                # of reqs.output_evaluators by the detector.
+                evaluator = next(iter(reqs.output_evaluators), None)
+                if evaluator is None:
+                    continue
+                # Build a runner closure for plugins that need to drive the
+                # harness (currently conversation_simulator).
+                runner_for_plugin = None
+                if evaluator.name == "conversation_simulator":
+                    creds_for_runner = creds
+                    sandbox_for_runner = sandbox_dir
+                    timeout_for_runner = _adaptive_test_timeout(harness)
+                    def _runner(payload, _sd=sandbox_for_runner, _c=creds_for_runner, _t=timeout_for_runner):
+                        return _execute_single_test(_sd, payload, _c, _t)
+                    runner_for_plugin = _runner
+                try:
+                    verdict = evaluator.evaluate_output(
+                        response=result_eval.get("raw_response") or result_eval.get("output"),
+                        expected=tc_eval.expected_output,
+                        criteria=[
+                            {"criterion": c["criterion"], "weight": c["weight"],
+                             "eval_type": c.get("eval_type", "subjective_quality")}
+                            for c in criteria_eval
+                        ],
+                        harness_runner=runner_for_plugin,
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        f"plugin {evaluator.name} crashed evaluating {tc_eval.id}: {exc}; falling back to LLM judge",
+                        extra={"operation": "plugin_eval_crash", "trace_id": input_data.trace_id},
+                    )
+                    continue
+                if verdict.fallback_reason:
+                    # Plugin couldn't score this one — let the LLM judge handle it.
+                    continue
+                # Convert plugin verdict to per-criterion CriterionScore rows so
+                # the existing weighted-score path keeps working.
+                tcr_target = next(
+                    (t for t in test_case_results if t.test_case_id == tc_eval.id), None,
+                )
+                if tcr_target is None:
+                    continue
+                tcr_target.criteria_scores = [
+                    CriterionScore(
+                        criterion=c["criterion"],
+                        eval_type=c.get("eval_type", "subjective_quality"),
+                        weight=c["weight"],
+                        score=verdict.score,
+                        passed=verdict.passed,
+                        reasoning=verdict.reasoning[:500],
+                    )
+                    for c in criteria_eval
+                ] or [
+                    CriterionScore(
+                        criterion="overall",
+                        eval_type="subjective_quality",
+                        weight=1.0,
+                        score=verdict.score,
+                        passed=verdict.passed,
+                        reasoning=verdict.reasoning[:500],
+                    )
+                ]
+                tcr_target.weighted_score = verdict.score
+                tcr_target.passed = verdict.passed
+                tcr_target.tools_used = (
+                    list(getattr(tcr_target, "tools_used", []) or []) + [evaluator.name]
+                )
+                plugin_handled_ids.add(tc_eval.id)
+                # Drop from eval_items so the LLM judge doesn't double-score
+                eval_items = [
+                    item for item in eval_items if item[0].id != tc_eval.id
+                ]
+
+            # LLM judge handles everything plugins didn't claim.
+            # When PUZZLEEVAL_HYBRID_EVAL_ENABLED=1, the hybrid Claude-picks-plugins
+            # path runs FIRST for these fall-through cases. Whatever it doesn't
+            # confidently score (parse failure, plugin crash, no_plugins_available)
+            # falls through to the legacy LLM judge below.
+            from puzzleeval.config import HYBRID_EVAL_ENABLED
             eval_cost = 0.0
+            if eval_items and HYBRID_EVAL_ENABLED:
+                from puzzleeval.hybrid_evaluator import (
+                    evaluate_with_claude_picked_plugins,
+                )
+                hybrid_handled_ids: set[str] = set()
+                for tc_eval, result_eval, criteria_eval in list(eval_items):
+                    try:
+                        verdict = evaluate_with_claude_picked_plugins(
+                            response=result_eval.get("raw_response") or result_eval.get("output"),
+                            expected=tc_eval.expected_output,
+                            criteria=criteria_eval,
+                            client=client,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            f"hybrid eval crashed for {tc_eval.id}: {exc}",
+                            extra={"operation": "hybrid_eval_crash", "trace_id": input_data.trace_id},
+                        )
+                        continue
+                    if verdict.fallback_reason:
+                        # Couldn't score — let the LLM judge handle it
+                        continue
+                    tcr_target = next(
+                        (t for t in test_case_results if t.test_case_id == tc_eval.id), None,
+                    )
+                    if tcr_target is None:
+                        continue
+                    tcr_target.criteria_scores = [
+                        CriterionScore(
+                            criterion=c["criterion"],
+                            eval_type=c.get("eval_type", "subjective_quality"),
+                            weight=c["weight"],
+                            score=verdict.score,
+                            passed=verdict.passed,
+                            reasoning=verdict.reasoning[:500],
+                        )
+                        for c in criteria_eval
+                    ] or [
+                        CriterionScore(
+                            criterion="overall",
+                            eval_type="subjective_quality",
+                            weight=1.0,
+                            score=verdict.score,
+                            passed=verdict.passed,
+                            reasoning=verdict.reasoning[:500],
+                        )
+                    ]
+                    tcr_target.weighted_score = verdict.score
+                    tcr_target.passed = verdict.passed
+                    used = list(getattr(tcr_target, "tools_used", []) or [])
+                    used.append("hybrid_evaluator")
+                    used.extend(verdict.tools_called)
+                    tcr_target.tools_used = used
+                    hybrid_handled_ids.add(tc_eval.id)
+                eval_items = [
+                    item for item in eval_items if item[0].id not in hybrid_handled_ids
+                ]
+
             if eval_items:
                 llm_scores_map, eval_cost = _evaluate_with_llm(
                     client, eval_items, harness.candidate_name, logger, input_data.trace_id,
@@ -3529,6 +4335,9 @@ def run_implement_test_env_agent(
                         tcr.criteria_scores = llm_scores_map[tcr.test_case_id]
                         tcr.weighted_score = _compute_weighted_score(tcr.criteria_scores)
                         tcr.passed = tcr.weighted_score >= AGENT6_PASS_THRESHOLD
+                        tcr.tools_used = (
+                            list(getattr(tcr, "tools_used", []) or []) + ["llm_judge"]
+                        )
 
             metrics = _compute_aggregate_metrics(test_case_results)
 
@@ -3599,33 +4408,41 @@ def run_implement_test_env_agent(
 
         # Run test execution in parallel — each candidate hits a different API
         # provider, so no cross-candidate rate limit concerns. Same pattern as
-        # the parallel harness builds above.
-        with ThreadPoolExecutor(max_workers=len(harnesses_with_sandboxes)) as executor:
-            futures = {
-                executor.submit(_run_tests_for_candidate, h): h
-                for h in harnesses_with_sandboxes
-            }
-            for future in as_completed(futures):
-                harness = futures[future]
-                try:
-                    run, cost = future.result()
-                    candidate_runs.append(run)
-                    total_test_cost += cost
-                except Exception as e:
-                    logger.error(f"Test execution error for {harness.candidate_name}: {e}", extra={
-                        "operation": "test_execution_error",
-                        "trace_id": input_data.trace_id,
-                    })
-                    failed_test_runs.append(FailedCandidateRun(
-                        candidate_name=harness.candidate_name,
-                        provider=harness.provider,
-                        failure_reason=f"Test execution error: {str(e)[:300]}",
-                        error_rate=1.0,
-                        tests_attempted=0,
-                        tests_errored=0,
-                        sample_errors=[str(e)[:200]],
-                        recovery_attempted=False,
-                    ))
+        # the parallel harness builds above. Adversarial battery may have
+        # filtered the list down — guard against the empty case so we don't
+        # construct a zero-worker pool.
+        if not harnesses_with_sandboxes:
+            logger.info(
+                "All harnesses dropped by adversarial battery; skipping test execution",
+                extra={"operation": "test_execution_skipped_adversarial", "trace_id": input_data.trace_id},
+            )
+        else:
+            with ThreadPoolExecutor(max_workers=len(harnesses_with_sandboxes)) as executor:
+                futures = {
+                    executor.submit(_run_tests_for_candidate, h): h
+                    for h in harnesses_with_sandboxes
+                }
+                for future in as_completed(futures):
+                    harness = futures[future]
+                    try:
+                        run, cost = future.result()
+                        candidate_runs.append(run)
+                        total_test_cost += cost
+                    except Exception as e:
+                        logger.error(f"Test execution error for {harness.candidate_name}: {e}", extra={
+                            "operation": "test_execution_error",
+                            "trace_id": input_data.trace_id,
+                        })
+                        failed_test_runs.append(FailedCandidateRun(
+                            candidate_name=harness.candidate_name,
+                            provider=harness.provider,
+                            failure_reason=f"Test execution error: {str(e)[:300]}",
+                            error_rate=1.0,
+                            tests_attempted=0,
+                            tests_errored=0,
+                            sample_errors=[str(e)[:200]],
+                            recovery_attempted=False,
+                        ))
 
     # Build test execution summary
     test_summary = ""
@@ -3647,6 +4464,27 @@ def run_implement_test_env_agent(
         f.web_fetch_blocks for f in failed
     )
 
+    # Phase 9: post-process flat candidate_runs into per-scope ScopeTestRun list
+    # so Agent5Result.scope_runs reflects the blueprint. build_scope_runs is a
+    # pure function — it reads the already-computed CandidateTestRun objects.
+    scope_runs: list = []
+    try:
+        from puzzleeval.scope_routing import build_scope_runs
+        workflow = getattr(input_data.user_understanding, "workflow", None)
+        test_plan = getattr(input_data.user_understanding, "test_plan", None)
+        scope_runs = build_scope_runs(
+            candidate_runs=candidate_runs,
+            blueprint=workflow,
+            test_cases=test_cases,
+            test_plan=test_plan,
+        )
+    except Exception as exc:
+        logger.warning(
+            f"scope_runs build failed (non-fatal): {exc}",
+            extra={"operation": "scope_runs_build_failed", "trace_id": input_data.trace_id},
+        )
+        scope_runs = []
+
     result = Agent5Result(
         harnesses=harnesses,
         failed_harnesses=failed,
@@ -3659,6 +4497,7 @@ def run_implement_test_env_agent(
         total_test_cost_usd=round(total_test_cost, 4),
         test_execution_summary=test_summary,
         web_fetch_blocks=total_web_fetch_blocks,
+        scope_runs=scope_runs,
     )
 
     logger.info("Agent 5 completed", extra={

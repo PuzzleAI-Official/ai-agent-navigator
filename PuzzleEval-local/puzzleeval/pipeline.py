@@ -22,7 +22,6 @@
 # ============================================================================
 
 import json
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -73,16 +72,16 @@ def _agent2_coverage_metadata(output: BaseModel) -> tuple[tuple[str, Any], ...]:
     if candidates is None:
         return ()
     any_populated = any(
-        bool(getattr(c, "covers_step_ids", frozenset())) for c in candidates
+        bool(getattr(c, "covers_step_ids", []) or []) for c in candidates
     )
     if not any_populated:
         return ()  # Legacy flat flow — skip the Phase 4 block entirely.
     all_populated = all(
-        bool(getattr(c, "covers_step_ids", frozenset())) for c in candidates
+        bool(getattr(c, "covers_step_ids", []) or []) for c in candidates
     )
     all_scopes: set[str] = set()
     for c in candidates:
-        all_scopes.update(getattr(c, "covers_step_ids", frozenset()))
+        all_scopes.update(getattr(c, "covers_step_ids", []) or [])
     return (
         ("phase4_dual_search_active", True),
         ("phase4_scopes_covered_count", len(all_scopes)),
@@ -291,6 +290,22 @@ class PipelineRun:
         }
         if run_metadata:
             summary["metadata"] = run_metadata
+
+        # Plugin readiness snapshot + advisories — surface configuration
+        # gaps so the user knows why audio/code/conversation modalities
+        # may have fallen back to the LLM judge.
+        try:
+            from puzzleeval.plugin_status import (
+                collect_advisories, snapshot_all, to_dict,
+            )
+            snap = snapshot_all()
+            summary["plugins"] = to_dict(snap)
+            advisories = collect_advisories(snap)
+            if advisories:
+                summary["plugin_advisories"] = advisories
+        except Exception:
+            # Defensive — never let plugin status code break finalize()
+            pass
 
         # Write summary
         summary_path = self.run_dir / "pipeline_summary.json"

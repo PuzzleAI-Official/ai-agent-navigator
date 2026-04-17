@@ -134,6 +134,57 @@ GENERATION_MAX_TOKENS = 16384
 # [CORE] Build the file message with content blocks
 # ============================================================================
 
+def _transcribe_audio_for_ground_truth(file_path: str, logger) -> str:
+    """Use the transcription plugin to extract spoken text from an audio file.
+
+    Falls back to a clear "transcription unavailable — no STT provider
+    configured" message when no provider is credentialed; Agent 3F's LLM
+    then knows the file exists but its content can't be inspected, and
+    will generate test cases with that constraint in mind (e.g. "test
+    that the API accepts the file and returns SOMETHING; ground truth
+    can't be verified without STT").
+    """
+    try:
+        from puzzleeval.tool_plugins import get_plugin
+        plugin = get_plugin("transcription")
+        if plugin is None:
+            return "(transcription plugin not registered)"
+        ok, reason = plugin.is_available()
+        if not ok:
+            return (
+                f"(audio transcription unavailable — {reason}; "
+                "ground truth cannot be inspected from the file alone)"
+            )
+        # Drive the plugin's evaluate path with a dummy "expected" so it
+        # just transcribes — the helper exists for evaluation but we reuse
+        # its STT call as a free-standing ground-truth extractor.
+        from puzzleeval.tool_plugins.transcription import (
+            _PROVIDER_DISPATCH, _select_provider,
+        )
+        provider = _select_provider()
+        if provider is None:
+            return "(no STT provider configured)"
+        provider_name, env_vars = provider
+        from pathlib import Path as _P
+        try:
+            transcript = _PROVIDER_DISPATCH[provider_name](
+                _P(file_path), list(env_vars.values())[0],
+            )
+        except Exception as exc:
+            logger.warning(
+                f"audio ground-truth STT failed for {file_path}: {exc}",
+                extra={"operation": "agent3f_stt_failure"},
+            )
+            return f"(STT failed: {exc})"
+        return transcript or "(transcription returned empty text)"
+    except Exception as exc:
+        logger.warning(
+            f"audio ground-truth helper crashed for {file_path}: {exc}",
+            extra={"operation": "agent3f_stt_helper_crash"},
+        )
+        return f"(transcription helper error: {exc})"
+
+
 def _build_file_message(
     user_understanding: UserUnderstandingOutput,
     file_paths: list[str],
@@ -173,14 +224,35 @@ Analyze each file and generate test cases with ground truth.
     content_blocks: list[dict] = [{"type": "text", "text": context_text}]
 
     # Add each file as a content block
+    AUDIO_EXT = {".mp3", ".wav", ".m4a", ".flac", ".ogg", ".aac", ".opus", ".aiff"}
     for i, file_path in enumerate(file_paths):
         filename = os.path.basename(file_path)
+        ext = os.path.splitext(filename)[1].lower()
 
         # Add a label for each file
         content_blocks.append({
             "type": "text",
             "text": f"\n--- File {i + 1}: {filename} (path: {file_path}) ---\n",
         })
+
+        # Audio files: vision can't listen. Use the transcription plugin to
+        # extract the spoken content as ground truth. When no STT provider
+        # is credentialed the plugin returns a fallback message and we tell
+        # the LLM judge what's missing — no crash, no silent skip.
+        if ext in AUDIO_EXT:
+            transcript_text = _transcribe_audio_for_ground_truth(file_path, logger)
+            content_blocks.append({
+                "type": "text",
+                "text": (
+                    f"This is an AUDIO file. Spoken content (transcribed):\n"
+                    f"{transcript_text}\n\n"
+                    f"Generate test cases referencing this file via "
+                    f"test_file_path. Use the transcript above as ground "
+                    f"truth — expected_output should reflect what the API "
+                    f"is supposed to do with this spoken content."
+                ),
+            })
+            continue
 
         try:
             parsed = parse_file(file_path)
@@ -189,7 +261,8 @@ Analyze each file and generate test cases with ground truth.
                 # Binary file (PDF/image) → native content block
                 content_blocks.append(parsed)
             else:
-                # Text file (DOCX/CSV/TXT) → text content block
+                # Text file (DOCX/CSV/TXT) or pass-through (audio/video/binary
+                # other than the audio extensions handled above) → text block
                 content_blocks.append({
                     "type": "text",
                     "text": f"File content:\n{parsed}",
@@ -229,16 +302,33 @@ def run_file_tests_agent(input_data: Agent3Input) -> Agent3Result:
     Run Agent 3F. Reads user-uploaded files, generates test cases with
     ground truth and judgement criteria based on file content.
 
-    Requires input_data.test_file_paths to be set and non-empty.
+    Behavior when no files are provided:
+      Falls back to text-only synthetic generation via Agent 3 instead of
+      raising. This handles the common case where a user describes a
+      file-based capability ("transcribe audio recordings") but doesn't
+      have sample files on disk to upload. The downstream test execution
+      gets text-described test cases that exercise the API's input-form
+      tolerance (and the API itself decides whether it can serve text
+      input — see Gap 3 fallback in implement_test_env.py).
     """
     if not input_data.test_file_paths:
-        raise AgentOutputError(
-            message="Agent 3F requires test_file_paths but none were provided",
-            agent_name="file_tests", trace_id=input_data.trace_id,
+        # Graceful degradation: synthesize text-based test cases instead of
+        # raising. This is the general-purpose fallback for "user wants
+        # file-based testing but has no files" — the test runner will
+        # surface "INCOMPATIBLE: file required" as a real failure when
+        # the API genuinely needs a file, which is the right signal.
+        from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
+        logger = get_logger("agent_3f_file_tests")
+        logger.info(
+            "Agent 3F: no files provided — degrading to Agent 3 text-only synthesis",
+            extra={"operation": "agent_3f_text_only_fallback", "trace_id": input_data.trace_id},
         )
+        return run_synthetic_tests_agent(input_data)
 
     # ★ CORE LINE 1: Create the API client
-    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    # Central factory — 120 s timeout + max_retries=3 (see anthropic_client.py).
+    from puzzleeval.anthropic_client import build_client
+    client = build_client(api_key=ANTHROPIC_API_KEY)
 
     # [logging]
     logger = get_logger("agent_3f_file_tests")
@@ -254,14 +344,22 @@ def run_file_tests_agent(input_data: Agent3Input) -> Agent3Result:
     )
 
     # ★ CORE LINE 3: Call Claude with structured output
+    # parse_with_fallback handles grammar-budget rejections — same pattern
+    # as Agents 1/2/3/4. Agent3Result on file-based generation tends to be
+    # even larger (one TestCase per file × multiple weighted criteria).
     start_time = time.time()
     try:
-        response = client.messages.parse(
+        from puzzleeval.agent_preamble import with_preamble
+        from puzzleeval.structured_output import parse_with_fallback
+        response = parse_with_fallback(
+            client=client,
             model=DEFAULT_MODEL,
             max_tokens=GENERATION_MAX_TOKENS,
-            system=[{"type": "text", "text": SYSTEM_PROMPT}],
+            system=[{"type": "text", "text": with_preamble(SYSTEM_PROMPT)}],
             messages=[{"role": "user", "content": content_blocks}],
             output_format=Agent3Result,
+            extra={},
+            trace_id=input_data.trace_id,
         )
 
     except anthropic.RateLimitError as e:

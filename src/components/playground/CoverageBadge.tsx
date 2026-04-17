@@ -6,9 +6,8 @@
 //
 // Each listed scope is rendered as a small chip with:
 //   - the scope's role name (from the blueprint) for human readability
-//   - a status dot: amber for "claimed" (Agent 2 guess from search snippets),
-//     emerald for "verified" (Phase 6.5 confirmed from docs — lands in a
-//     later phase; this component renders it correctly from day one).
+//   - a status dot: amber for "claimed" (Agent 2's guess from search snippets),
+//     emerald for "verified" (confirmed from docs during the deep-verify pass).
 //
 // The compact variant (used inside the early-discovery row) drops the
 // leading "covers" label and the role names — just shows a "K/N ✓" count

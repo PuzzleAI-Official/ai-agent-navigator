@@ -207,10 +207,10 @@ export function CandidateCard({ candidate: c, index, workflowSteps }: Props) {
           </div>
         )}
 
-        {/* Phase 5: structured pricing block — null-safe. Invisible until
-            Phase 6.5's 4B extraction populates pricing_breakdown. When
-            data arrives, shows "From $X/mo" with expandable tier details
-            and source links. */}
+        {/* Structured pricing block — hidden when pricing_breakdown is null
+            (deep-verify 4B extraction hasn't run for this candidate yet).
+            When data arrives, shows "From $X/mo" with expandable tier
+            details and source links. */}
         {c.pricing_breakdown && (
           <div className="mt-3">
             <PricingBlock breakdown={c.pricing_breakdown} coversStepIds={c.covers_step_ids} workflowSteps={workflowSteps} />

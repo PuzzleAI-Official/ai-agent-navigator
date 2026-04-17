@@ -20,7 +20,6 @@
 
 import argparse
 import json
-import os
 import sys
 import time
 
@@ -29,10 +28,40 @@ if sys.platform == "win32" and hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8")
     sys.stderr.reconfigure(encoding="utf-8")
 
+
+# ----------------------------------------------------------------------
+# Auto-load .env so plugin credentials (OpenAI Whisper, Deepgram,
+# ElevenLabs, etc.) are available without the user manually exporting
+# them. Searches up from CWD for the first .env. Mirrors what FastAPI
+# does in puzzleeval-api/main.py — keeps the CLI workflow symmetrical.
+# Existing os.environ values WIN over .env (override=False).
+# ----------------------------------------------------------------------
+def _autoload_dotenv() -> None:
+    try:
+        from dotenv import load_dotenv  # type: ignore
+    except ImportError:
+        # python-dotenv not installed — silent skip; users can still export
+        # env vars manually. We don't crash on missing optional dep.
+        return
+    from pathlib import Path
+    candidates = []
+    cwd = Path.cwd().resolve()
+    for parent in [cwd] + list(cwd.parents):
+        candidates.append(parent / ".env")
+        # Also check sibling puzzleeval-api/.env which is where the
+        # FastAPI .env lives in the standard repo layout
+        candidates.append(parent / "puzzleeval-api" / ".env")
+    for path in candidates:
+        if path.exists() and path.is_file():
+            load_dotenv(path, override=False)
+            break
+
+_autoload_dotenv()
+
 from puzzleeval.logging_setup import generate_trace_id, setup_logging, get_logger
 from puzzleeval.pipeline import PipelineRun
 from puzzleeval.schemas import (
-    Agent1Input, Agent2Input, Agent3Input, Agent3Result, Agent4Input, Agent5Input,
+    Agent1Input, Agent2Input, Agent3Input, Agent4Input, Agent5Input,
 )
 from puzzleeval.validators import (
     validate_agent1_output,
@@ -45,7 +74,6 @@ from puzzleeval.agents.user_understanding import run_user_understanding_agent
 from puzzleeval.agents.research import (
     run_research_agent,
     apply_scope_picks,
-    inject_user_candidates,
 )
 from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
 from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
@@ -66,7 +94,7 @@ def _filter_user_understanding(uo, subtasks_to_keep):
     sub-tasks and Agent 3 only the text sub-tasks. Each agent generates
     test cases scoped to its sub-tasks, then results merge.
     """
-    from puzzleeval.schemas import UserUnderstandingOutput, Constraints
+    from puzzleeval.schemas import UserUnderstandingOutput
     keep_descs = {st.description for st in subtasks_to_keep}
     filtered_subtasks = [st for st in uo.sub_tasks if st.description in keep_descs]
     # Keep everything else intact (summary, domain, keywords, constraints, workflow)
@@ -528,7 +556,7 @@ Examples:
             # Branch B: Agent 3F or Agent 3 (test cases) [independent]
             # ---------------------------------------------------------------
             if args.agent5:
-                from concurrent.futures import ThreadPoolExecutor as _TP, as_completed as _ac
+                from concurrent.futures import ThreadPoolExecutor as _TP
 
                 test_file_paths = None
                 if args.test_files:
@@ -638,6 +666,40 @@ Examples:
 
                     a3_file_result = None
                     a3_text_result = None
+
+                    # ── Test data sufficiency check ──
+                    # Print a verdict per file-requiring sub-task BEFORE either
+                    # Agent 3F or Agent 3 fires, so the user knows up front
+                    # whether their data is sufficient and what the pipeline
+                    # plans to do (READY / AUGMENT / SYNTHESIZE / REQUEST_MORE
+                    # / DEGRADE). Pure observability — does not block the run.
+                    try:
+                        from puzzleeval.test_data_sufficiency import (
+                            assess_sufficiency,
+                        )
+                        from puzzleeval.tool_plugins import list_plugins
+                        avail = {p.name for p in list_plugins() if p.is_available()[0]}
+                        for sub in file_subtasks:
+                            sub_paths = list(test_file_paths or [])
+                            verdict = assess_sufficiency(
+                                scope_id=getattr(sub, "id", sub.description[:30]),
+                                input_type="document_content",
+                                output_type=getattr(sub, "output_format", "structured_json"),
+                                requires_test_files=True,
+                                file_paths=sub_paths,
+                                available_plugin_names=avail,
+                            )
+                            print(
+                                f"  data sufficiency [{verdict.scope_id}]: "
+                                f"{verdict.action.upper()} — {verdict.reason}",
+                                file=sys.stderr,
+                            )
+                            for advisory in verdict.advisories:
+                                print(f"    advisory: {advisory}", file=sys.stderr)
+                            if verdict.request_message:
+                                print(f"    user-action: {verdict.request_message}", file=sys.stderr)
+                    except Exception as exc:  # noqa: BLE001
+                        print(f"  data sufficiency check skipped: {exc}", file=sys.stderr)
 
                     # ── Agent 3F: file-based sub-tasks (only when files provided) ──
                     if test_file_paths and file_subtasks:

@@ -42,8 +42,37 @@ class RunState:
     uploaded_files: list[dict] = field(default_factory=list)
     file_id_to_path: dict[str, str] = field(default_factory=dict)
 
-    # Cost tracking
+    # Cost tracking + circuit breaker.
+    #
+    # ``total_cost_usd`` is the running dollar total; ``budget`` is the
+    # circuit-breaker that raises ``BudgetExceededError`` when the total
+    # climbs above ``PUZZLEEVAL_MAX_RUN_COST_USD`` (default $25).
+    #
+    # Every place that accumulates cost MUST call ``state.record_cost(amt, reason)``
+    # so the budget gets updated alongside the plain total — that single
+    # helper guarantees the budget stays in sync no matter which agent
+    # reports cost. The alternative (each caller updating both fields) is
+    # fragile and one missed site defeats the breaker.
     total_cost_usd: float = 0.0
+    budget: Any = None  # puzzleeval.budget.RunBudget; lazily attached in __post_init__
+
+    def __post_init__(self) -> None:
+        # Lazy import to avoid circulars — puzzleeval.budget is pure Python,
+        # no FastAPI imports.
+        if self.budget is None:
+            from puzzleeval.budget import RunBudget
+            self.budget = RunBudget()
+
+    def record_cost(self, amount_usd: float, reason: str = "") -> None:
+        """Record a billable event against BOTH the plain total and the
+        budget circuit-breaker. Raises ``BudgetExceededError`` when the cap
+        is crossed — callers should catch at the pipeline boundary and
+        emit ``pipeline_failed`` with ``reason="budget_exceeded"``.
+        """
+        if amount_usd <= 0:
+            return
+        self.total_cost_usd += amount_usd
+        self.budget.spend(amount_usd, reason)
 
     # ── Phase 2: Service tier scaffold ──
     # ``plan`` selects the user-facing tier (free / paid / enterprise).

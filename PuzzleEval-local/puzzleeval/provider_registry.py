@@ -48,16 +48,71 @@ from puzzleeval.config import PROVIDER_REGISTRY_PATH
 # Registry data structure
 # ============================================================================
 
-class ProviderEntry:
-    """One provider's credentials and metadata."""
+class OAuthCredentials:
+    """OAuth 2.0 client-credentials grant material.
 
-    def __init__(self, name: str, env_vars: dict[str, str], tier: str = "unknown",
-                 monthly_limit: int | None = None, usage_this_month: int = 0):
+    For providers whose API requires the client to exchange client_id +
+    client_secret for a short-lived access_token before each call. The
+    Agent 5 builder reads these via the same env-var pattern as raw API
+    keys but threads them through a token-fetch step.
+    """
+
+    def __init__(self, client_id_env: str, client_secret_env: str,
+                 token_url: str, scope: str | None = None,
+                 audience: str | None = None):
+        self.client_id_env = client_id_env
+        self.client_secret_env = client_secret_env
+        self.token_url = token_url
+        self.scope = scope
+        self.audience = audience
+
+    def to_env_vars(self) -> dict[str, str]:
+        """Return the env-var names the harness should read.
+
+        Values come from process env at runtime. The token URL / scope /
+        audience are baked into the harness build itself (config, not secret).
+        """
+        return {
+            self.client_id_env: os.environ.get(self.client_id_env, ""),
+            self.client_secret_env: os.environ.get(self.client_secret_env, ""),
+        }
+
+
+class ProviderEntry:
+    """One provider's credentials and metadata.
+
+    Supports two auth modes (set ONE):
+      - ``env_vars``: simple API-key env vars. Default mode.
+      - ``oauth``: an OAuthCredentials object. Agent 5 generates a
+        token-fetch + Bearer-header harness pattern when this is set.
+    """
+
+    def __init__(self, name: str, env_vars: dict[str, str] | None = None,
+                 tier: str = "unknown", monthly_limit: int | None = None,
+                 usage_this_month: int = 0,
+                 oauth: OAuthCredentials | None = None):
         self.name = name
-        self.env_vars = env_vars
+        self.env_vars = env_vars or {}
         self.tier = tier
         self.monthly_limit = monthly_limit
         self.usage_this_month = usage_this_month
+        self.oauth = oauth
+
+    @property
+    def auth_mode(self) -> str:
+        """Returns 'oauth' / 'api_key' / 'none' based on what's configured."""
+        if self.oauth is not None:
+            return "oauth"
+        if self.env_vars:
+            return "api_key"
+        return "none"
+
+    def all_env_vars(self) -> dict[str, str]:
+        """Union of API-key env_vars + OAuth env vars (when present)."""
+        out = dict(self.env_vars)
+        if self.oauth:
+            out.update(self.oauth.to_env_vars())
+        return out
 
     def has_capacity(self) -> bool:
         """Check if the provider has remaining capacity this month."""
@@ -101,8 +156,24 @@ def load_registry(path: str | None = None) -> ProviderRegistry:
     providers_raw = raw.get("providers", {})
     providers = {}
     for name, data in providers_raw.items():
-        env_vars = data.get("env_vars", {})
-        if not env_vars:
+        env_vars = data.get("env_vars", {}) or {}
+        oauth_raw = data.get("oauth")
+        oauth: OAuthCredentials | None = None
+        if isinstance(oauth_raw, dict):
+            try:
+                oauth = OAuthCredentials(
+                    client_id_env=oauth_raw["client_id_env"],
+                    client_secret_env=oauth_raw["client_secret_env"],
+                    token_url=oauth_raw["token_url"],
+                    scope=oauth_raw.get("scope"),
+                    audience=oauth_raw.get("audience"),
+                )
+            except KeyError:
+                # Malformed oauth block — log via logger if available, but
+                # don't crash the whole registry load.
+                oauth = None
+        # Skip entries that have neither env_vars nor oauth
+        if not env_vars and oauth is None:
             continue
         providers[name.lower()] = ProviderEntry(
             name=name,
@@ -110,6 +181,7 @@ def load_registry(path: str | None = None) -> ProviderRegistry:
             tier=data.get("tier", "unknown"),
             monthly_limit=data.get("monthly_limit"),
             usage_this_month=data.get("usage_this_month", 0),
+            oauth=oauth,
         )
 
     return ProviderRegistry(providers=providers)
@@ -147,12 +219,12 @@ def get_credentials(
     # Strategy 1: exact candidate name match
     for key, entry in registry.providers.items():
         if _normalize(key) == norm_candidate and entry.has_capacity():
-            return entry.env_vars
+            return entry.all_env_vars()
 
     # Strategy 2: exact provider name match
     for key, entry in registry.providers.items():
         if _normalize(key) == norm_provider and entry.has_capacity():
-            return entry.env_vars
+            return entry.all_env_vars()
 
     # Strategy 3: partial/substring match
     for key, entry in registry.providers.items():
@@ -160,7 +232,7 @@ def get_credentials(
         if (norm_key in norm_candidate or norm_candidate in norm_key or
                 norm_key in norm_provider or norm_provider in norm_key):
             if entry.has_capacity():
-                return entry.env_vars
+                return entry.all_env_vars()
 
     # Strategy 4: fallback to environment variables
     if auth_env_vars:

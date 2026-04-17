@@ -7,6 +7,7 @@ import { PipelineVisualization } from "@/components/playground/PipelineVisualiza
 import { ActivityFeed } from "@/components/playground/ActivityFeed";
 import { CandidateCard } from "@/components/playground/CandidateCard";
 import { ResultsComparison } from "@/components/playground/ResultsComparison";
+import { EvaluationReportCard } from "@/components/playground/EvaluationReportCard";
 import { SearchingVisualization } from "@/components/playground/SearchingVisualization";
 import { QuotaBadge } from "@/components/playground/QuotaBadge";
 import { WorkflowDiagram } from "@/components/playground/WorkflowDiagram";
@@ -14,6 +15,18 @@ import { CoverageMatrix } from "@/components/playground/CoverageMatrix";
 import { SelectionPanel } from "@/components/playground/SelectionPanel";
 import { RejectionSummary } from "@/components/playground/RejectionSummary";
 import type { Attachment } from "@/types/pipeline";
+
+/** Tiny useNow hook — returns wall-clock ms, re-rendering at `intervalMs`.
+ * Used by the stuck-pipeline banner to count silent seconds. Local here so
+ * it doesn't pollute a shared hook module for a one-off need. */
+function useNow(intervalMs: number = 5_000): number {
+  const [now, setNow] = useState<number>(Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), intervalMs);
+    return () => clearInterval(id);
+  }, [intervalMs]);
+  return now;
+}
 
 const Playground = () => {
   const location = useLocation();
@@ -32,12 +45,16 @@ const Playground = () => {
     pipelineNodes,
     runId,
     workflow,
-    // Phase 6: selection state
+    // Per-scope selection state (Phase 6 SelectionPanel)
     perScopeCandidates,
     isSelectionSubmitting,
     submitSelection,
-    // Phase 6.5 forward-compat
+    // Rejection entries from the deep-verify pass
     rejections,
+    // Robustness pass: SSE status + heartbeat + structured final report
+    sseStatus,
+    lastEventAt,
+    evaluationReport,
   } = usePipelineRun();
 
   const [input, setInput] = useState("");
@@ -126,8 +143,33 @@ const Playground = () => {
 
   const showActivityTab = stage !== "conversation" || activityEntries.length > 0;
 
+  // Stuck-pipeline detector: when the SSE stream is open but we haven't
+  // received any event for STUCK_THRESHOLD_MS during a long agent phase,
+  // surface a "no progress for Xm — try cancelling" banner so the user
+  // isn't staring at a silent spinner for 5+ minutes.
+  const STUCK_THRESHOLD_MS = 120_000;
+  const nowTick = useNow(5_000);
+  const silentMs = stage === "pipeline" ? nowTick - lastEventAt : 0;
+  const showStuckBanner =
+    stage === "pipeline" && silentMs > STUCK_THRESHOLD_MS && sseStatus === "open";
+
   return (
     <div className="h-screen flex flex-col bg-[#0a0a0b] text-white/95 font-sans overflow-hidden">
+      {/* SSE reconnect / stuck banners — surfaced whenever the stream is
+         unhealthy or the pipeline has gone silent for > 2 minutes. Without
+         these the user sees a stuck spinner with no recovery affordance. */}
+      {sseStatus === "reconnecting" && (
+        <div className="h-7 bg-amber-900/70 text-amber-100 text-xs flex items-center justify-center shrink-0">
+          Reconnecting to backend…
+        </div>
+      )}
+      {showStuckBanner && (
+        <div className="h-7 bg-zinc-800 text-zinc-300 text-xs flex items-center justify-center shrink-0">
+          No progress for {Math.floor(silentMs / 60_000)}m{" "}
+          {Math.floor((silentMs % 60_000) / 1_000)}s — pipeline may be stuck.
+          Consider cancelling and retrying.
+        </div>
+      )}
       {/* Header */}
       <header className="h-12 border-b border-white/[0.06] bg-white/[0.03] backdrop-blur-xl flex items-center justify-between px-4 shrink-0">
         <div className="flex items-center gap-6">
@@ -487,13 +529,12 @@ const Playground = () => {
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                 >
-                  {/* Phase 6.5 forward-compat: rejection summary at the top
-                      of results. Null-safe — renders nothing until Phase 6.5's
-                      candidate_rejected SSE events populate the list. */}
+                  {/* Rejection summary (renders nothing when `rejections` is empty). */}
                   <RejectionSummary
                     rejections={rejections}
                     workflowSteps={workflow?.steps}
                   />
+                  {evaluationReport && <EvaluationReportCard report={evaluationReport} />}
                   <ResultsComparison candidates={candidates} />
                 </motion.div>
               )}

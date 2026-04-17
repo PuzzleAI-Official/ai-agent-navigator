@@ -38,6 +38,17 @@ dependencies = [
     # read .docx files, so we extract the text ourselves and pass it to Claude.
     # (Note: Claude CAN natively read PDFs and images — no library needed for those.)
     "python-docx>=1.1.0",
+
+    # python-dotenv — loads .env files into os.environ. Required so the CLI
+    # can auto-pick up plugin credentials (OpenAI Whisper, Deepgram, etc.)
+    # without users manually exporting them every shell session.
+    "python-dotenv>=1.0.0",
+
+    # requests — HTTP client used by the tool plugins (transcription / TTS
+    # to call the configured STT/TTS provider; vision_judge to download
+    # generated images for evaluation; openapi_harness to fetch openapi.json
+    # specs during the auto-generation fastpath).
+    "requests>=2.31.0",
 ]
 
 # Dev dependencies — only needed for running tests, not for production.
@@ -60,6 +71,17 @@ puzzleeval = "puzzleeval.cli:main"
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+# ---------------------------------------------------------------------------
+# Package discovery — explicitly include ONLY the `puzzleeval` package and
+# its sub-packages (e.g. puzzleeval.tool_plugins). Without this, setuptools
+# auto-discovery sees the sibling directories `runs/`, `bench/`, `test_data/`
+# and refuses to build because it doesn't know which one is the actual
+# package. Listing `puzzleeval*` resolves the ambiguity cleanly.
+# ---------------------------------------------------------------------------
+[tool.setuptools.packages.find]
+include = ["puzzleeval*"]
+exclude = ["runs*", "bench*", "test_data*", "tests*", "puzzleeval.egg-info*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

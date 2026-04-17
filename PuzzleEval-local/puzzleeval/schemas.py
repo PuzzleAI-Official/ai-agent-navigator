@@ -55,20 +55,7 @@ class Agent1Input(BaseModel):
 # ============================================================================
 
 class SubTask(BaseModel):
-    """
-    A single capability/sub-task extracted from the user's request.
-
-    WHY SUB-TASKS?
-    Users describe their needs as one big request ("read invoices and put
-    them in QuickBooks"). But the best AI solution might be a combination
-    of specialized tools — one for OCR, one for QuickBooks sync. By
-    decomposing into sub-tasks, the Research Agent can search for the best
-    tool PER capability, not just all-in-one solutions.
-
-    Example decomposition of "read invoices and put in QuickBooks":
-      Sub-task 1: "Extract structured data from invoice photos" (capability: OCR/document extraction)
-      Sub-task 2: "Create bill entries in QuickBooks from structured data" (capability: accounting integration)
-    """
+    """A single capability/sub-task extracted from the user's request."""
 
     # What this sub-task does — described as an input→output behavior
     description: str = Field(
@@ -224,7 +211,11 @@ class WorkflowStep(BaseModel):
         description=(
             "Shape of this step's output. Matches the TestCase.output_type "
             "enum: 'free_text' | 'structured_json' | 'classification' | "
-            "'extraction' | 'action'. Phase 9's harness uses this to decide "
+            "'extraction' | 'action' | 'media_url' | 'code' | "
+            "'audio_content'. Drives which tool plugin (if any) Agent 5's "
+            "evaluator dispatches to: 'code' → code_execution, "
+            "'audio_content' / 'media_url' → vision or transcription, "
+            "others → LLM judge. Phase 9's harness uses this to decide "
             "whether to serialize the output before passing to the next step."
         )
     )
@@ -266,16 +257,23 @@ class WorkflowStep(BaseModel):
         )
     )
 
+    side_effects: str = Field(
+        default="read_only",
+        description=(
+            "Whether running this step has external side effects. One of: "
+            "'read_only' (default — pure query/extraction, no writes), "
+            "'creates_records' (e.g. 'create bill in QuickBooks'), "
+            "'modifies_records' (e.g. 'update contact in HubSpot'), "
+            "'deletes_records' (e.g. 'remove subscriber from list'). "
+            "Agent 5 uses this to decide whether to run in DRY_RUN mode or "
+            "prefer a provider sandbox URL when available — prevents "
+            "test runs from touching real user data."
+        )
+    )
+
 
 class WorkflowBlueprint(BaseModel):
-    """The ordered shape of the user's workflow.
-
-    Authored by Agent 1 alongside sub_tasks in the same LLM call. Downstream
-    phases branch on `len(steps) == 1` for trivial single-capability requests
-    (e.g., "I need a chatbot") and treat those as today; multi-step blueprints
-    unlock Phase 4's dual search, Phase 6's selection UI, and Phase 9's
-    workflow-chaining harnesses.
-    """
+    """The ordered shape of the user's workflow."""
 
     steps: list[WorkflowStep] = Field(
         description=(
@@ -338,19 +336,16 @@ class ScopeTestSpec(BaseModel):
 
     input_type: str = Field(
         description=(
-            "The input_type that test cases for this scope MUST use. "
-            "One of: 'text', 'structured_data', 'document_content', "
-            "'conversation', 'image_description'. Agent 3/3F must set "
-            "this on every test case for this scope."
+            "The input_type for this scope's test cases. Must match a "
+            "value in puzzleeval.validators.VALID_INPUT_TYPES."
         )
     )
 
     output_type: str = Field(
         description=(
-            "The output_type that test cases for this scope MUST use. "
-            "Matches the WorkflowStep.output_format for this scope. "
-            "One of: 'free_text', 'structured_json', 'classification', "
-            "'extraction', 'action'."
+            "The output_type for this scope's test cases. Must match a "
+            "value in puzzleeval.validators.VALID_OUTPUT_TYPES. Drives "
+            "which tool plugin scores the response."
         )
     )
 
@@ -438,19 +433,46 @@ class ScopeTestSpec(BaseModel):
         )
     )
 
+    reference_mode: str = Field(
+        default="ground_truth",
+        description=(
+            "How the LLM judge should treat `sample_output`. One of: "
+            "'ground_truth' (THE correct answer — used for extraction, "
+            "classification, translation with a unique right answer) or "
+            "'exemplar' (ONE valid answer — used for chatbot, summarization, "
+            "creative generation where many responses are acceptable). "
+            "The judge prompt branches on this: ground_truth mode compares "
+            "semantic equivalence; exemplar mode checks that criteria are "
+            "met, treating sample_output as a reference, not a target."
+        )
+    )
+
+    side_effects: str = Field(
+        default="read_only",
+        description=(
+            "Mirrors WorkflowStep.side_effects for the corresponding scope. "
+            "Propagated into Agent 5's harness build so destructive tests "
+            "can opt into DRY_RUN or sandbox mode. Values: 'read_only', "
+            "'creates_records', 'modifies_records', 'deletes_records'."
+        )
+    )
+
+    input_context_hints: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Scope-specific parameters that every test case at this scope "
+            "must carry on TestCase.input_context. Example for a "
+            "French-translation scope: {'target_language': 'fr', "
+            "'source_language': 'en'}. Agent 3 copies these verbatim into "
+            "every generated test case's input_context so the harness can "
+            "route/parameterize the API call correctly. Empty dict for "
+            "single-scope workflows or scopes without parameterization."
+        )
+    )
+
 
 class TestPlan(BaseModel):
-    """
-    Agent 1's centralized test plan. Consumed by Agent 3/3F.
-
-    Instead of Agent 3/3F independently guessing what tests to generate,
-    they execute THIS plan. The plan ensures:
-    1. Every scope gets the right test mode (file vs synthetic)
-    2. Input/output types match the workflow architecture exactly
-    3. Downstream steps get test inputs shaped like upstream outputs
-    4. Test count allocation is proportional to scope complexity
-    5. Evaluation criteria are scope-appropriate
-    """
+    """Agent 1's centralized test plan. Consumed by Agent 3/3F."""
 
     scope_specs: list[ScopeTestSpec] = Field(
         description=(
@@ -560,21 +582,7 @@ class UserUnderstandingOutput(BaseModel):
 
 
 class InfoStatus(BaseModel):
-    """
-    Tracks what information has been collected vs what's still needed.
-
-    This is the systematic categorization of required vs optional info.
-    The agent updates this on every turn so the CLI/frontend can:
-      - Show users what's been captured
-      - Know exactly why the agent is asking more questions
-      - Display optional fields as "you can also tell us about..."
-
-    CRITICAL = must have before we can search. Without these, the Research
-    Agent will return garbage results. Agent MUST ask for these.
-
-    OPTIONAL = improves results but doesn't block the search. Agent should
-    invite the user to provide these but never demand them.
-    """
+    """Tracks what information has been collected vs what's still needed."""
 
     # ── CRITICAL FIELDS (block search without these) ──
 
@@ -867,6 +875,114 @@ class PricingBreakdown(BaseModel):
 
 
 # ============================================================================
+# InteractionModel — structured description of how an API delivers results
+# ============================================================================
+# Different APIs return results in fundamentally different shapes. A single
+# enum field cannot express "supports BOTH sync AND async" or "provides SSE
+# streaming for one endpoint but polling for another". The structured model
+# below lets Phase 6.5 populate whatever combination the actual docs describe.
+# Agent 5's harness template branches on these booleans to emit the right
+# client code (poll helper, SSE reader, webhook receiver stub, batch uploader).
+# ============================================================================
+
+
+class UserSelectableParam(BaseModel):
+    """A single call-level knob the user can tune on this API.
+
+    Captured per-candidate by Phase 6.5 (Agent 4). Agent 5 uses the full
+    param surface to generate test variations that exercise realistic user
+    configurations, not just defaults.
+    """
+    name: str = Field(description="Parameter name as it appears in requests")
+    allowed_values: str = Field(
+        description=(
+            "Human-readable range or enum: '1024x1024 | 1792x1024 | 1024x1792', "
+            "'0.0 - 2.0', 'free_text', 'ISO 639-1 language code'"
+        )
+    )
+    affects: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Which output dimensions this param influences. One or more of: "
+            "'quality', 'cost', 'latency', 'output_size', 'output_shape', "
+            "'output_style'. Empty list if unclear from docs."
+        ),
+    )
+    default: str | None = Field(
+        default=None,
+        description="Documented default value (or None if not documented)",
+    )
+
+
+class InteractionModel(BaseModel):
+    """How an API delivers results to the caller.
+
+    Agent 5's harness template reads these flags to emit the right client
+    code: sync uses a plain request/response, async_polling emits
+    `_poll_until_complete()`, sse_streaming emits an event-stream reader,
+    webhook emits a receiver stub (marked as cloud-deferred when no public
+    URL is available), batch_file emits an uploader + result poller.
+
+    Multiple flags can be True when an API supports multiple modes on
+    different endpoints (common: sync simple endpoint + async batch endpoint).
+    """
+    synchronous: bool = Field(
+        default=False,
+        description="Simple request/response; caller blocks on the single call."
+    )
+    async_polling: bool = Field(
+        default=False,
+        description=(
+            "Caller submits, gets a job identifier, polls a status endpoint "
+            "until the result is ready. Common for any long-running operation "
+            "(OCR, transcription, video analysis, batch embedding, fine-tuning)."
+        ),
+    )
+    webhook_callback: bool = Field(
+        default=False,
+        description=(
+            "Caller registers a callback URL; the API POSTs results when ready. "
+            "NOTE: local testing requires a publicly-reachable URL — this flag "
+            "is recorded for documentation purposes, but Agent 5 will not "
+            "attempt a webhook test harness when the surrounding runtime is "
+            "local-only. See GAP_ANALYSIS.md gaps 4/5/17/24."
+        ),
+    )
+    sse_streaming: bool = Field(
+        default=False,
+        description=(
+            "Server-Sent Events — chunked response over a single long-lived "
+            "HTTP connection. Common for LLM token streaming, progress events."
+        ),
+    )
+    batch_file: bool = Field(
+        default=False,
+        description=(
+            "Caller uploads a batch manifest / file; results are returned as "
+            "a downloadable artifact. Common for bulk embedding / fine-tuning "
+            "data prep / batch translation."
+        ),
+    )
+    event_subscription: bool = Field(
+        default=False,
+        description=(
+            "Caller subscribes to an event stream (GraphQL subscription, "
+            "websocket channel, message queue). True real-time push. Like "
+            "webhook, local runtime cannot receive these — flag is for "
+            "documentation."
+        ),
+    )
+    notes: str = Field(
+        default="",
+        description=(
+            "One-line free-text on anything the flags above can't capture "
+            "(e.g. 'all endpoints are sync except /v1/batch which is "
+            "async_polling with a 1-hour SLA')."
+        ),
+    )
+
+
+# ============================================================================
 # Phase 6: UserAddedCandidate — candidates submitted via the SelectionPanel
 # ============================================================================
 # After Agent 2 produces the candidate pool and the pipeline pauses, the
@@ -1054,14 +1170,14 @@ class Candidate(BaseModel):
     # Phase 7 (per-scope top-K selection) / Phase 6.5 (deep verify). They
     # replace the old concept of "workflow_role" / simple-grouping — every
     # candidate is just a coverage SET, arbitrary in shape.
-    covers_step_ids: frozenset[str] = Field(
-        default_factory=frozenset,
+    covers_step_ids: list[str] = Field(
+        default_factory=list,
         description=(
             "Blueprint step IDs this candidate CLAIMS to cover. Populated "
             "by Agent 2 from search snippets — specialists surfaced in a "
-            "per-scope search default to {that_one_step_id}; all-in-ones "
+            "per-scope search default to [that_one_step_id]; all-in-ones "
             "surfaced in the horizontal survey get their full claimed "
-            "coverage (e.g. {'step_1', 'step_2', 'step_3'}). Coverage is "
+            "coverage (e.g. ['step_1', 'step_2', 'step_3']). Coverage is "
             "ARBITRARY — no special multi-step category — a provider may "
             "cover 1, 2, or all N scopes and competes equally at every "
             "scope it claims. Dedup happens by candidate name: a tool "
@@ -1099,6 +1215,36 @@ class Candidate(BaseModel):
             "pricing_details for per-scope cost summaries and monthly "
             "budget estimates."
         ),
+    )
+
+    # Interaction model — HOW the API returns results to the caller. Free-text
+    # enum-lite for Agent 2's best guess from snippets; Phase 6.5 captures the
+    # richer structured form (see ScreenedCandidate.interaction_model). The
+    # answer space for "how does this API deliver results" is open-ended —
+    # sync, async-polling, webhook callback, SSE streaming, batch upload, event
+    # subscription — so this stays a free-text hint, not an enum, and downstream
+    # harness building reads the rich ScreenedCandidate form. The only
+    # soft-constrained vocabulary is {"sync", "async_polling", "other",
+    # "unknown"}: sync = single request/response, async_polling = job+poll,
+    # other = anything else Agent 2 recognized but that needs deeper docs to
+    # characterize (SSE, webhook, batch), unknown = couldn't tell.
+    api_interaction_pattern_hint: str = Field(
+        default="unknown",
+        description=(
+            "Best-effort hint from Agent 2 about how the API delivers results "
+            "to the caller. Soft vocabulary: 'sync' (immediate response — most "
+            "REST GETs and simple POSTs), 'async_polling' (returns a job ID; "
+            "caller polls until ready — common for long-running ops like OCR, "
+            "transcription, batch embeddings, fine-tuning), 'other' (Agent 2 "
+            "saw evidence of a non-sync/non-polling pattern — streaming, SSE, "
+            "webhook callback, batch file upload — but lacks enough detail to "
+            "characterize it from snippets), 'unknown' (insufficient signal). "
+            "This is a HINT. Phase 6.5's deep verify reads the real docs and "
+            "populates the richer ScreenedCandidate.interaction_model. Agent 5 "
+            "reads the rich form when available, this hint otherwise. Any "
+            "string other than the four above is coerced to 'unknown' by the "
+            "validator."
+        )
     )
 
 
@@ -1282,13 +1428,10 @@ class TestCase(BaseModel):
 
     input_type: str = Field(
         description=(
-            "The nature of the input data. Tells Agent 5 how to present it "
-            "to each service. One of: "
-            "'text' (plain text — chat message, query, document text), "
-            "'structured_data' (JSON/CSV data to process), "
-            "'document_content' (text representation of a document — invoice, contract, receipt), "
-            "'conversation' (multi-turn conversation context), "
-            "'image_description' (description of what an image contains)"
+            "The nature of the input data. Must match a value in "
+            "puzzleeval.validators.VALID_INPUT_TYPES (text, structured_data, "
+            "document_content, conversation, image_description, audio_content, "
+            "file_reference, code, webhook_event, voice_turn)."
         )
     )
 
@@ -1338,12 +1481,11 @@ class TestCase(BaseModel):
 
     output_type: str = Field(
         description=(
-            "What kind of output to expect from the AI service. One of: "
-            "'free_text' (natural language response), "
-            "'structured_json' (JSON matching a specific schema), "
-            "'classification' (category label or labels), "
-            "'extraction' (extracted fields from input), "
-            "'action' (action to perform — e.g., create record, send message)"
+            "What kind of output to expect from the AI service. Must match "
+            "a value in puzzleeval.validators.VALID_OUTPUT_TYPES (free_text, "
+            "structured_json, classification, extraction, action, media_url, "
+            "code, audio_content, webhook_callback, outbound_message, "
+            "voice_turn)."
         )
     )
 
@@ -1594,12 +1736,15 @@ class ScreenedCandidate(BaseModel):
         ),
     )
 
-    covers_step_ids: frozenset[str] = Field(
-        default_factory=frozenset,
+    covers_step_ids: list[str] = Field(
+        default_factory=list,
         description=(
             "Blueprint step IDs this candidate covers. Phase 6.5 OVERWRITES "
             "with verified truth — scopes that couldn't be verified in 4C "
-            "are REMOVED from this set. Empty frozenset for legacy flow."
+            "are REMOVED from this list. Empty list for legacy flow. "
+            "Stored as list[str] (not frozenset/set) because LLM structured "
+            "output can't natively emit frozensets — JSON Schema only knows "
+            "arrays. Caller-side de-dup is enforced by validators.py."
         ),
     )
 
@@ -1624,6 +1769,73 @@ class ScreenedCandidate(BaseModel):
             "turn-phase at the same time as endpoints. None when the "
             "pricing page couldn't be found or parsed, when Phase 6.5 "
             "hasn't shipped yet, or when the candidate predates Phase 5."
+        ),
+    )
+
+    # Gap 25 — upstream provider grouping for cross-candidate rate limiting.
+    # Free-text: any consistent lowercase string identifying the upstream
+    # organization whose model this candidate resells. NOT an enum. The rate
+    # limiter keys on whatever string comes back; the only requirement is
+    # consistency across candidates (same upstream → same spelling).
+    upstream_provider: str | None = Field(
+        default=None,
+        description=(
+            "When this candidate is demonstrably a thin wrapper over another "
+            "organization's model service, name the upstream as a short "
+            "lowercase identifier (e.g. the hosting organization or the "
+            "platform being resold). None = self-hosted model OR insufficient "
+            "evidence of upstream wrapping. Free-text; the rate limiter uses "
+            "this value verbatim as a bucket key, so consistent spelling "
+            "across candidates matters more than matching a specific list."
+        ),
+    )
+
+    # Structured interaction model — how this API delivers results. Populated
+    # by Phase 6.5. When both this field AND the cruder
+    # Candidate.api_interaction_pattern_hint are present, Agent 5's harness
+    # template reads THIS one (richer, comes from real docs).
+    interaction_model: InteractionModel = Field(
+        default_factory=InteractionModel,
+        description=(
+            "Structured flags describing how the API delivers results. "
+            "Multiple flags can be True when different endpoints use "
+            "different patterns. Default all-False means Phase 6.5 didn't "
+            "populate it and Agent 5 should fall back to the cruder hint."
+        ),
+    )
+
+    # Full param surface from actual docs — Agent 5 uses this to exercise
+    # realistic user configurations in tests, not just defaults.
+    user_selectable_params: list[UserSelectableParam] = Field(
+        default_factory=list,
+        description=(
+            "All documented call-level knobs the user can tune. Empty list "
+            "when the API has no tunable params beyond input data, or when "
+            "Phase 6.5 couldn't fetch full docs. Applies to every API class "
+            "(OCR region, transcription language, translation formality, "
+            "image size/quality, chat temperature, code-gen variant, etc.)."
+        ),
+    )
+
+    # Gap 9 — destructive-action sandbox discovery
+    sandbox_available: bool = Field(
+        default=False,
+        description=(
+            "True when Phase 6.5 found a documented sandbox / test / "
+            "dev-mode base URL for this API (Stripe, Plaid, QuickBooks all "
+            "expose one). Populated only for candidates whose matched "
+            "workflow step has side_effects != 'read_only'. Agent 5 "
+            "prefers the sandbox base URL over production when True."
+        ),
+    )
+
+    sandbox_docs_url: str | None = Field(
+        default=None,
+        description=(
+            "URL to the sandbox documentation (base URL docs, credential "
+            "acquisition, differences from prod). Used by Agent 5 harness "
+            "builder to read sandbox-specific auth instructions. None when "
+            "sandbox_available=False or when docs weren't discoverable."
         ),
     )
 
@@ -1812,10 +2024,10 @@ class Agent5Input(BaseModel):
 
     test_cases: Agent3Result = Field(
         description=(
-            "Agent 3's generated test cases. The builder agent uses this to "
-            "understand what input_types (text, structured_data, document_content) "
-            "and output_types (free_text, structured_json, extraction) the "
-            "harness needs to support."
+            "Agent 3's generated test cases. The builder reads each "
+            "test case's input_type / output_type to size the harness's "
+            "supported_input_types / supported_output_types — see "
+            "puzzleeval.validators for the canonical enums."
         )
     )
 
@@ -1894,17 +2106,15 @@ class TestHarness(BaseModel):
 
     supported_input_types: list[str] = Field(
         description=(
-            "Input types the harness can handle, matching Agent 3's test case "
-            "input_type values: 'text', 'structured_data', 'document_content', "
-            "'conversation', 'image_description'."
+            "Input types the harness can handle. Each entry must be a value "
+            "in puzzleeval.validators.VALID_INPUT_TYPES."
         )
     )
 
     supported_output_types: list[str] = Field(
         description=(
-            "Output types the harness produces, matching Agent 3's test case "
-            "output_type values: 'free_text', 'structured_json', "
-            "'classification', 'extraction', 'action'."
+            "Output types the harness produces. Each entry must be a value "
+            "in puzzleeval.validators.VALID_OUTPUT_TYPES."
         )
     )
 
@@ -1996,6 +2206,34 @@ class TestHarness(BaseModel):
         ),
     )
 
+    # Q4 — Agent 5 fallback. When user-picked candidates all fail to build,
+    # Agent 5 pulls next-ranked candidates from Agent 4's verified pool
+    # (those the user did NOT explicitly pick) and tries them. Harnesses
+    # built that way carry was_fallback=True so the report can note it.
+    was_fallback: bool = Field(
+        default=False,
+        description=(
+            "True when this harness was built as a fallback after the user-"
+            "selected candidates all failed. The frontend should label these "
+            "as 'auto-fallback' so the user understands the provenance."
+        ),
+    )
+
+    # Adversarial verification — see puzzleeval/adversarial_verifier.py.
+    # Populated AFTER the build loop succeeds and BEFORE Agent 3 cases run.
+    # When `harness_ready` is False, the test runner refuses to execute
+    # domain test cases against this harness (auth not honored, crashes
+    # on edge inputs, etc.) — every Agent 3 result against a not-ready
+    # harness is potential silent corruption.
+    adversarial_report: dict | None = Field(
+        default=None,
+        description=(
+            "Compact serialized AdversarialReport — see "
+            "adversarial_verifier.report_to_dict(). None when probes were "
+            "skipped (no sample input available, or PUZZLEEVAL_ADVERSARIAL_PROBES_ENABLED=0)."
+        ),
+    )
+
 
 class FailedHarness(BaseModel):
     """
@@ -2072,6 +2310,21 @@ class ScopeTestRun(BaseModel):
     test_case_count: int = Field(
         default=0,
         description="How many Agent 3/3F test cases ran at this scope"
+    )
+
+    # Gap 21 — eval-mode calibration for the report
+    evaluation_mode: str = Field(
+        default="objective",
+        description=(
+            "How test cases at this scope were judged, derived from the "
+            "corresponding ScopeTestSpec.reference_mode: 'objective' "
+            "(ground_truth — extraction/classification/translation where "
+            "pass rates are directly comparable across providers) or "
+            "'subjective' (exemplar — chatbot/summarization where pass "
+            "rates reflect taste and are NOT comparable across scopes or "
+            "modes). The frontend renders this as a pill on each scope "
+            "section to prevent misreading of comparison tables."
+        )
     )
 
 
@@ -2254,6 +2507,18 @@ class TestCaseResult(BaseModel):
 
     sub_task_ref: str = Field(
         description="Which sub-task this tests, carried from TestCase for grouping"
+    )
+
+    tools_used: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of plugins / judges that scored this test case, in order. "
+            "Examples: ['code_execution'], ['transcription'], ['vision'], "
+            "['conversation_simulator', 'llm_judge'] when a plugin partially "
+            "scored and the LLM judge filled in the rest. ['llm_judge'] when "
+            "no specialized plugin claimed the modality. Surfaces in the "
+            "report so the user can see how each result was scored."
+        ),
     )
 
     input_sent: dict = Field(

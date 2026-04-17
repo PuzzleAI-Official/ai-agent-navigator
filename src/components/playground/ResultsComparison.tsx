@@ -14,6 +14,7 @@ import { useState } from "react";
 import { motion } from "framer-motion";
 import type {
   PipelineCandidate,
+  ScopeCandidateResult,
   ScopeTestRun,
   WorkflowStep,
 } from "@/types/pipeline";

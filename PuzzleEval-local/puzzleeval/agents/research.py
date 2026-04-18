@@ -256,29 +256,17 @@ Set ONE entry per step_id in covers_step_ids, always with value "claimed". Agent
 - pricing_model: "per-token", "per-request", "per-page", "monthly", "usage-based", "free-tier", or "freemium"
 - relevant_subtasks: Use the EXACT sub-task description strings from the user's request (KEEP this field populated for backwards compat — covers_step_ids is the new authoritative scope linkage, relevant_subtasks is a human-readable mirror)
 - source: URL where the candidate was found during research
-- api_interaction_pattern_hint: a best-effort signal for HOW the API returns results to the caller. If search snippets show plain request → response (single-call JSON reply), set "sync". If they show a job-submit-then-poll pattern (the caller submits, gets an id, polls a status endpoint until ready — common for any long-running operation: OCR, transcription, video, batch embedding, fine-tuning, large-doc analysis), set "async_polling". Use "unknown" when the snippets don't make it clear. This is a HINT — Phase 6.5 reads the actual docs and can overwrite it, and Phase 6.5 captures richer patterns (webhooks, SSE streaming, batch) that Agent 2 can't reliably discern from snippets.
+- api_interaction_pattern_hint: a best-effort signal for HOW the API returns results to the caller. Valid values: "sync" (plain request → response, most REST endpoints), "async_polling" (submit + poll for job completion — common for OCR, transcription, batch), "sse_streaming" (Server-Sent Events over a long-lived HTTP connection — LLM token streaming, progress events), "websocket" (a wss:// WebSocket is the PRIMARY protocol — OpenAI Realtime, ElevenLabs Conversational AI, phone/voice realtime APIs; strong signal for Agent 5 to use the WebSocket harness pattern), "other" (evidence of a non-sync/non-polling pattern but too little detail to classify), "unknown" (insufficient signal). This is a HINT — Phase 6.5 reads the actual docs and can overwrite it with the richer interaction_model flags.
 
-## Candidate-class separation (general principle)
+## Candidate-class separation
 
-For ANY capability the user names, there are often TWO distinct classes of candidate that both legitimately solve the user's problem but serve DIFFERENT kinds of buyer. Surface both when both exist. Do NOT blend them. These are NOT domain-specific — the pattern applies to every capability:
-
-- **Developer primitive**: a raw API the user's engineer would call from code to BUILD a custom flow. Exposes low-level controls, requires writing integration code, typically priced per-call/per-token. Comparison axes that matter: request/response shape, rate limits, SDK quality, model choice.
-- **Packaged product**: an end-to-end SaaS or platform the user's operator would CONFIGURE through a UI and deploy. Includes opinionated defaults, admin dashboards, often priced per-seat/per-month. Comparison axes that matter: setup time, vendor lock-in, UI features, included integrations.
-
-Examples of the duality (illustrative — the principle applies to every capability, not just these):
-- A conversational-agent capability: language-model APIs (developer primitive) AND end-user chat platforms (packaged product).
-- An image-generation capability: image-generation APIs (developer primitive) AND creative-suite products that embed image gen (packaged product).
-- An OCR capability: OCR APIs (developer primitive) AND document-processing platforms with OCR built in (packaged product).
-- A translation capability: translation APIs (developer primitive) AND translation-workflow platforms with glossaries and reviewers (packaged product).
-- An analytics capability: analytics SDKs/APIs (developer primitive) AND BI dashboard products (packaged product).
-
-How to apply this principle on EVERY capability search:
-1. For each sub-task, run the search once with developer-primitive framing (e.g. "{capability} API", "{capability} SDK", "developer docs {capability}") and once with packaged-product framing (e.g. "{capability} platform", "best {capability} tool", "{capability} SaaS").
-2. If one framing returns nothing useful, it's a single-class capability — proceed as usual. If both return distinct candidates, include both classes.
-3. In each Candidate's `description`, name its class in the first clause ("Developer API that ..." vs "Packaged product that ..."). Downstream agents and the user can then compare within-class, not across-class (the scoring dimensions are different).
-4. The `adoption_difficulty` scoring already handles the cost/complexity gap naturally — a developer primitive with minimal setup is still "easy" for a developer-skilled user, and a packaged product is still "easy" for a non-technical user. Do not conflate class with difficulty.
-
-This is a principle, not an if-statement. You are the one who has to recognize when a capability has two classes — training data biases toward whichever class is better documented, so be deliberate about searching both framings.
+The research pass already applied the Developer-primitive vs Packaged-product
+duality to its findings. When you see a candidate whose research findings
+describe it as a "Developer API / SDK / primitive" or a "Packaged product /
+SaaS / platform," preserve that class marker as the FIRST CLAUSE of the
+description ("Developer API that …" vs "Packaged product that …"). Downstream
+agents compare within-class, never blend. Do NOT invent a class the research
+didn't surface — if the findings are ambiguous, omit the marker.
 
 ## Coverage Notes
 In `coverage_notes`, write a per-scope summary: "step_1 (ocr): 4 candidates covering — Mindee, Google DocAI, AWS Textract, Zapier. step_2 (sheets_sync): 3 candidates — Zapier, Make, Google Sheets API." Flag scopes with thin coverage (<3 candidates) so the validator can warn.
@@ -420,6 +408,11 @@ def _build_research_message(user_understanding: UserUnderstandingOutput) -> str:
     blueprint_section = _format_blueprint_section(user_understanding.workflow)
     scope_pool_instruction = _scope_pool_instruction(user_understanding.workflow)
 
+    # Atlas-cache hints: previously deep-verified providers for these
+    # capabilities. Empty string when the cache is cold or memory is disabled.
+    cached_hints = _preload_cached_provider_hints(user_understanding)
+    cached_hints_block = (cached_hints + "\n\n---\n\n") if cached_hints else ""
+
     # ── CORE: Assemble the full message ──
     message = f"""## What the User Needs
 {user_understanding.summary}
@@ -445,7 +438,7 @@ def _build_research_message(user_understanding: UserUnderstandingOutput) -> str:
 
 ---
 
-{scope_pool_instruction}"""
+{cached_hints_block}{scope_pool_instruction}"""
 
     return message
 
@@ -472,6 +465,76 @@ def _format_blueprint_section(workflow: WorkflowBlueprint | None) -> str:
         f"Total scopes: {len(workflow.steps)}. Architecture options Agent 1 considered: "
         f"{', '.join(workflow.architecture_options) or 'all_in_one, best_per_step'}."
     )
+
+
+def _preload_cached_provider_hints(
+    user_understanding: UserUnderstandingOutput, max_per_capability: int = 3,
+) -> str:
+    """Pull previously-researched providers from the atlas cache as hints.
+
+    Agent 4's Phase 6.5 deep-verify populates `memdir/provider_atlases/`
+    after every successful candidate run. Those atlases carry provider name,
+    openapi_url, endpoints, and auth — exactly the fields Agent 2 would
+    rediscover via web_search at significant token + wall-clock cost.
+
+    This function returns a prompt-ready string of "known-good candidates
+    you can reuse without re-researching — include them in your output with
+    coverage_confidence set based on prior runs." Claude still decides
+    whether to keep, demote, or drop each hint based on the current user's
+    needs (domain / technical_level / constraints) — hints are not a
+    guarantee, they're a shortcut.
+
+    Returns an empty string when memory is disabled, no atlases match, or
+    the user's sub_tasks are too niche for any prior atlas to match.
+    """
+    try:
+        from puzzleeval.memdir import memory_enabled, find_relevant_memories
+        if not memory_enabled():
+            return ""
+    except Exception:  # noqa: BLE001 — keep Agent 2 resilient if memdir breaks
+        return ""
+
+    seen: dict[str, list[str]] = {}
+    for st in user_understanding.sub_tasks:
+        # Query the atlas category for each sub_task's capability + keywords
+        query_parts = [st.capability]
+        query_parts.extend(st.search_keywords or [])
+        query = " ".join(query_parts)
+        try:
+            memos = find_relevant_memories(
+                query=query,
+                categories=["provider_atlases"],
+                limit=max_per_capability,
+            )
+        except Exception:  # noqa: BLE001
+            continue
+        if not memos:
+            continue
+        for memo in memos:
+            name = memo.name or ""
+            if not name:
+                continue
+            bucket = seen.setdefault(st.capability, [])
+            if name not in bucket:
+                bucket.append(name)
+
+    if not seen:
+        return ""
+
+    lines = [
+        "## Known providers from prior runs (atlas cache hints)",
+        "",
+        "These providers were deep-verified in a previous pipeline run for this",
+        "capability. Treat them as PRE-SCREENED candidates — include them in your",
+        "output IF they still fit this user's domain / technical_level / constraints.",
+        "Set `source='memdir_atlas'` and `coverage_confidence='claimed'` on each.",
+        "When a listed provider is clearly wrong for this user, OMIT it rather",
+        "than re-score it — freshness and user-fit beat cache-hit counts.",
+        "",
+    ]
+    for cap, names in seen.items():
+        lines.append(f"- {cap}: {', '.join(names)}")
+    return "\n".join(lines)
 
 
 def _scope_pool_instruction(workflow: WorkflowBlueprint | None) -> str:
@@ -556,15 +619,21 @@ def _extract_text_from_response(response: anthropic.types.Message) -> str:
 
 
 def _salvage_findings_from_tool_uses(response: anthropic.types.Message) -> str:
-    """Extract usable text from tool_use queries when no text block is present.
+    """Extract usable context from tool_use queries when no text block is present.
 
     When the agentic web-search loop runs out of token budget mid-search
     (stop_reason=max_tokens with content blocks dominated by tool_use /
     tool_result), there's no synthesized findings paragraph for Step 2 to
-    structure. Rather than failing the run, we walk the tool_use blocks and
-    surface the search queries the model issued. The structuring step can
-    still produce candidate names from those queries plus any partial text
-    fragments. Degraded but useful — better than a hard failure.
+    structure. The OLD behavior was to feed the raw search queries to the
+    structurer, which HALLUCINATED candidates from query text to fill the
+    5-7 quota — producing plausible-looking fake providers with invented
+    api_docs_url values.
+
+    The NEW behavior: we emit the queries as CONTEXT but explicitly instruct
+    the structurer to emit ``candidates=[]`` and put the situation in
+    ``coverage_notes``. The coverage_gap SSE event will then tell the user
+    "no candidates found — try broadening your request." Honest empty result
+    beats fabricated candidates.
     """
     bits: list[str] = []
     for block in response.content:
@@ -582,9 +651,19 @@ def _salvage_findings_from_tool_uses(response: anthropic.types.Message) -> str:
     if not bits:
         return ""
     header = (
-        "Note: web research returned no synthesized findings (likely hit "
-        "max_tokens or pause_turn before completion). The following are the "
-        "raw queries the model issued — use them as a starting point.\n\n"
+        "## DEGRADED MODE — research loop terminated before synthesizing findings\n\n"
+        "The web research loop hit stop_reason=max_tokens or pause_turn before\n"
+        "it could synthesize a findings paragraph. The queries below are all we\n"
+        "recovered. Because we have NO verified provider snippets, you MUST NOT\n"
+        "fabricate candidates from the query text — that would present invented\n"
+        "providers with made-up docs URLs as real options.\n\n"
+        "**Instruction to structurer:** emit `candidates=[]` (empty list). In\n"
+        "`coverage_notes`, write: \"Research degraded — no candidates verified.\n"
+        "User-visible message: web search was interrupted (likely rate-limited\n"
+        "or timed out). Retry the run or add candidates manually via the\n"
+        "SelectionPanel.\" Set `search_approach='degraded_no_results'`.\n\n"
+        "Raw queries the model issued (for diagnostic context only, NOT to\n"
+        "be converted into candidates):\n\n"
     )
     return header + "\n".join(f"- {b}" for b in bits)
 
@@ -613,9 +692,16 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
       Step 2: Structure the findings into Agent2Result via structured output
     """
     # ★ CORE LINE 1: Create the API client
-    # Central factory — 120 s timeout + max_retries=3 (see anthropic_client.py).
-    from puzzleeval.anthropic_client import build_client
-    client = build_client(api_key=ANTHROPIC_API_KEY)
+    # Server-tool timeout tier — 420 s (7 min). Agent 2's research pass
+    # runs the Anthropic server-side web_search loop which can legitimately
+    # take 2-5 minutes on multi-scope blueprints (up to 8 searches × 5-15 s
+    # each + Opus reasoning between). The default 120 s collapsed real runs
+    # mid-research. See anthropic_client.py::SERVER_TOOL_TIMEOUT_S.
+    from puzzleeval.anthropic_client import build_client, SERVER_TOOL_TIMEOUT_S
+    client = build_client(
+        api_key=ANTHROPIC_API_KEY,
+        timeout=SERVER_TOOL_TIMEOUT_S,
+    )
 
     # [logging] Set up logger for this agent
     logger = get_logger("agent_2_research")

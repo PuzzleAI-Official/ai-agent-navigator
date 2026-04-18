@@ -480,17 +480,24 @@ async def run_pipeline(state: RunState):
             # When PUZZLEEVAL_USER_SELECTION_ENABLED=0, the pause is skipped
             # and all Agent 2 candidates proceed to Agent 4 (today's behavior).
             from puzzleeval.config import USER_SELECTION_ENABLED
-            if USER_SELECTION_ENABLED and candidates:
-                # Group candidates by scope for the SelectionPanel
-                bp_steps = []
-                try:
-                    raw_result = (state.agent1_result or {}).get("result", {})
-                    raw_workflow = raw_result.get("workflow")
-                    if raw_workflow:
-                        bp_steps = raw_workflow.get("steps", [])
-                except (AttributeError, TypeError):
-                    pass
+            # Group candidates by scope for the SelectionPanel
+            bp_steps = []
+            try:
+                raw_result = (state.agent1_result or {}).get("result", {})
+                raw_workflow = raw_result.get("workflow")
+                if raw_workflow:
+                    bp_steps = raw_workflow.get("steps", [])
+            except (AttributeError, TypeError):
+                pass
 
+            # Gate the pause on (a) flag enabled, (b) have candidates,
+            # (c) have scopes to pick for. Without scopes the SelectionPanel
+            # has nothing to render and the pipeline would hang forever
+            # waiting for /select-candidates that the user can't submit.
+            # This path fires when Agent 1's workflow is None (unstructurable
+            # request) or when USER_SELECTION_ENABLED=1 but the flow is a
+            # pure single-scope request whose blueprint was collapsed.
+            if USER_SELECTION_ENABLED and candidates and bp_steps:
                 per_scope_candidates: dict[str, list[str]] = {}
                 for step in bp_steps:
                     step_id = step.get("id", "")
@@ -716,11 +723,39 @@ async def run_pipeline(state: RunState):
             _record_agent_cost_and_emit("agent_3", state.agent3_result.get("cost_usd", 0))
             _save_json("agent_3_output.json", state.agent3_result)
 
-        # Run both branches in parallel — Agent 4 starts as soon as Agent 2 finishes
-        await asyncio.gather(_branch_a_research_and_screening(), _branch_b_test_generation())
+        # Run both branches in parallel — Agent 4 starts as soon as Agent 2 finishes.
+        # return_exceptions=True is CRITICAL: without it, a failure in one branch
+        # (e.g. Agent 3 hits a 429) cancels the other branch mid-flight, tearing
+        # down a potentially completed Agent 4 run. The retrieved exception is
+        # re-raised below so the outer try/except still surfaces a clean
+        # pipeline_failed event.
+        _results = await asyncio.gather(
+            _branch_a_research_and_screening(),
+            _branch_b_test_generation(),
+            return_exceptions=True,
+        )
+        for _idx, _r in enumerate(_results):
+            if isinstance(_r, BaseException):
+                _branch_name = "research_and_screening" if _idx == 0 else "test_generation"
+                logger.exception(
+                    "parallel branch %s failed: %s", _branch_name, _r,
+                )
+                # Surface the error via the outer try/except so pipeline_failed
+                # carries the original exception type + message, not an
+                # asyncio.gather wrapper.
+                raise _r
 
         if state.cancel_requested:
-            emit("pipeline_cancelled", {"cancelled_at_agent": "after_screening"})
+            # Disambiguate cancel-after-screening vs cancel-during-selection.
+            # The selection pause sets `state.status = "awaiting_candidate_selection"`
+            # and clears it on resume. If the status is still "awaiting..." we
+            # know the user cancelled mid-pause.
+            cancelled_at = (
+                "during_selection"
+                if state.status == "awaiting_candidate_selection"
+                else "after_screening"
+            )
+            emit("pipeline_cancelled", {"cancelled_at_agent": cancelled_at})
             state.status = "cancelled"
             emit("done", {})
             state.event_bus.close()
@@ -854,13 +889,11 @@ async def run_pipeline(state: RunState):
         emit("agent_activity", {"agent": "report", "message": "Generating evaluation report...", "status": "progress"})
         try:
             from puzzleeval.report import assemble_report, report_to_dict
-            # Compute cost first so the report carries the final number.
-            total_cost = sum(
-                r.get("cost_usd", 0) if r else 0
-                for r in [state.agent2_result, state.agent3_result, state.agent4_result]
-            ) + (state.agent5_result.get("total_build_cost_usd", 0) if state.agent5_result else 0) \
-              + (state.agent5_result.get("total_test_cost_usd", 0) if state.agent5_result else 0)
-
+            # `state.total_cost_usd` already includes every agent's cost —
+            # each agent's completion path calls `_record_agent_cost_and_emit`
+            # which increments it. Using `state.total_cost_usd + total_cost`
+            # here would DOUBLE-COUNT the run. Previously total_cost was
+            # summed locally and added again; delete the local sum.
             report = assemble_report(
                 run_id=state.run_id,
                 trace_id=state.trace_id,
@@ -868,7 +901,7 @@ async def run_pipeline(state: RunState):
                 agent2_result=state.agent2_result,
                 agent4_result=state.agent4_result,
                 agent5_result=state.agent5_result,
-                total_cost_usd=state.total_cost_usd + total_cost,
+                total_cost_usd=state.total_cost_usd,
             )
             report_dict = report_to_dict(report)
             _save_json("evaluation_report.json", report_dict)

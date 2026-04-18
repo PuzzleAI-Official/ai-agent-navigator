@@ -26,12 +26,99 @@
 
 import type { ReactNode } from "react";
 
+// Playable audio artifact role — matches backend AudioArtifact in pipeline.ts.
+interface AudioPath {
+  role: string;
+  path: string;
+  token?: string;
+}
+
+/**
+ * Renders an HTML5 audio control for one captured caller/agent WAV. The
+ * path comes in as an absolute filesystem path from the backend (under
+ * runs/<trace_id>/harnesses/<slug>/voice/); we route through the backend's
+ * static audio endpoint that accepts `?path=` and streams the file back.
+ *
+ * Playback is purely local — the backend serves the file, the browser
+ * renders standard <audio controls>. No third-party media player needed.
+ */
+// Color + label mapping for every known artifact role. Kept in one
+// place so adding a new role (say, a recording of a customer-side
+// hand-off) is a single-line change.
+const ROLE_STYLE: Record<string, { label: string; color: string }> = {
+  caller: { label: "Caller", color: "text-blue-400" },
+  agent: { label: "Agent", color: "text-emerald-400" },
+  // The plugin-merged full-conversation clip. Highlighted so the user
+  // notices the "hit play to hear the whole call" option without having
+  // to click each turn individually.
+  conversation: { label: "Full call", color: "text-violet-300" },
+};
+
+function AudioClip({
+  role,
+  path,
+  featured = false,
+}: AudioPath & { featured?: boolean }) {
+  // Encode the full absolute path so special characters (backslashes on
+  // Windows, colons, spaces) survive the URL transport.
+  const audioUrl = `/pzapi/runs/audio?path=${encodeURIComponent(path)}`;
+  const style = ROLE_STYLE[role] ?? {
+    label: role.charAt(0).toUpperCase() + role.slice(1),
+    color: "text-zinc-300",
+  };
+  return (
+    <div
+      className={
+        featured
+          ? "flex items-center gap-2 text-sm mb-2 rounded border border-violet-700/40 bg-violet-900/10 p-2"
+          : "flex items-center gap-2 text-xs mt-1"
+      }
+    >
+      <span className={`${style.color} font-mono w-16 shrink-0`}>
+        {style.label}
+      </span>
+      <audio
+        controls
+        preload="none"
+        src={audioUrl}
+        className={featured ? "h-9 w-full" : "h-8 max-w-xs"}
+      />
+    </div>
+  );
+}
+
+function AudioPathsBlock({ paths }: { paths?: AudioPath[] }) {
+  if (!paths || paths.length === 0) return null;
+  // Split: "conversation" role(s) render first and wide (the whole call
+  // is what most users want to hear); per-turn caller/agent clips
+  // render below at the normal compact size.
+  const featured = paths.filter((p) => p.role === "conversation");
+  const perTurn = paths.filter((p) => p.role !== "conversation");
+  return (
+    <div className="mt-2 rounded border border-zinc-800 bg-zinc-900/40 p-2">
+      <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+        Audio ({paths.length})
+      </div>
+      {featured.map((ap, i) => (
+        <AudioClip key={`f${i}`} role={ap.role} path={ap.path} featured />
+      ))}
+      {perTurn.map((ap, i) => (
+        <AudioClip key={`t${i}`} role={ap.role} path={ap.path} />
+      ))}
+    </div>
+  );
+}
+
 interface EvidenceRow {
   test_case_id?: string;
   scenario?: string;
   passed?: boolean;
   score?: number;
   reasoning_excerpt?: string;
+  // Populated by voice/audio plugins (voice_realtime caller + agent WAVs).
+  // Each path is absolute under runs/<trace_id>/harnesses/<slug>/voice/.
+  // Playable via the /runs/{id}/audio?path=... endpoint.
+  audio_paths?: AudioPath[];
 }
 
 interface CandidateReport {
@@ -254,7 +341,7 @@ function CandidateRow({ c }: { c: CandidateReport }) {
           <summary className="cursor-pointer text-zinc-500 hover:text-zinc-300">
             Failure evidence ({c.failure_evidence.length})
           </summary>
-          <div className="mt-1 space-y-1 pl-3 border-l border-zinc-800">
+          <div className="mt-1 space-y-2 pl-3 border-l border-zinc-800">
             {c.failure_evidence.map((ev, i) => (
               <div key={i}>
                 <div className="text-zinc-300">
@@ -265,6 +352,29 @@ function CandidateRow({ c }: { c: CandidateReport }) {
                     {ev.reasoning_excerpt}
                   </div>
                 )}
+                <AudioPathsBlock paths={ev.audio_paths} />
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+      {c.success_evidence && c.success_evidence.length > 0 && (
+        <details className="text-xs">
+          <summary className="cursor-pointer text-zinc-500 hover:text-zinc-300">
+            Success evidence ({c.success_evidence.length})
+          </summary>
+          <div className="mt-1 space-y-2 pl-3 border-l border-emerald-900/40">
+            {c.success_evidence.map((ev, i) => (
+              <div key={i}>
+                <div className="text-zinc-300">
+                  {ev.scenario || ev.test_case_id}
+                </div>
+                {ev.reasoning_excerpt && (
+                  <div className="text-zinc-500 italic">
+                    {ev.reasoning_excerpt}
+                  </div>
+                )}
+                <AudioPathsBlock paths={ev.audio_paths} />
               </div>
             ))}
           </div>

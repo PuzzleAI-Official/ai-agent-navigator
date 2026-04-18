@@ -492,6 +492,11 @@ Examples:
                 workflow_file_path=args.file if turn == 1 else None,
                 trace_id=trace_id,
                 conversation_history=conversation_history if conversation_history else None,
+                # --no-interactive tells Agent 1 to produce a complete
+                # result when critical info is present, using defaults
+                # for optional fields. Without this flag, Agent 1 follows
+                # its normal multi-turn ask-for-clarification behavior.
+                proceed_with_partial_info=args.no_interactive,
             )
 
             result = run_user_understanding_agent(input_data)

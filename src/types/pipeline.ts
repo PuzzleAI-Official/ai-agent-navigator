@@ -48,12 +48,36 @@ export interface CriterionScore {
   reasoning: string;
 }
 
+// Playable audio artifact captured by voice/audio plugins (voice_realtime
+// caller + agent WAVs, multi-turn conversation segments). Mirrors
+// TestCaseResult.audio_paths + TestEvidence.audio_paths on the backend.
+// `path` is an absolute filesystem path under runs/<trace_id>/harnesses/
+// <slug>/voice/. Frontend renders via /runs/{id}/audio?path=... endpoint.
+export interface AudioArtifact {
+  role: "caller" | "agent" | string;
+  path: string;
+  // Optional session-grouping token (multi-turn driver uses it to group
+  // per-turn artifacts into a conversation). Safe to ignore single-turn.
+  token?: string;
+}
+
 export interface TestResult {
   test_case_id: string;
   passed: boolean;
   weighted_score: number;
   latency_ms: number;
   criteria_scores: CriterionScore[];
+  // Populated by voice/audio plugins when the test produced playable audio.
+  // Empty array for non-voice tests — safe to ignore when absent.
+  audio_paths?: AudioArtifact[];
+  // Which plugin(s) scored this test case, in invocation order.
+  // Includes 'tool_runner', 'llm_judge', and specific plugin names.
+  tools_used?: string[];
+  // Raw harness output + what Agent 3 sent in — populated by the backend
+  // but optional for UI consumers. Currently unrendered; future evidence
+  // expand panes can use them.
+  output_received?: string;
+  input_sent?: Record<string, unknown>;
 }
 
 // Phase 4: every candidate carries a coverage set over blueprint step IDs.

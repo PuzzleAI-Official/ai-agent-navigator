@@ -595,9 +595,16 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
     Then one final structuring call formats all findings into Agent4Result.
     """
     # ★ CORE LINE 1: Create the API client
-    # Central factory — 120 s timeout + max_retries=3 (see anthropic_client.py).
-    from puzzleeval.anthropic_client import build_client
-    client = build_client(api_key=ANTHROPIC_API_KEY)
+    # Server-tool timeout — Agent 4's deep-verify loop runs up to 15
+    # turns per candidate, each burning server-side web_fetch (6 max)
+    # and web_search (5 max). Legitimate completion can take 2-4 min
+    # per candidate on providers with fragmented docs. Default 120 s
+    # collapsed real runs mid-verify.
+    from puzzleeval.anthropic_client import build_client, SERVER_TOOL_TIMEOUT_S
+    client = build_client(
+        api_key=ANTHROPIC_API_KEY,
+        timeout=SERVER_TOOL_TIMEOUT_S,
+    )
 
     # [logging] Set up logger for this agent
     logger = get_logger("agent_4_screening")
@@ -648,20 +655,31 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
             # legacy structuring call. The deep-verify path produces
             # ScreenedCandidate instances with all enrichment fields populated;
             # we just need to assemble RejectedCandidate / FailedToVerify lists.
-            rejected_list = [
-                RejectedCandidate(
+            #
+            # Rejection details preserved from Phase 4D: telemetry["rejection_details"]
+            # maps candidate_name → {category, notes} parsed from the model's own
+            # REJECT_REASON + NOTES lines. Previously every rejection surfaced as
+            # a generic "docs_inaccessible" boilerplate — now the user sees
+            # enterprise_only / deprecated / no_api_access / no_public_docs as
+            # appropriate, with the model's actual notes.
+            rejection_details = telem.get("rejection_details", {}) if isinstance(telem, dict) else {}
+            rejected_list: list[RejectedCandidate] = []
+            for c in rejected_candidates:
+                detail = rejection_details.get(c.name, {})
+                category = detail.get("category", "no_public_docs")
+                notes = detail.get("notes", (
+                    "Deep-verify directed loop did not produce a PASS decision. "
+                    "The spec extraction did not emit a REJECT_REASON line, so the "
+                    "category defaults to no_public_docs. See agent4_specs/ for any "
+                    "partial spec emitted before rejection."
+                ))
+                rejected_list.append(RejectedCandidate(
                     name=c.name,
                     provider=c.provider,
-                    rejection_reason="deep_verify could not confirm public API access",
-                    rejection_category="docs_inaccessible",
-                    investigation_notes=(
-                        "Deep-verify directed loop did not produce a PASS decision. "
-                        "Either the docs URL was unreachable, the API does not exist, "
-                        "or the spec extraction failed. See agent4_specs/ for any partial spec."
-                    ),
-                )
-                for c in rejected_candidates
-            ]
+                    rejection_reason=f"Deep-verify REJECT: {category}",
+                    rejection_category=category,
+                    investigation_notes=notes,
+                ))
             scope_selections: dict[str, list[str]] = {}
             for sc in verified:
                 for sid in sc.covers_step_ids:

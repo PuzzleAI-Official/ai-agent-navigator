@@ -525,6 +525,73 @@ HYBRID_EVAL_ENABLED = os.environ.get(
 
 
 # ---------------------------------------------------------------------------
+# Evaluation dispatch strategy (Agent 5 per-test scoring)
+# ---------------------------------------------------------------------------
+# The path Agent 5 uses to pick which plugin(s) score a given test case.
+#
+#   "tool_runner" (default) — Plugins are exposed as ``@beta_tool`` functions
+#       to Claude via ``client.beta.messages.tool_runner``. Claude reads the
+#       test case + response, picks the right plugin(s), chains them across
+#       iterations when multiple are needed, and emits a structured
+#       ``ScoreVerdict`` as the final message. The SDK handles the tool-use
+#       loop and `output_format` enforces the schema.
+#
+#       This is the architecturally-correct path per Anthropic's docs: it
+#       fixes the "deterministic picked 1 but 3 were needed" gap, the
+#       "Agent 3 mis-labeled the modality" gap, the "ambiguous enum tiebreak"
+#       gap, AND scales cleanly past 30+ plugins via `tool_search_tool`.
+#
+#       Non-deterministic by design — Claude's selection varies slightly
+#       across runs. Borderline scores may wobble by ±0.02; rank ordering
+#       stays stable.
+#
+#   "deterministic" — Legacy enum-based dispatch. For emergency bisection
+#       only. modality.py picks one plugin per (input_type, output_type)
+#       pair. Reproducible but has the coverage gaps that motivated C.
+#
+#   "hybrid" — Deterministic first; if the chosen plugin returns
+#       ``fallback_reason`` OR no plugin matches, fall back to tool_runner.
+#       Middle ground: reproducible for clean cases, intelligent for edges.
+# ---------------------------------------------------------------------------
+EVAL_STRATEGY = os.environ.get(
+    "PUZZLEEVAL_EVAL_STRATEGY", "tool_runner"
+).strip().lower()
+if EVAL_STRATEGY not in {"tool_runner", "deterministic", "hybrid"}:
+    EVAL_STRATEGY = "tool_runner"
+
+# When the plugin count reaches this threshold, we switch from "load all
+# tools every call" to "load tool_search_tool + defer_loading on plugins"
+# so context stays cheap. Anthropic's published tool-selection accuracy
+# threshold sits around 30-50 tools; we switch earlier (conservative).
+# Set to 0 to always use tool_search_tool; set to 999 to never use it.
+EVAL_TOOL_SEARCH_THRESHOLD = int(
+    os.environ.get("PUZZLEEVAL_EVAL_TOOL_SEARCH_THRESHOLD", "15")
+)
+
+# Cap on tool_runner iterations per test case. One iteration = one Claude
+# API call + any tools it invokes that turn. With chaining, 4 is usually
+# enough for the "need N tools" case to converge. Raise for pathological
+# multi-modal tests, lower for speed.
+EVAL_MAX_ITERATIONS = int(
+    os.environ.get("PUZZLEEVAL_EVAL_MAX_ITERATIONS", "5")
+)
+
+# When enabled, plugin tools are marked ``allowed_callers=["direct",
+# "code_execution_20260120"]`` and a code_execution tool is added so
+# Claude can write one Python script that chains multiple plugins in a
+# single container — intermediate tool results don't enter the model's
+# context. Specifically closes the "need 3 tools, got 1" coverage gap
+# without N separate API round-trips. Claude decides per-test whether
+# to use programmatic mode; single-tool cases still invoke directly.
+# On by default — docs recommend this path for multi-modal scoring.
+# Flip to 0 for a pure direct-dispatch evaluation path (emergency
+# rollback + regression bisection).
+EVAL_PROGRAMMATIC_CHAINING_ENABLED = os.environ.get(
+    "PUZZLEEVAL_EVAL_PROGRAMMATIC_CHAINING", "1"
+).lower() not in ("0", "false", "no", "")
+
+
+# ---------------------------------------------------------------------------
 # Programmatic tool calling (Agent 5 builder)
 # ---------------------------------------------------------------------------
 # When enabled, the Agent 5 builder loop adds `code_execution_20260120` to
@@ -550,3 +617,81 @@ MIN_CACHEABLE_TOKENS = {
     "claude-sonnet-4-5-20250929": 1024,
     "claude-haiku-4-5-20251001": 4096,
 }
+
+
+# ---------------------------------------------------------------------------
+# Agent 3 test-generation sufficiency policy
+# ---------------------------------------------------------------------------
+# The "is this enough?" decision used to be spread across three sites
+# (Agent 3's prompt, the top-up retry's dimension-gap math, the validator's
+# shortfall check) with the 6 dimensions + 70% floor + absolute floor 3
+# hardcoded in each. Hoisted here so tuning is a one-line change and the
+# three consumers can never drift.
+#
+# These are POLICY, not bandaids — they define what "sufficient test coverage"
+# means for every scope regardless of capability / domain / provider. Lift
+# them to env-overridable so product tuning doesn't require code edits.
+# ---------------------------------------------------------------------------
+CANONICAL_COVERAGE_DIMENSIONS: frozenset[str] = frozenset({
+    "happy_path",        # works on typical input
+    "input_variation",   # different valid forms of input
+    "edge_case",         # boundary conditions, edge values
+    "scale",             # large input / concurrency / throughput
+    "domain_specific",   # domain knowledge (vocabulary, conventions)
+    "error_resilience",  # bad input, partial input, recovery
+})
+
+# When Agent 3 produces fewer tests than Agent 1's `test_count_target` for
+# a scope, the shortfall is an ERROR if `actual < floor(target * RATIO)`.
+# 0.7 is the band below which per-scope precision degrades significantly:
+# with the default 6-dimension canonical matrix, 70% coverage means at least
+# 4 of 6 dimensions are represented on average.
+SUFFICIENCY_FLOOR_RATIO = float(
+    os.environ.get("PUZZLEEVAL_SUFFICIENCY_FLOOR_RATIO", "0.7")
+)
+
+# Even with a small target (say 2), we want at least this many tests before
+# we trust the scope's results. 3 covers happy_path / variation / edge_case
+# minimally.
+SUFFICIENCY_HARD_FLOOR = int(
+    os.environ.get("PUZZLEEVAL_SUFFICIENCY_HARD_FLOOR", "3")
+)
+
+
+# ---------------------------------------------------------------------------
+# Agent 5 monthly-volume banding for endpoint selection
+# ---------------------------------------------------------------------------
+# Agent 5's builder reads `user_understanding.constraints.monthly_volume` to
+# pick between atomic and batch endpoints. The bands below convert the raw
+# number into qualitative guidance the LLM reasons about. These are
+# SMB / mid-market / enterprise heuristics — not per-provider carveouts.
+#
+# Shape: list of (exclusive_upper_bound, label, guidance_hint). Evaluated
+# in order; first band whose threshold the volume falls under wins.
+# Final entry has threshold=inf to catch everything above.
+# ---------------------------------------------------------------------------
+MONTHLY_VOLUME_BANDS: list[tuple[float, str, str]] = [
+    (100, "LOW",
+     "prefer simple / atomic endpoints; batch is over-engineering"),
+    (5_000, "MODERATE",
+     "atomic usually fine; consider batch if available + test cases imply bulk"),
+    (100_000, "HIGH",
+     "prefer batch / bulk endpoints when available"),
+    (float("inf"), "VERY HIGH",
+     "batch + streaming / async + pagination are load-bearing"),
+]
+
+
+def band_monthly_volume(monthly_volume: int | None) -> tuple[str, str]:
+    """Convert a raw monthly_volume into (label, guidance_hint).
+
+    Returns ``("UNSPECIFIED", "assume moderate")`` when ``None``.
+    Single source of truth so callers don't reinvent the threshold list.
+    """
+    if monthly_volume is None:
+        return "UNSPECIFIED", "not specified — assume moderate"
+    for threshold, label, hint in MONTHLY_VOLUME_BANDS:
+        if monthly_volume < threshold:
+            return label, hint
+    # unreachable — last band has inf threshold
+    return MONTHLY_VOLUME_BANDS[-1][1], MONTHLY_VOLUME_BANDS[-1][2]

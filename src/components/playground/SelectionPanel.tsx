@@ -29,6 +29,15 @@ interface Props {
   candidates: PipelineCandidate[];
   workflowSteps: WorkflowStep[];
   perScopeCandidates: Record<string, string[]>;
+  /**
+   * Phase 7's top-K programmatic picks per scope, sent alongside
+   * ``perScopeCandidates`` in the ``selection_required`` SSE payload. The
+   * panel pre-checks these (not all candidates) so the user starts from
+   * the smart default — a weighted rank across user_picked / credentials
+   * / relevance / docs / pricing_fit. Falls back to all-checked when the
+   * backend doesn't provide picks (e.g. legacy pipelines, feature flag off).
+   */
+  defaultPicks?: Record<string, string[]>;
   onSubmit: (
     scopePicks: Record<string, string[]>,
     userAdded: UserAddedCandidate[]
@@ -40,14 +49,29 @@ export function SelectionPanel({
   candidates,
   workflowSteps,
   perScopeCandidates,
+  defaultPicks,
   onSubmit,
   isSubmitting,
 }: Props) {
-  // State: which candidates are KEPT at each scope (all start selected).
+  // Initial selections: Phase 7's default_picks when provided (top-K from
+  // the weighted scorer), else fall back to "all candidates checked" so
+  // legacy pipelines behave as before.
   const [scopeSelections, setScopeSelections] = useState<Record<string, Set<string>>>(() => {
     const initial: Record<string, Set<string>> = {};
     for (const [scopeId, names] of Object.entries(perScopeCandidates)) {
-      initial[scopeId] = new Set(names);
+      const picks = defaultPicks?.[scopeId];
+      if (picks && picks.length > 0) {
+        // Intersect Phase 7 picks with the available candidate list so we
+        // don't pre-check a name the user can't see.
+        const allowed = new Set(names);
+        initial[scopeId] = new Set(picks.filter((p) => allowed.has(p)));
+        // If the intersection is empty (picks went stale) fall back to all.
+        if (initial[scopeId].size === 0) {
+          initial[scopeId] = new Set(names);
+        }
+      } else {
+        initial[scopeId] = new Set(names);
+      }
     }
     return initial;
   });

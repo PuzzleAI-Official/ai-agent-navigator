@@ -53,6 +53,15 @@ VALID_INPUT_TYPES = {
     # Inbound / outbound / voice modalities — wired in by the
     # webhook_receiver, outbound_delivery, voice_realtime plugins.
     "webhook_event", "voice_turn",
+    # Multi-turn voice agent scripts. Each test case carries an ordered
+    # list of turns; the voice_realtime plugin drives the loop, tracking
+    # per-turn pass/fail. Maps to voice_realtime's multi-turn driver
+    # (synthesize N caller WAVs, capture N agent responses, score each
+    # turn). Distinct from single-turn ``voice_turn`` because:
+    #   - harness template needs a loop-with-state branch
+    #   - evaluation breaks down per-turn, not just overall
+    #   - Agent 3 must emit a ConversationTurn script, not a single utterance
+    "voice_conversation",
 }
 # `code` and `audio_content` added so Agent 1's TestPlan can declare
 # code-generation and voice-agent scopes whose outputs are dispatched to
@@ -68,6 +77,11 @@ VALID_OUTPUT_TYPES = {
     "free_text", "structured_json", "classification", "extraction",
     "action", "media_url", "code", "audio_content",
     "webhook_callback", "outbound_message", "voice_turn",
+    # Multi-turn voice conversation aggregate — symmetry with
+    # VALID_INPUT_TYPES. Agent 3 may stamp this on test cases whose
+    # output is the whole N-turn exchange, not a single turn. Accepted
+    # by voice_realtime's capabilities; validator need only allow it.
+    "voice_conversation",
 }
 VALID_EVAL_TYPES = {"exact_match", "semantic_similarity", "contains_key_info", "format_compliance", "subjective_quality"}
 VALID_DIFFICULTIES = {"easy", "medium", "hard"}
@@ -596,24 +610,48 @@ def validate_agent2_output(
     # invoice, extract structured data..."). We use keyword overlap to
     # detect semantic coverage: if two descriptions share enough
     # significant words, they refer to the same sub-task.
-    agent1_subtask_descriptions = {st.description for st in agent1_output.sub_tasks}
-    covered_subtasks = set()
-    for c in result.candidates:
-        for st_ref in c.relevant_subtasks:
-            covered_subtasks.add(st_ref)
-
-    uncovered = agent1_subtask_descriptions - covered_subtasks
-    if uncovered:
-        still_uncovered = []
-        for uc in uncovered:
-            found = _fuzzy_subtask_match(uc, covered_subtasks)
-            if not found:
-                still_uncovered.append(uc)
-
-        if still_uncovered:
-            warnings.append(
-                f"Sub-tasks not covered by any candidate: {still_uncovered}"
+    #
+    # Phase 4 supersedes this check: when every candidate has non-empty
+    # `covers_step_ids` and every blueprint scope is covered by at least
+    # one candidate, the structured Phase 4 coverage signal is
+    # authoritative — the fuzzy `relevant_subtasks` description match
+    # is vestigial and fires false positives (real_debug_3: Agent 2
+    # summarized the scope as "Invoice OCR & data extraction" while
+    # Agent 1's description was 22 words; overlap < 40% → spurious
+    # warning despite every candidate having covers_step_ids=['step_1']).
+    bp = agent1_output.workflow
+    phase4_coverage_is_complete = False
+    if bp and bp.steps and result.candidates:
+        all_candidates_have_coverage = all(
+            bool(c.covers_step_ids) for c in result.candidates
+        )
+        if all_candidates_have_coverage:
+            all_scopes_covered = all(
+                any(step.id in c.covers_step_ids for c in result.candidates)
+                for step in bp.steps
             )
+            if all_scopes_covered:
+                phase4_coverage_is_complete = True
+
+    if not phase4_coverage_is_complete:
+        agent1_subtask_descriptions = {st.description for st in agent1_output.sub_tasks}
+        covered_subtasks = set()
+        for c in result.candidates:
+            for st_ref in c.relevant_subtasks:
+                covered_subtasks.add(st_ref)
+
+        uncovered = agent1_subtask_descriptions - covered_subtasks
+        if uncovered:
+            still_uncovered = []
+            for uc in uncovered:
+                found = _fuzzy_subtask_match(uc, covered_subtasks)
+                if not found:
+                    still_uncovered.append(uc)
+
+            if still_uncovered:
+                warnings.append(
+                    f"Sub-tasks not covered by any candidate: {still_uncovered}"
+                )
 
     # ── Phase 4: WorkflowBlueprint scope coverage ──
     # When Agent 1 produced a blueprint, check that every scope has at least
@@ -754,13 +792,57 @@ def validate_agent3_output(
     # not testable with the provided files — this is expected, not an error.
     has_file_tests = any(tc.test_file_path for tc in result.test_cases)
 
+    # Look up per-scope test_count_target from Agent 1's TestPlan, when present.
+    # Before the sufficiency upgrade, the validator used a hardcoded `< 3`
+    # threshold and silently accepted a scope that targeted 10 tests but
+    # produced 3 (only a warning). Now we enforce ``actual >= floor(target * 0.7)``
+    # so a scope's declared depth is respected — the pipeline will surface
+    # the shortfall loudly enough for the orchestrator to trigger a
+    # top-up generation call (see run_synthetic_tests_agent retry loop).
+    target_by_subtask: dict[str, int] = {}
+    test_plan = getattr(agent1_output, "test_plan", None)
+    if test_plan is not None:
+        specs = getattr(test_plan, "scope_specs", None) or []
+        # Map scope_id → capability → sub_task description to tie a target back
+        # to each sub_task. Sub_tasks and scope_specs share capability strings.
+        cap_to_desc: dict[str, str] = {
+            st.capability: st.description for st in agent1_output.sub_tasks
+        }
+        for spec in specs:
+            cap = getattr(spec, "capability", None)
+            target = getattr(spec, "test_count_target", None)
+            if cap and target and cap in cap_to_desc:
+                target_by_subtask[cap_to_desc[cap]] = int(target)
+
     for desc, cases in subtask_cases.items():
         if len(cases) == 0:
             if has_file_tests:
                 warnings.append(f"Sub-task not covered by file-based tests (expected if not file-testable): '{desc[:60]}'")
             else:
                 errors.append(f"Sub-task has ZERO test cases: '{desc[:60]}'")
+            continue
+        target = target_by_subtask.get(desc)
+        if target is not None:
+            # Sufficiency floor = max(hard_floor, target * ratio). Policy
+            # constants live in puzzleeval/config.py so all three consumers
+            # (prompt, top-up retry, this validator) stay in sync.
+            from puzzleeval.config import SUFFICIENCY_FLOOR_RATIO, SUFFICIENCY_HARD_FLOOR
+            floor = max(SUFFICIENCY_HARD_FLOOR, int(target * SUFFICIENCY_FLOOR_RATIO))
+            if len(cases) < floor:
+                errors.append(
+                    f"Sub-task under-generated: {len(cases)} test cases < floor {floor} "
+                    f"(target {target}): '{desc[:60]}'"
+                )
+                continue
+            if len(cases) < target:
+                # Above floor but below target — a warning, not an error.
+                # The pipeline proceeds; users see advisory in the summary.
+                warnings.append(
+                    f"Sub-task under-target: {len(cases)} test cases < target {target}: "
+                    f"'{desc[:60]}'"
+                )
         elif len(cases) < 3:
+            # No explicit target — fall back to the historical floor of 3.
             warnings.append(f"Sub-task has only {len(cases)} test cases (target: 5-8): '{desc[:60]}'")
 
     # --- Difficulty spread per sub-task ---
@@ -817,24 +899,31 @@ def validate_agent3_output(
         if not tc.expected_output or not tc.expected_output.strip():
             errors.append(f"Test case {tc.id} has empty expected_output")
 
-    # --- Coverage summary must not be empty ---
-    if not result.coverage_summary:
-        warnings.append(
-            "coverage_summary is empty — should map each sub-task to its test case count"
-        )
-
-    # --- Coverage summary consistency ---
-    actual_counts = {}
+    # --- Coverage summary auto-compute + consistency check ---
+    # Compute the truth from test_cases regardless. If Agent 3 didn't
+    # populate coverage_summary (common — prompt doesn't strongly enforce
+    # it), backfill the truth so downstream consumers (the report
+    # assembler, the run summary, the frontend) have it. If Agent 3 DID
+    # populate it but a count disagrees with reality, warn — that's a
+    # correctness issue in Agent 3's own bookkeeping, not a UX issue.
+    actual_counts: dict[str, int] = {}
     for tc in result.test_cases:
         actual_counts[tc.sub_task_ref] = actual_counts.get(tc.sub_task_ref, 0) + 1
 
-    for ref, count in result.coverage_summary.items():
-        actual = actual_counts.get(ref, 0)
-        if actual != count:
-            warnings.append(
-                f"coverage_summary says '{ref[:40]}' has {count} cases, "
-                f"but actual count is {actual}"
-            )
+    if not result.coverage_summary:
+        # Backfill silently — no warning. Agent 3 emitted the tests; the
+        # summary is derivable from them. Observability is preserved and
+        # the "did Agent 3 do its job?" question lives elsewhere
+        # (len(test_cases) == 0 check above).
+        result.coverage_summary = dict(actual_counts)
+    else:
+        for ref, count in result.coverage_summary.items():
+            actual = actual_counts.get(ref, 0)
+            if actual != count:
+                warnings.append(
+                    f"coverage_summary says '{ref[:40]}' has {count} cases, "
+                    f"but actual count is {actual}"
+                )
 
     return ValidationResult(passed=len(errors) == 0, errors=errors, warnings=warnings)
 
@@ -977,7 +1066,7 @@ VALID_FAILURE_CATEGORIES = {
 
 def validate_agent5_output(
     result: Agent5Result,
-    agent4_output: Agent4Result,
+    agent4_output: Agent4Result | None = None,
 ) -> ValidationResult:
     """
     Validate Agent 5's output quality.
@@ -1075,17 +1164,23 @@ def validate_agent5_output(
             )
 
     # --- Cross-agent consistency: every Agent 4 candidate accounted for ---
-    agent4_names = {c.name for c in agent4_output.validated_candidates}
-    harness_names = {h.candidate_name for h in result.harnesses}
-    failed_names = {f.candidate_name for f in result.failed_harnesses}
-    accounted_names = harness_names | failed_names
+    # In --agent5-input replay / hand-crafted scenarios there is no
+    # live Agent 4 run, so this cross-agent check has no reference set
+    # to compare against. Skip gracefully instead of AttributeError'ing
+    # the whole validator — the check is an observability warning, not
+    # a correctness gate.
+    if agent4_output is not None:
+        agent4_names = {c.name for c in agent4_output.validated_candidates}
+        harness_names = {h.candidate_name for h in result.harnesses}
+        failed_names = {f.candidate_name for f in result.failed_harnesses}
+        accounted_names = harness_names | failed_names
 
-    missing = agent4_names - accounted_names
-    if missing:
-        warnings.append(
-            f"Agent 4 validated candidates not found in Agent 5 results "
-            f"(silently dropped): {sorted(missing)}"
-        )
+        missing = agent4_names - accounted_names
+        if missing:
+            warnings.append(
+                f"Agent 4 validated candidates not found in Agent 5 results "
+                f"(silently dropped): {sorted(missing)}"
+            )
 
     # --- Budget check ---
     from puzzleeval.config import AGENT5_MAX_BUDGET_TOTAL

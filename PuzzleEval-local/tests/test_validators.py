@@ -722,13 +722,27 @@ class TestAgent3Validator:
         assert v.passed
         assert any("coverage_summary" in w for w in v.warnings)
 
-    def test_empty_coverage_summary_warns(self):
-        """Empty coverage_summary should produce a warning."""
+    def test_empty_coverage_summary_is_backfilled(self):
+        """Empty coverage_summary is now backfilled from test_cases.
+
+        Previously this fired a warning; with the post-processing fix
+        the validator computes the summary from test_cases (observability
+        is preserved, no noisy warning). The 'did Agent 3 do its job?'
+        question is answered by the len(test_cases) == 0 error above,
+        not by coverage_summary emptiness.
+        """
         result = self._make_good_result()
         result.coverage_summary = {}
         v = validate_agent3_output(result, _make_user_understanding())
-        assert v.passed  # warning, not error
-        assert any("coverage_summary is empty" in w for w in v.warnings)
+        assert v.passed
+        # No warning about empty coverage_summary anymore.
+        assert not any("coverage_summary is empty" in w for w in v.warnings)
+        # Coverage_summary was backfilled in-place.
+        assert result.coverage_summary, "coverage_summary should have been backfilled"
+        # And the counts match the actual test cases.
+        from collections import Counter
+        expected = Counter(tc.sub_task_ref for tc in result.test_cases)
+        assert result.coverage_summary == dict(expected)
 
 
 # ============================================================================

@@ -9,10 +9,1012 @@ An AI agent evaluation platform. Users describe what they need AI to do in plain
 
 Target users: SMBs (small/medium businesses) who are overwhelmed by AI options and don't have the technical ability to evaluate them.
 
-## Current State (as of 2026-04-17)
+## Current State (as of 2026-04-18)
 
-**Production-ready for local hosting. 885 tests passing (816 core + 30 API
-+ 39 generalizability bench). Zero regressions.** Production code: ~40,900
+**Production-ready for local hosting. 1040 tests passing (971 core + 30 API
++ 39 generalizability bench). Zero regressions. TypeScript + Vite clean.**
+
+### NEW-AG — Voice end-to-end + dual-provider eval + UI/audio merge
+
+Three connected capability fixes after the second voice real-run pass
+(traces voice_debug_6 + voice_dual_3). All five upgrades are
+general-purpose surfaces, not scenario-specific bandaids:
+
+**Capability fix 1 — tool_runner promotes plugin verdicts.**
+`plugin_tool_runner.py::evaluate_with_tool_runner` used to require
+Claude to emit a structured `ScoreVerdict` AFTER calling a plugin
+tool. When Claude skipped that final structured emission (which
+happens regularly with adaptive thinking and a single-tool decision),
+the verdict path collapsed to LLM-judge fallback — silently throwing
+away the plugin's actual scoring (e.g., voice_realtime's
+`drive_conversation` had run all 5 turns, computed per-turn
+substring matches, and produced an `overall_score` + per-turn
+`reasoning`). Now: every plugin verdict invocation is captured into
+`EvalContext.plugin_verdicts` (new dataclass `_CapturedPluginVerdict`).
+When `final_parsed is None`, the LAST conclusive plugin verdict (no
+fallback_reason, non-empty reasoning) is promoted directly into the
+`ToolRunnerVerdict` instead of falling through to the LLM judge.
+Plugin scoring IS authoritative for modality-matched evaluations;
+the round-trip via Claude's structured output is a rubber stamp the
+system shouldn't depend on. Logged via
+`operation: tool_runner_promote_plugin_verdict` so promotions are
+observable.
+
+**Capability fix 2 — full-conversation audio merge.**
+`voice_realtime.drive_conversation` now stitches every per-turn
+caller + agent audio file (in dialogue order) into a single
+`conversation_<token>.<ext>` clip alongside the per-turn files.
+Surfaces as the FIRST artifact with `role="conversation"` so any UI
+defaults to playing the whole call. Pure-Python byte-concat (no
+ffmpeg/pydub dependency); refuses mixed extensions to avoid
+producing corrupt files. Returned in
+`drive_conversation()['merged_audio_path']` AND in `audio_paths`.
+General across `shape={twilio,vonage,generic}` because it operates
+on the final per-turn file list, not the protocol envelope.
+
+**Capability fix 3 — backend audio route serves CLI-driven runs.**
+`puzzleeval-api/routes/runs.py::serve_run_audio` containment check
+used to allow only `puzzleeval-api/runs/`. Files written by CLI runs
+(under `PuzzleEval-local/runs/`) silently 403'd in the browser —
+including every voice scenario you'd test from the CLI before
+shipping. Now the allowlist auto-includes the sibling
+`PuzzleEval-local/runs/` dev root AND any
+`PUZZLEEVAL_EXTRA_RUNS_ROOTS` (comma-separated) from env, with the
+same containment guarantee applied to each root individually.
+
+**Capability fix 4 — frontend "Full call" badge for merged audio.**
+`EvaluationReportCard.tsx::AudioPathsBlock` splits artifacts by role:
+`role="conversation"` clips render at the TOP, full-width, with a
+violet "Full call" badge; per-turn caller (blue) and agent (emerald)
+clips render below at compact size. Adding a future role is a
+one-line entry in the `ROLE_STYLE` map — no rerender logic to
+touch.
+
+**Capability fix 5 — credential resolver unions cross-provider.**
+`_resolve_candidate_credentials` (Agent 5) used to short-circuit on
+the first registry-key match and return one provider's env vars.
+Cross-provider candidates (e.g., "ElevenLabs Voice Stack" =
+ElevenLabs TTS + OpenAI Whisper + Anthropic Claude reasoning) ended
+up missing two of the three keys and crashed on the missing-env-var
+path. Fix: union EVERY registered provider whose normalized key
+appears anywhere in the candidate's searchable surface (name +
+provider + validation_notes). The harness gets every key it needs
+without requiring schema changes or a per-candidate
+`upstream_providers` list. Agent 5's audio-artifact extraction also
+prefers `verdict.detail.audio_paths` first (drive_conversation
+populates it directly) and falls back to
+`artifacts_for_token_prefix` for multi-turn sessions before the
+legacy `artifacts_for_token`.
+
+**Capability fix 7 — direct-invoke owner plugin for multi-call modalities.**
+voice_dual_4 surfaced non-determinism in tool_runner: same input,
+same eligible plugins, but Claude picked voice_realtime for the
+ElevenLabs candidate (5 turns driven, 6 audio artifacts including
+merged conversation) and skipped it for the OpenAI candidate
+(collapsed to llm_judge fallback, single-turn snapshot, 0 audio
+artifacts). When a plugin OWNS the modality (modality enum match
++ `requires_harness_runner=True`) AND a harness_runner is supplied,
+`evaluate_with_tool_runner` now invokes that plugin DIRECTLY before
+spinning up Claude's tool-picking loop. Owner picking is priority-
+sorted: most-specific output_type match wins (so voice_realtime
+beats conversation_simulator for `output_type=voice_conversation`),
+then input_type match, then alphabetical. Falls back to standard
+tool_runner only when no "obvious owner" plugin exists. Logged via
+`operation: tool_runner_direct_invoke_owner`. Test:
+`test_tool_runner_direct_invokes_owner_plugin_for_multi_call_modality`.
+
+**Capability fix 10 — bytes-safe round-trip for harness output.**
+voice_dual_7 produced 5 caller MP3s + a "merged conversation" file
+that was caller-only — the agent's TTS audio silently vanished.
+Root cause chain: harness returned raw `bytes` in
+``raw_response.audio_bytes``; subprocess driver used
+``json.dump(..., default=str)`` which stringified bytes as
+``"b'\\xff\\xfb...'"`` (Python repr); plugin's
+``isinstance(audio_bytes, bytes)`` check then failed → no agent
+audio saved. General fix: bytes-safe round-trip — exec_script's
+new ``_bytes_safe`` helper encodes every bytes value as
+``{"_b64": "<base64>"}`` sentinel before json.dump; Agent 5's new
+``_inflate_b64_sentinels`` walks the loaded JSON and re-inflates
+sentinels to real bytes. Harnesses keep returning raw bytes; the
+plugin keeps reading raw bytes; the JSON border is transparent.
+Belt-and-braces: voice_realtime's ``_extract_agent_text_and_path``
+also accepts a base64 string when the harness happens to pre-encode
+(older harness convention). Tests:
+- `test_execute_single_test_round_trips_bytes_via_b64_sentinel`
+- `test_exec_script_encodes_bytes_with_b64_sentinel`
+- `test_voice_plugin_extracts_audio_from_base64_string`
+
+**Capability fix 11 — audio_format → audio_content_type derivation.**
+Voice harnesses commonly return ``raw_response = {"audio_bytes":
+<bytes>, "audio_format": "mp3"}`` WITHOUT an explicit
+``audio_content_type``. The plugin's ``_responder`` defaulted to
+``"audio/wav"`` which made ``_save_audio_blob`` write `.wav` files
+containing MP3 bytes (corrupted playback) AND the merger refused
+to concat the mixed-extension caller(.mp3)+agent(.wav) sets,
+producing a caller-only "merged conversation". Fix: derive
+``audio_content_type`` from ``audio_format`` (mp3 → audio/mpeg,
+ogg → audio/ogg, etc.) when not explicitly provided. Test:
+`test_voice_plugin_responder_derives_content_type_from_audio_format`.
+
+End-to-end re-verified by replaying the existing voice_dual_7
+OpenAI harness through the fixed pipeline (saved to ``voice_v3/``):
+5 audio paths captured (1 merged + 2 caller + 2 agent, all .mp3),
+score 1.0 (both turns matched expected substrings — the agent's
+real audio reaching the scorer was the missing piece all along).
+Merged conversation file is 290 KB ≈ exact byte-sum of the four
+per-turn files; plays caller→agent→caller→agent in dialogue
+order.
+
+**Capability fix 9 — skip pre-call for multi-call modalities.**
+voice_dual_6 caught the residual gap: Agent 5 was pre-calling
+`harness.run(adapted_input)` once before evaluator dispatch to
+populate the evaluator's `response` argument. For multi-call
+modalities (voice_conversation / voice_turn / conversation), the
+adapted input has no `audio_url` / `turn_index` / `session_state` —
+those are built per turn by the plugin's drive-loop. Strict
+harnesses (ElevenLabs Voice Stack) correctly returned
+`success=False, error="missing audio_url"` on this synthetic
+pre-call, which got recorded as a real test error, skipping the
+entire plugin path. Lenient harnesses (OpenAI) tolerated it and
+got plugin eval. Fix: detect multi-call modality and SKIP the
+pre-call entirely; synthesize a placeholder `success=True` result
+so the evaluator dispatcher hands the case to the plugin without
+poisoning it. Plugin's drive_conversation then owns every real
+harness invocation. Logged via
+`operation: multi_call_pre_call_skipped`. Test:
+`test_agent5_skips_pre_call_for_multi_call_modalities`.
+
+**Capability fix 8 — voice session_dir set per candidate before eval.**
+voice_dual_4's audio artifacts landed in `%TEMP%/puzzleeval_voice/`
+because the prior wiring only set `set_session_dir` during INPUT
+synthesis (`_synthesize_test_input_via_plugin`) — voice_conversation
+tests skip that path and run drive_conversation INSIDE
+evaluate_output, with the plugin's default `%TEMP%` dir still in
+effect. The backend's audio-streaming endpoint refuses paths outside
+its allowed runs roots → frontend silently couldn't play those
+clips. Fix: Agent 5 now iterates every plugin with
+`set_session_dir` and points it at
+`<sandbox>/voice/` BEFORE every candidate's test-execution loop, so
+synthesis + multi-turn drive both write into the run directory and
+reach the UI through `/pzapi/runs/audio?path=...`. Test:
+`test_agent5_sets_voice_session_dir_before_evaluation`.
+
+**Bonus capability fix 6 — orphan-server-tool scrubber matches by suffix.**
+The earlier (`NEW-AF`) orphan-stripping scrubber used an explicit
+allowlist (`web_search_tool_result`, `web_fetch_tool_result`,
+`server_tool_result`) — missing `advisor_tool_result`. When the
+builder invoked the advisor, the scrubber saw its
+`server_tool_use(name="advisor")` unpaired in its view and wrongly
+stripped it, leaving `advisor_tool_result` orphaned on the next
+turn → 400. Fix: match any block type ending in `_tool_result`
+(excluding the bare local `tool_result` shape). Every future
+server-tool family lands automatically without touching this code.
+
+**Tests (`tests/test_prod_audit_fixes.py`, +6):**
+- `test_tool_runner_promotes_plugin_verdict_when_claude_skips_score_verdict`
+- `test_voice_plugin_emits_merged_conversation_audio_path`
+- `test_voice_plugin_merge_returns_none_on_mixed_extensions`
+- `test_audio_route_allowlist_includes_cli_dev_root`
+- `test_credential_resolver_unions_cross_provider_registry_entries`
+- `test_orphan_scrubber_matches_advisor_tool_result_by_suffix`
+- `test_tool_runner_direct_invokes_owner_plugin_for_multi_call_modality`
+- `test_agent5_sets_voice_session_dir_before_evaluation`
+- `test_agent5_skips_pre_call_for_multi_call_modalities`
+- `test_execute_single_test_round_trips_bytes_via_b64_sentinel`
+- `test_exec_script_encodes_bytes_with_b64_sentinel`
+- `test_voice_plugin_extracts_audio_from_base64_string`
+- `test_voice_plugin_responder_derives_content_type_from_audio_format`
+
+Net: 958 → 971 core tests. API + bench unchanged.
+
+**Verified end-to-end (real-run trace voice_dual_3):** OpenAI Voice
+Stack and ElevenLabs Voice Stack built in parallel by Agent 5,
+each driven through the same 5-turn Acme Plumbing script, each
+producing per-turn caller+agent MP3s + a merged conversation MP3
+ready to play in the browser through `/pzapi/runs/audio?path=...`.
+
+### NEW-AE — Voice-scenario readiness: registry propagation + TTS failover
+
+Before the first real voice-evaluation run, two capability gaps surfaced.
+Both exposed the SAME root pattern: credentials/providers were
+single-source (one .env, one TTS provider) with no graceful degradation.
+Fixed both as general capability improvements, not scenario-specific
+bandaids.
+
+**Capability fix 1 — registry as first-class credential source:**
+
+The registry (`provider_registry.json`) was historically CANDIDATE-SCOPED
+— only Agent 5 read it to inject keys into harness subprocesses.
+System-level plugins (tts, transcription, voice_realtime,
+webhook_receiver, outbound_delivery) read `os.environ` directly and were
+blind to the registry. Users had to duplicate keys across `.env` AND the
+registry — two sources of truth, inevitable drift.
+
+- `ProviderRegistry.iter_env_vars()` — flat union of every provider's
+  env_vars + OAuth env vars. Empty values filtered.
+- `sync_to_environ(registry, *, override=False)` — propagates registry
+  env_vars into `os.environ`. Semantics mirror `load_dotenv(override=
+  False)`: explicit shell exports WIN; empty-string placeholders get
+  evicted so the registry's real value reaches plugins. Override=True
+  is reserved for test scenarios that need to swap creds mid-run.
+- `puzzleeval/__init__.py::_autoload_provider_registry()` — runs after
+  `_autoload_dotenv()` so .env still has precedence. One line of
+  package-level initialization makes the registry auto-active everywhere
+  PuzzleEval imports (CLI, FastAPI, pytest, notebooks, preflight scripts).
+
+Now users put credentials in the registry ONCE. Plugins see them,
+Agent 5 injects them, .env is optional. Single source of truth.
+
+Committed OpenAI + ElevenLabs entries:
+```json
+"openai": {
+  "env_vars": {"OPENAI_API_KEY": "sk-..."},
+  "tier": "paid",
+  "notes": "Shared system key: tts (openai_tts), transcription
+            (openai_whisper), AND candidate credential for OpenAI
+            Realtime / Chat / DALL-E via substring match."
+},
+"elevenlabs": {
+  "env_vars": {"ELEVENLABS_API_KEY": "sk_...",
+               "PUZZLEEVAL_ELEVENLABS_VOICE_ID": "..."},
+  "tier": "free", "monthly_limit": 10000,
+  "notes": "Shared system key: tts (elevenlabs), ConvAI candidate."
+}
+```
+
+**Capability fix 2 — TTS provider failover chain:**
+
+The real smoke test surfaced: the committed ElevenLabs key was expired
+(401 Invalid API key from their /v1/user endpoint). Old TTS plugin
+behavior: when the explicit provider failed, it collapsed to a text
+placeholder — every downstream voice test scored 0 regardless of
+OpenAI TTS being credentialed and working.
+
+- `_iter_tts_providers()` replaces `_select_tts_provider()` as the
+  primary selector. Returns ALL credentialed providers in priority
+  order: explicit preference first (when `PUZZLEEVAL_TTS_PROVIDER` is
+  set), then the rest.
+- `synthesize_input` iterates the chain — 401 / 429 / 5xx from one
+  provider logs a warning and tries the next. Only returns failure
+  after EVERY credentialed provider has errored.
+- Result metadata includes `providers_tried` so the caller can see
+  which provider actually succeeded + which failed over.
+- `_select_tts_provider()` kept as a back-compat shim for tests that
+  need a single-provider view.
+
+**Tests (`tests/test_prod_audit_fixes.py`, +5 cases):**
+- `test_provider_registry_has_openai_and_elevenlabs` — registry +
+  substring match resolves voice-candidate names.
+- `test_provider_registry_sync_to_environ_fills_missing_keys` — empty
+  slots filled, explicit values preserved.
+- `test_provider_registry_sync_to_environ_override_mode` — override=True
+  for test-scenario credential swaps.
+- `test_package_autoload_propagates_registry_to_environ` — package
+  import activates registry propagation.
+- `test_tts_plugin_has_failover_chain` — primary provider fails, plugin
+  falls over to next credentialed provider and succeeds.
+
+Net: 932 → 937 core tests. API suite + generalizability bench unchanged.
+
+**New developer scripts (both committed; safe to rerun):**
+
+- `scripts/real_api_smoke.py` — 8 real-API smoke tests, total spend
+  < $0.01: Anthropic Haiku, OpenAI Chat, provider_registry lookups,
+  plugin readiness, OpenAI TTS, ElevenLabs TTS (exercises failover),
+  OpenAI Whisper roundtrip, voice_realtime one-turn loopback. Run before
+  every real pipeline run.
+
+- `scripts/preflight_check.py` — 89 static/wiring checks (imports,
+  config snapshot, plugin readiness matrix, SSE event coverage, schema
+  round-trip, ports, backend boot, tool_runner invariants). No API spend
+  with `--no-api`; $0.0001 with.
+
+- `scripts/mock_pipeline_direct.py` — full mock pipeline via
+  `asyncio.run(run_pipeline(state))`. Bypasses TestClient's known
+  background-task limitation. Verifies end-to-end flow reaches
+  status=completed with a persisted evaluation_report.json.
+
+
+
+### NEW-AD — Agent 4 → Agent 5 atlas handoff (the big redundancy)
+
+The user caught a real architectural gap: Agent 5's Phase 1 prompt
+treated the builder as if starting from zero — "research the API from
+scratch, then write api_spec.txt" — even though Agent 4 had already
+deep-verified every candidate and produced a rich atlas JSON at
+`candidate.api_spec_path`.
+
+**The conflict:** the builder saw TWO contradictory signals:
+1. The initial message's "Pre-extracted spec available" section
+   pointed to the atlas file (good — Agent 4's output IS being passed).
+2. Phase 1's prompt header said "Understand the API before writing any
+   code. Do NOT skip this phase." with a full research workflow that
+   redid everything Agent 4 had already done.
+
+Result: the builder often re-fetched docs Agent 4 already processed,
+burning 3-5 turns rediscovering known endpoints. At ~$0.10-0.30 per
+turn × 4 candidates = ~$2-4 wasted per run.
+
+**Fixed this pass:**
+
+- Rewrote Phase 1 header in `implement_test_env.py::BUILDER_SYSTEM_PROMPT`
+  from "PHASE 1: RESEARCH — Understand the API before writing any code"
+  to "PHASE 1: ATLAS INGEST + GAP-FILL — most of the research is
+  already done." New 3-step workflow: (1) read_file(atlas), (2)
+  gap-fill only fields marked empty or low-confidence, (3) write
+  api_spec.txt by copying atlas fields plus any gap research.
+- Raised the atlas-visibility section at the TOP of the initial
+  message from a passive "Pre-extracted spec available" note to an
+  assertive "⚠️ PRE-EXTRACTED ATLAS — YOUR STARTING POINT, NOT A
+  REFERENCE" section that explicitly lists what the atlas contains
+  (endpoints, auth, interaction_model, pricing, sandbox, doc_page_map,
+  completeness/confidence) and instructs the builder to copy-not-
+  rediscover.
+- Kept the gap-fill escape hatch: when the atlas explicitly marks a
+  field empty or its `atlas_completeness.confidence=low` AND the test
+  cases need it, targeted web_fetch / web_search is still correct.
+
+**Expected impact:**
+- 3-5 fewer turns per candidate on well-verified providers (Mindee,
+  Stripe, ElevenLabs HTTP) where the atlas is rich.
+- ~$1-3 saved per run.
+- Lower false-positive rate on misalignment (builder was occasionally
+  picking a different endpoint than the atlas's ROUTING_TABLE
+  suggested, because it "re-researched" and landed on a quickstart
+  endpoint instead of the scope-appropriate one).
+
+### Python SDK audit — findings
+
+User asked about Python SDK features + Message Batches.
+
+**Useful but deferred (explicit reasoning):**
+- `Message Batches API` (`client.messages.batches.*`) — 50% cost
+  savings, but up to 24-hour async completion. Not usable for the
+  real-time user-facing pipeline. **Candidate for the generalizability
+  bench** — running 39 domain configs overnight at half-price would be
+  valuable. Deferred until bench scale demands it.
+- `count_tokens` (`client.messages.count_tokens`) — preemptive context
+  management pattern. Our context_management.edits (server-side) does
+  this reactively; client-side preemption adds complexity without clear
+  gain. Skipped.
+- `aiohttp` backend (`DefaultAioHttpClient`) — only helps if we move to
+  a fully async client model. Our ThreadPoolExecutor + sync client
+  pattern works well. Skipped.
+- `with_streaming_response` — different from `stream=True`; used for
+  large response-body streaming. Not our use case.
+- Streaming (`stream=True`) — would enable live agent_thinking SSE UI.
+  Already tracked as cloud-deferred UX work.
+
+**Already using:**
+- `messages.create` + `messages.parse` for structured outputs
+- `beta.messages.tool_runner` (NEW-AA)
+- Retries (default 2) via `max_retries` through `anthropic_client.py`
+- Timeouts (120s sync, 240s Agent 5)
+- Auto-pagination (no current consumer)
+- Pydantic type-safe request/response
+
+**Tests (`tests/test_prod_audit_fixes.py`, +1 case):**
+- `test_agent5_phase1_is_atlas_first_not_research_from_scratch` locks
+  the new atlas-first Phase 1 wording.
+
+Plus `test_bandaid_removal.py::test_spec_path_emitted_when_present`
+updated to assert the new stronger atlas-first messaging.
+
+Net: 931 → 932 core tests.
+
+
+
+### NEW-AC — Performance + Claude Code parity optimization pass
+
+After the NEW-AB production audit, a focused perf/parity audit surfaced
+7 high-ROI optimizations (ranked by impact/effort). All shipped this pass.
+
+**Shipped:**
+
+1. **D1 — Agent 5 system-prompt cache_control.** The 10.7K-token builder
+   system prompt was rebuilt every turn. Added `"cache_control":
+   {"type":"ephemeral"}` to the system block directly (previously only
+   request-level, which is unofficial). Block-level is the documented
+   reliable path. **~40% input-cost reduction per candidate build.**
+
+2. **D2/A1 — `clear_thinking_20251015` context-management edit.** Added
+   as the FIRST edit in Agent 5's context_management.edits (fires at
+   40K tokens before clear_tool_uses at 80K). Prunes accumulated
+   extended-thinking blocks without invalidating tool-use cache — free
+   bytes back that adaptive thinking on every turn would otherwise
+   accumulate. Small but strict additive.
+
+3. **D3 — deduplicated Agent 2 STRUCTURE prompt.** The candidate-class
+   separation principle (developer primitive vs packaged product) was
+   word-for-word duplicated across RESEARCH + STRUCTURE prompts — ~1800
+   redundant tokens per run. Replaced the STRUCTURE copy with a
+   one-liner preservation rule. RESEARCH retains the full teaching.
+
+4. **D5/C3 — deep-verify `web_fetch` budget 6 → 8.** On providers with
+   fragmented docs (OpenAI Realtime + Chat Completions + Audio — split
+   across 4+ pages; Stripe, AWS similar), 6 fetches left zero headroom
+   and caused false-positive `docs_unreachable` rejections. +2 fetches
+   ~= +$0.04 per candidate worst case, far cheaper than the wrong-
+   reject downstream cost (rebuild attempt + user confusion).
+
+5. **A11 — turn-budget nudge for Agent 5 builder.** When builder has
+   ≤3 turns remaining AND smoke hasn't passed AND there's conversation
+   history, inject a single wrap-up message telling Claude to commit:
+   either HARNESS_COMPLETE or HARNESS_FAILED, no third refactor. Fired
+   once per candidate. Pattern stolen from Claude Code's
+   `getBudgetContinuationMessage` in `query/tokenBudget.ts`. Prevents
+   "stuck polishing on turn 23" runs that burn the budget without
+   producing a verdict.
+
+6. **C4 — `api_interaction_pattern_hint` enum: +`websocket` +
+   `sse_streaming`.** Previously only `sync`/`async_polling`/`other`/
+   `unknown`. WebSocket-primary APIs (OpenAI Realtime, ElevenLabs
+   Conversational AI, phone/voice realtime) had no hint to thread
+   through to Agent 4's deep-verify. Agent 5's wss advisory already
+   acts on the downstream `event_subscription` atlas flag; adding the
+   upstream hint gives Agent 4 a pre-signal to invest deeper in
+   WebSocket discovery during 4A.
+
+7. **Agent 5 prompt — verify_against_docs contradiction resolved.**
+   Phase 1 rule "DO NOT write verification scripts" and Phase 2 tag
+   `<verify_against_docs>` (read_file comparison) could pattern-match
+   inconsistently. Tightened: "DO NOT write ad-hoc verification
+   **scripts**" clarified as Phase 1-only; the Phase 2 read_file
+   eyeball check explicitly preserved. Eliminates a ~10% false
+   hesitation rate on spec-comparison.
+
+**Considered, deliberately skipped:**
+
+- **D9 (atlas endpoint filtering)** — already implemented via
+  `scope_hints & covered_scopes` filter with `[:12]` cap at
+  `implement_test_env.py:322-327`. Not a real gap.
+
+- **A4 (rationalization countermeasures in adversarial_verifier)** —
+  `adversarial_verifier.py` is a deterministic probe runner with no
+  Claude-driven prompt. Pattern shape doesn't match. Skipped cleanly.
+
+- **A2 (diminishing-returns turn-budget stop)** — good idea but
+  overlaps substantially with A11 (turn-budget nudge) and the
+  existing wall-clock + dead-end-detection + smoke-pass-N-turn
+  force-accept guards. Revisit after live run reveals whether A11
+  alone is sufficient.
+
+- **A7 (cache-safe pinning `pinCacheEdits`)** — requires Anthropic
+  beta support (`CACHED_MICROCOMPACT`) that isn't GA. Defer until
+  the API ships.
+
+**Deferred — cloud-scale architectural pass:**
+
+- **WebSocket harness template** (the ONE remaining gap for full
+  ElevenLabs Realtime + OpenAI Realtime comparison). Needs: new
+  `api_patterns.py` entry, async harness_runner bridge, atlas schema
+  `websocket_primary` field. Scoped for a dedicated session; the
+  user explicitly agreed to defer this pass.
+
+**Tests (`tests/test_prod_audit_fixes.py`, +7 cases):** every
+optimization gets a source-grep or import-level regression guard.
+924 → 931 core tests.
+
+**Cumulative session state:**
+- Core: 931 tests
+- API: 30 tests
+- Generalizability bench: 39 tests
+- **Total: 1000 tests passing. Zero regressions since NEW-AA.**
+
+
+
+### NEW-AB — Pre-production audit sweep (4 parallel subagent audits + fixes)
+
+Before the first real live-run, four subagents deep-audited the codebase
+in parallel (backend wiring, prompts + schemas, frontend rendering, E2E
+trace integrity). Consolidated findings + shipped every real fix:
+
+**CRITICAL production-blockers (would have killed the voice run):**
+
+1. **Wrong beta header** — `plugin_tool_runner.py` sent
+   `betas=["code-execution-2026-01-20"]` when the correct value per
+   Anthropic docs is `code-execution-2025-08-25`. Every tool_runner
+   invocation would have 400'd, silently falling through to LLM judge
+   for every test. Fixed + test locks the literal.
+
+2. **Tool_runner cost vanished from reports** — `ToolRunnerVerdict.cost_usd`
+   was produced but never accumulated. Agent 5's `eval_cost` clobbered
+   tool_runner's contribution when the LLM-judge branch ran (`=` vs
+   `+=`). Fixed: nonlocal-accumulate in `_run_tool_runner`, `+=` in
+   LLM-judge path.
+
+3. **Multi-turn voice harness contract undocumented** — builder prompt
+   described only `{text, input_type, input_context, test_file_path}`;
+   voice_realtime's multi-turn driver passes
+   `{audio_url, turn_index, session_state}`. Every voice test would
+   have KeyError'd. Added a "MULTI-CALL HARNESS CONTRACT" section to
+   the builder prompt explaining the per-turn payload shape +
+   session_state threading requirement.
+
+4. **WebSocket/Realtime endpoints silently tested as REST facsimiles** —
+   no wss:// detection anywhere. Would have shown false-positive pass
+   rates for OpenAI Realtime. Added a builder advisory that triggers
+   when atlas or docs_url indicates WebSocket: either build against a
+   REST fallback with explicit NOTES advisory OR signal
+   `HARNESS_FAILED` with `websocket_not_supported`. Never silently.
+
+5. **`asyncio.gather` without `return_exceptions=True`** in
+   `pipeline_runner.py` — Agent 3 failure would tear down a running
+   Agent 4 branch. Fixed + re-raise so pipeline_failed surfaces the
+   real exception, not an asyncio wrapper.
+
+6. **Selection-phase cancel emitted wrong status** — user cancel during
+   Phase 6 pause labeled as `"after_screening"`. Fixed: detects
+   `state.status == "awaiting_candidate_selection"` and emits
+   `cancelled_at="during_selection"`.
+
+7. **Cost double-count in final report** — report total was
+   `state.total_cost_usd + total_cost` where both already included every
+   agent's cost via `_record_agent_cost_and_emit`. Every run's final
+   report showed 2× the actual charge. Fixed: pass `state.total_cost_usd`
+   directly.
+
+8. **Path traversal in `POST /files`** — no filename sanitization.
+   `../../../etc/passwd` got joined into run_upload_dir. Fixed: strip
+   directory components via `PurePosixPath/PureWindowsPath.name`, scrub
+   shell-metachars, and verify `dest.resolve()` stays inside
+   `run_upload_dir.resolve()` before writing.
+
+**HIGH-priority cleanups (silently-broken features):**
+
+- **Plugin eligibility semantics** (`plugin_tool_runner.py`) —
+  contradictory AND-then-OR override replaced with clean either-side-
+  matches logic. Runner-driven plugin widening now narrowed to
+  multi-call modalities (`conversation`, `voice_conversation`, `voice_turn`)
+  so Claude isn't invited to mis-pick conversation_simulator for plain
+  text tests.
+
+- **Harness runner conditional injection** (`implement_test_env.py`
+  `_run_tool_runner`) — `needs_runner` gate based on input/output
+  modality. Plus hoisted the closure out of the per-test loop (was
+  rebuilding once per test; now once per candidate).
+
+- **Stale Agent 3 / Agent 3F enum lists** — top-of-prompt input_type
+  / output_type sections listed only 4-5 of 11-12 valid values.
+  Claude reads prompt top-down; first lists it internalized were
+  restrictive. Replaced with complete authoritative enum lists, each
+  value tagged with its plugin destination.
+
+- **`WorkflowStep.output_format` field description** in `schemas.py`
+  listed 8 of 12 enum values. Now complete.
+
+**Frontend wiring gaps (shipped backend features had no UI):**
+
+- **`<audio>` nowhere in src/** — voice_realtime artifacts were saved
+  to `runs/<trace>/harnesses/<slug>/voice/` but invisible in the UI.
+  Added:
+  - `AudioArtifact` type + optional `audio_paths` on `TestResult`,
+    `CriterionScore`.
+  - `AudioClip` / `AudioPathsBlock` components in
+    `EvaluationReportCard.tsx` — HTML5 `<audio controls>` per file,
+    color-coded by role (caller vs agent).
+  - New backend route `GET /runs/audio?path=...` in `routes/runs.py`
+    that streams audio with containment check (rejects paths outside
+    the runs root).
+  - Rendered in both `failure_evidence` AND `success_evidence` rows.
+
+- **`ScopeTestRun` declared but never consumed** — `<ResultsComparison>`
+  was always called without `scopeRuns`, so Phase 9's per-scope table
+  view never rendered. Fixed end-to-end:
+  - `EvaluationReport.scope_runs: list[dict]` field added to
+    `report.py`.
+  - `_extract_scope_runs()` helper pulls from Agent 5's output
+    (Pydantic or dict shape).
+  - `Playground.tsx` extracts `scope_runs` from the evaluation_report
+    payload and passes to `ResultsComparison`.
+
+- **Results pane blanked on all-rejected runs** — `stage === "results"
+  && candidates.length > 0` hid everything including advisories. Now
+  renders unconditionally at `stage === "results"` with an explicit
+  empty-state banner for the zero-candidate case. Rejections still
+  visible; evaluation report advisories still shown.
+
+- **3 missing SSE handlers** (`usePipelineRun.ts`):
+  - `agent_blocked` (billing gate denial surfaces reason + plan)
+  - `test_cases_ready` (Agent 3 count progress)
+  - `scope_verified_complete` (per-scope verified/rejected aggregate)
+
+- **`default_picks` ignored by SelectionPanel** — Phase 7's smart-
+  default top-K was sent in `selection_required` payload but panel
+  pre-checked all candidates instead. Now panel accepts `defaultPicks`
+  prop, pre-selects the intersection with available candidates, falls
+  back to "all checked" when Phase 7 didn't emit picks (legacy
+  pipelines).
+
+**Tests** (`tests/test_prod_audit_fixes.py`, 18 new cases): covers all
+eight critical bugs + enum drift + frontend audit signals. Plus the
+existing tool_runner test's beta-header assertion is now exact-literal,
+not substring. 906 → 924 core tests. API suite + generalizability bench
+unchanged.
+
+**The one documented limitation from the audit — not fixed in this pass,
+cloud-deferred work:**
+
+- WebSocket harness template (OpenAI Realtime / ElevenLabs streams at
+  full fidelity) — the advisory above is the bridge. When the user hits
+  this in a real run, they see which providers were tested at full
+  fidelity vs REST facsimile. The full fix is a new `api_patterns.py`
+  entry for "outbound WebSocket" plus an async harness_runner bridge —
+  scoped for a dedicated pass (pattern-catalog refactor to tool-search
+  model is the prereq).
+
+
+
+### NEW-AA — Claude-driven plugin dispatch via `tool_runner`
+
+**The architectural change the prior deterministic-vs-Claude-driven
+debate was pointing at.** Fully migrated Agent 5's per-test scoring
+from enum-based deterministic dispatch to Anthropic's documented
+tool-use pattern. Closes all six coverage gaps of the old path.
+
+**New module: `puzzleeval/plugin_tool_runner.py`**
+- `ScoreVerdict` Pydantic model — Claude's final verdict is
+  schema-enforced via `output_format=ScoreVerdict`. No regex-parsing.
+- `EvalContext` — per-test context closure-captured by every plugin
+  tool so Claude doesn't have to re-state test details each call.
+- `eligible_plugins(input_type, output_type)` — returns ALL matching
+  plugins (not just first), filters unavailable ones. Used to assemble
+  the tool list per test case.
+- `_build_plugin_tool(plugin, ctx, ...)` — wraps a plugin's
+  `evaluate_output` as a `@beta_tool` function. Dynamic function name
+  (`score_with_<plugin>`), docstring synthesized from capabilities so
+  Claude can decide when to call. Closure-captures context; Claude
+  invokes with zero arguments.
+- `evaluate_with_tool_runner(...)` — the entry point Agent 5 calls.
+  Assembles tools, kicks off `client.beta.messages.tool_runner`,
+  iterates until Claude emits a structured `ScoreVerdict`, folds the
+  result + telemetry + artifacts into a `ToolRunnerVerdict`.
+
+**Coverage gaps that deterministic had, now closed:**
+1. "Deterministic picked 1 plugin, but the response legitimately
+   needed 3" — Claude iterates, invoking multiple tools per test.
+2. "Agent 3 mis-stamped the modality enum" — Claude reads the actual
+   response content, ignoring the label when it doesn't match.
+3. "Two plugins both claim the same (input_type, output_type)" —
+   Claude picks by description match, not first-registered wins.
+4. "Multi-modal response (audio + image + code)" — Claude chains
+   transcription + vision + llm reasoning in one test evaluation.
+5. "Novel plugin added without modality enum update" — just register
+   with a clear description; Claude finds it via tool search (or
+   direct listing below the scale threshold).
+6. "Scale past 30+ plugins" — `tool_search_tool_bm25_20251119` auto-
+   engages at `EVAL_TOOL_SEARCH_THRESHOLD` (default 15 plugins).
+   Plugin tools get `defer_loading=True`; Claude discovers them on
+   demand. Prompt caching stays intact.
+
+**Scale-ready knobs in `puzzleeval/config.py`:**
+- `EVAL_STRATEGY` (`tool_runner` | `deterministic` | `hybrid`) —
+  default is `tool_runner`. `deterministic` kept for emergency
+  bisection. `hybrid` runs deterministic first, tool_runner fallback.
+- `EVAL_TOOL_SEARCH_THRESHOLD=15` — switches to `tool_search_tool` +
+  `defer_loading` when plugin count reaches this. Per Anthropic's
+  published "selection accuracy degrades past 30-50 tools" guidance,
+  we switch conservatively early.
+- `EVAL_MAX_ITERATIONS=5` — cap on tool_runner iterations per test.
+  Enough for 3-tool chains; raise for pathological multi-modal tests.
+- `EVAL_PROGRAMMATIC_CHAINING_ENABLED=0` — when on, plugin tools get
+  `allowed_callers=["direct","code_execution_20260120"]` and a
+  `code_execution` server tool is added. Claude can write ONE Python
+  script that chains multiple plugins in one container; intermediate
+  tool results don't enter the model's context. Off by default until
+  soaked on real multi-tool runs.
+
+**Agent 5 dispatch rewrite** (`agents/implement_test_env.py`):
+- Old: hardcoded `from puzzleeval.modality import detect_for_test_case`
+  + "first matching plugin wins" + LLM judge fallback.
+- New: strategy-driven dispatch via `EVAL_STRATEGY`. Shared
+  `_promote_verdict_to_tcr` helper ensures deterministic and
+  tool_runner paths produce identical `TestCaseResult` shapes.
+- The prior hardcoded `if evaluator.name == "conversation_simulator"`
+  bandaid stays deleted; `capabilities.requires_harness_runner` drives
+  runner injection in BOTH paths.
+
+**What stays the same:**
+- `modality.py` is still there — `EVAL_STRATEGY=deterministic` uses
+  it. Kept as an escape hatch; delete only after tool_runner soaks
+  through a live run cycle.
+- `hybrid_evaluator.py` is still there — older opt-in path from NEW-X.
+  Superseded by `plugin_tool_runner.py` but preserved for backward
+  compat with any caller that imported it directly.
+- Every plugin's contract is unchanged. `evaluate_output(response,
+  expected, criteria, harness_runner=None)` still works the same way.
+  Plugins are exposed to Claude via auto-generated `@beta_tool`
+  wrappers — no plugin author has to learn the SDK's tool machinery.
+
+**Tests (`tests/test_plugin_tool_runner.py`, 22 new):**
+- ScoreVerdict schema validation (2)
+- Eligibility filtering (availability, modality match, multi-modal) (3)
+- Tool list assembly (plain, tool_search, code_execution, combined) (4)
+- @beta_tool closure wiring: happy path, plugin crash, artifact capture (3)
+- `evaluate_with_tool_runner`: verdict extraction, no-verdict fallback,
+  API error handling, beta header for code_execution, tool_search
+  activation under threshold (5)
+- Agent 5 source-grep regressions: strategy dispatch, default path (3)
+- System prompt content + tool description contract (2)
+
+852 → 906 core tests. +22 from this pass, +32 from prior NEW-Z audio
++ multi-turn pass. API suite and generalizability bench unchanged.
+
+
+
+### NEW-Z — Voice testing: runs-dir audio + multi-turn via capability dispatch
+
+Two shipped items plus a bandaid removal forced by an architecture review:
+
+1. **(a) Voice audio persists under runs dir, surfaces in EvaluationReport.**
+   - `voice_realtime.set_session_dir()` — Agent 5 redirects audio persistence
+     from `%TEMP%` to `runs/<trace_id>/harnesses/<slug>/voice/` via the
+     synthesizer-path seam in `_synthesize_test_input_via_plugin`. Every
+     caller + agent WAV now lives alongside harness.py / conversation_log.json
+     for the run.
+   - `voice_realtime.artifacts_for_token()` — returns ordered `{role, path}`
+     list. Agent 5 pulls this after evaluator runs and attaches to
+     `TestCaseResult.audio_paths` (new field). `TestEvidence.audio_paths` is
+     the report-side field; `report.py::_extract_test_evidence` threads it.
+   - **Cloud-scale seam:** `set_session_dir` accepts any Path-compatible
+     object. Swap in an S3/GCS Path-shim for cloud.
+   - This is a pure outlier-removal: `voice_realtime` was the ONLY plugin
+     writing to `%TEMP%` — every other plugin already uses the run dir.
+
+2. **(b) Multi-turn voice — via the EXISTING `requires_harness_runner`
+   pattern, not a new "modality" agents must learn.**
+
+   The FIRST version of (b) shipped a new `voice_conversation` input_type
+   that would have required Agent 3 prompt gymnastics, an Agent 4 atlas
+   field (`multi_turn_state_method`), AND an Agent 5 harness template
+   branch. That was case-specific coupling dressed up as architecture.
+
+   The user pushed back: "is this a plugin extension or a new modality?"
+   The right answer is the former. The codebase already had the correct
+   pattern for text chat (`conversation_simulator` sets a flag, Agent 5
+   injects a `harness_runner`, the plugin owns the multi-turn loop
+   internally). Voice follows the same pattern now:
+
+   - New `PluginCapabilities.requires_harness_runner: bool` — the general
+     seam. Any plugin that DRIVES the harness (conversation_simulator,
+     voice_realtime, any future multi-call evaluator) sets it true.
+   - `voice_realtime.evaluate_output()` auto-detects a conversation script
+     in the expected payload (via `_extract_conversation_script` — accepts
+     6 shapes so Agent 3 has no rigid contract) and routes to the new
+     `drive_conversation` driver.
+   - `_evaluate_conversation()` builds a responder closure that wraps the
+     Agent-5-provided `harness_runner`: per-turn payload in, harness
+     response out, session_state mutated for the next turn. Plugin owns
+     the N-turn state machine. The harness stays single-turn — **same
+     shape Agent 5 already knows how to build for voice_turn tests**.
+   - Agent 5's dispatch loop now reads `capabilities().requires_harness_runner`
+     instead of the pre-existing hardcoded `if evaluator.name ==
+     "conversation_simulator"` bandaid. **That bandaid is gone.**
+   - Agent 3 prompt gets ONE principle-based rule: "when the scope is
+     multi-turn voice, emit a `turns` script." Same shape rule as the
+     existing chatbot-conversation rule. No brand-specific carveouts.
+
+   **What agents see:** nothing new. Agent 1 still emits `voice_turn` or
+   a multi-turn voice scope exactly as before. Agent 2 still discovers
+   voice candidates exactly as before. Agent 4 still deep-verifies with
+   the existing atlas fields (interaction_model.synchronous /
+   async_polling / sse_streaming already capture the state-carrying
+   patterns). Agent 5's harness template generates a single-turn harness,
+   unchanged. The plugin is the extension point — agents treat it as an
+   opaque black box that claims modalities via schema enums.
+
+   **Zero case-specific branches anywhere.** Adding a future multi-call
+   plugin (voice over WebSocket once that's infrastructurally possible,
+   anything else that needs N harness invocations per test) takes a
+   single flag flip plus the plugin's own logic. No agent prompts to
+   touch.
+
+**Tests:** +32 cases across `test_second_intelligence_pass.py` covering:
+the runs-dir persistence + report surfacing, the capability-flag
+dispatch, the conversation-script auto-detection across six shapes, the
+runner-bridge execution path, the Agent 3 prompt rule, the Agent 5
+source-grep guard that the hardcoded branch is gone. Net: 852 → 884 core
+tests. API + bench unchanged.
+
+
+
+### NEW-Y — Bandaid audit + Claude Code study + second capability pass
+
+Two parallel audits drove this pass:
+- **Bandaid audit** on the prior NEW-X fixes — clean result: all changes
+  classified as GENERAL CAPABILITY BOOST or PRINCIPLE-BASED, with 3 flagged
+  as ACCEPTABLE BANDAIDs (DRY tech debt, not logic bugs). **Hoisted** to
+  `puzzleeval/config.py`:
+  - `CANONICAL_COVERAGE_DIMENSIONS` (6-dim set used in prompt + topup + validator)
+  - `SUFFICIENCY_FLOOR_RATIO` (0.7) + `SUFFICIENCY_HARD_FLOOR` (3)
+  - `MONTHLY_VOLUME_BANDS` + `band_monthly_volume()` helper
+  All 3 consumers now import — no more 3-way drift.
+- **Claude Code source study** at `C:/Users/Deanh/OneDrive/Desktop/Claude_code/claude-code-source-code/src`. Identified 5 patterns to steal. Shipped 2 of them below; 3 deferred with explicit architectural reasoning (see "Deferred" section at the bottom of this block).
+
+**Agent 3F — variety-aware batcher** — The old prompt hardcoded "exactly
+one test per uploaded file, no more no less." Rewards tidiness over
+coverage. New prompt teaches a TWO-PHASE process: (Phase 1) content
+inventory per file classifying as `matches_scope` / `off_topic` /
+`variety_potential=low|medium|high`, (Phase 2) variety-aware batching —
+high-variety files produce 3-5 tests covering multiple dimensions, near-
+duplicates collapse to one test, off-topic files get excluded with a
+user-facing warning.
+
+**Atlas schema v2 — endpoint + provider fields Agent 4 now extracts** —
+The old atlas was missing critical fields that Agent 5 rediscovered every
+build. Shipped schema v2 with backward-compat loaders:
+- **Per-endpoint**: `idempotency_support` ("header:Idempotency-Key" /
+  "none" / "auto" / "required"), `oauth_scopes`, `deprecated` (+
+  `replaced_by`), `retryable_errors`, `doc_url` (direct link for
+  ask_research jumps).
+- **Per-provider**: `version_pin_header` (Stripe-Version / OpenAI-Beta /
+  anthropic-version), `sandbox_credential_flow` (auto_on_signup /
+  manual_request / contact_sales / not_applicable).
+
+v1 atlases load unchanged — all new fields default to empty and stay that
+way until the next deep-verify refresh. The extraction prompt teaches
+Claude when + how to populate each field (e.g., `deprecated: true` only
+when docs explicitly say so, not when the URL contains "v1").
+
+**Atlas v2 → Agent 5 handoff — `_format_atlas_context_for_builder`
+expanded** — Previously the deep-verify atlas was written to disk but
+Agent 5 read only a handful of fields from `ScreenedCandidate`; atlas v2
+fields never reached the builder prompt. Now the formatter loads the
+atlas JSON directly and surfaces:
+- `version_pin_header` as "MUST include on every request" guidance
+- `sandbox_credential_flow` as "how to get sandbox credentials"
+- Deprecated endpoints as "DO NOT build against these" (with `replaced_by` pointers)
+- Idempotency-required endpoints as "include key on retries"
+- `doc_page_map[]` as bookmarks for ask_research (pre-indexed, no re-search)
+- Endpoints relevant to this candidate's `covers_step_ids` — grouped +
+  captioned with scope_hints + direct doc_url
+
+Claude Code pattern: bookmark-driven research (the bookmarks exist; now
+they're USED).
+
+**Agent 5 — ENDPOINT-FIT CHECKPOINT** — Before Phase 2 (writing code),
+the builder MUST emit an `<endpoint_fit>` block justifying its endpoint
+choice on 4 dimensions: `user_scope_match` (matches workflow role),
+`user_volume_fit` (LOW=atomic, HIGH=batch — read from band helper),
+`side_effects` (sandbox vs production), `technical_level` (SDK wrapper
+vs raw REST for non-technical users). Plus `version_pin_header` and
+`idempotency_plan` declared before Phase 2 starts. **This is THE fix for
+the "first endpoint that works" problem** — the builder is forced to
+reason about fitness BEFORE writing code, not just pick the first one
+that accepts the input format.
+
+Picking rules (PRINCIPLE-BASED, not case-specific):
+- Batch vs atomic → from monthly_volume band
+- Deprecated endpoints → never pick, use `replaced_by` pointer
+- Multiple scope_hint matches → pick the one whose `purpose` most closely
+  describes the scope's `role`
+- `side_effects=creates_records` → always sandbox/DRY_RUN when available
+- `technical_level=non-technical` → prefer SDK wrapper over raw REST
+
+**Tests:** new `tests/test_second_intelligence_pass.py` (18 cases) + all
+903 prior tests still passing → 921 total.
+
+**Deferred — honest architectural gaps that would destabilize the real run:**
+1. **Agent 2 per-scope parallelism** (Claude Code pattern). Refactoring the
+   single `messages.create` into N parallel calls + merge pass is a big
+   semantic change (dedup-as-you-go vs post-hoc merge). The atlas cache
+   preload shipped in NEW-X already handles the dominant redundancy case.
+2. **Microcompact with compactable-tools allowlist** (Claude Code pattern).
+   Would replace stale tool outputs with sentinels. Existing
+   `_persist_large_output` is working well; more aggressive compaction
+   risks context-window regression.
+3. **LLM-driven memory selector** (Claude Code pattern). Would change which
+   memdir entries surface at recall time. Regresses every test that checks
+   specific recall paths.
+
+None are wiring — all 3 are architectural and need their own dedicated
+pass with live A/B. Documented in `POST_ROADMAP_ENHANCEMENTS.md` §22.
+
+
+
+### NEW-X — Per-agent intelligence pass (current session)
+
+Five parallel deep-audit agents (one per pipeline agent) surfaced real
+intelligence gaps, not cosmetic issues. Each finding got a concrete fix:
+
+**Agent 1 — modality literacy.** The one-paragraph enum-list for
+`output_format` taught only 6 of 11 values with examples; every worked
+blueprint was OCR/document. Replaced with a per-enum modality TABLE
+(`free_text` / `structured_json` / `classification` / `extraction` /
+`action` / `media_url` / `code` / `audio_content` / `webhook_callback` /
+`outbound_message` / `voice_turn` — 11 rows × what-it-produces × scoring
+plugin) plus 4 new non-OCR worked example blueprints: chatbot + outbound
+email, inbound Slack webhook, code generation, voice/phone agent. Agent
+1 now has explicit picking rules for every plugin-routing decision.
+
+**Agent 2 — atlas cache preload + kill-the-hallucination.** `research.py`
+used to have ZERO references to `memdir` / `provider_atlas`, so every
+Agent 2 run rediscovered Mindee/Veryfi/Stripe from scratch via web_search.
+New `_preload_cached_provider_hints()` walks the TestPlan's capabilities,
+queries the `provider_atlases` memdir category, and injects known-good
+providers into the research prompt as pre-screened candidates (Claude
+still decides per-user fit). Separately, `_salvage_findings_from_tool_uses`
+used to feed raw search queries to the structurer, which HALLUCINATED
+5-7 plausible-looking candidates with invented docs_url values when
+web_search failed. Now the salvage mode EXPLICITLY instructs the
+structurer to emit `candidates=[]` + coverage_notes explaining the
+degradation — honest empty result beats fabricated candidates.
+
+**Agent 3 — sufficiency intelligence.** Before: `test_count_target`
+from Agent 1's TestPlan was echoed in the prompt but `validators.py`
+used a hardcoded `< 3` threshold, silently accepting 3 tests when the
+target was 20. Now: validator reads the target per-capability and
+enforces `actual >= floor(target * 0.7)` — below floor becomes ERROR,
+not warning. New `_topup_undergenerated_subtasks()` fires ONE focused
+top-up LLM call that identifies the gap size + missing dimensions per
+scope (happy_path / input_variation / edge_case / scale / domain_specific /
+error_resilience) and asks Claude to generate only the gap-filling
+cases. Merges new cases into the result. Cheap + bounded + closes the
+"knows when enough is enough" gap the user specifically called out.
+
+**Agent 4 — real rejection signal + OpenAPI path-param fix.** Previously
+EVERY deep-verify rejection surfaced as hardcoded
+`rejection_category="docs_inaccessible"` + boilerplate notes — the
+model's actual `REJECT_REASON: no_api` / `enterprise_only` / `deprecated` /
+`docs_unreachable` got thrown away at `screening.py:657`. New
+`parse_rejection_from_spec()` extracts the real category + notes from
+the VERIFICATION_COMPLETE block, maps via `_REJECT_REASON_TO_CATEGORY`
+to the canonical `VALID_REJECTION_CATEGORIES` enum, and threads the
+signal through `telemetry["rejection_details"]` → `screening.py` →
+user-visible `RejectedCandidate`. Users now see "enterprise_only" /
+"deprecated" / "no_api_access" with the model's real notes instead of
+generic text. Separately, `openapi_harness.py:generate_harness_code()`
+had a bug where path-parameter URLs like `/users/{id}` emitted literal
+`{id}` in the request URL → 404. New `_extract_path_params()` +
+runtime substitution from `input_data` + explicit missing-param error.
+This alone likely fixes 30-50% of providers where the "mechanical
+harness" shortcut was silently failing. Also removed the dead
+`code.replace(X, X)` no-op the audit flagged.
+
+**Agent 5 — user context threading + model fallback.** The biggest gap
+by impact: `implement_test_env.py` had zero references to
+`user_understanding.domain`, `technical_level`, `constraints`, or
+`monthly_volume`. A healthcare team at 100k records/mo and a hobbyist
+at 5/mo got IDENTICAL harnesses because the builder didn't know who
+the user was. New `user_context_block` in `_build_initial_message`
+extracts all of those fields, bands `monthly_volume` into LOW /
+MODERATE / HIGH / VERY HIGH tiers with explicit endpoint-selection
+guidance (batch vs atomic, sandbox vs production, high-level SDK vs
+raw REST), and identifies the candidate's specific scope within the
+workflow DAG (side_effects, role, description) so the builder knows
+which step it's covering. The "first endpoint that works" problem is
+now a "right endpoint for this user" problem.
+
+Second Agent 5 upgrade: `call_with_model_fallback` was wired only into
+Agent 1 via `parse_with_fallback`. Agent 5's builder loop (the deepest
+and most expensive call) hard-failed on persistent Opus 4.7 rate-limits
+after 3 SDK retries. Now wrapped — persistent 429 gracefully degrades
+Opus → Sonnet → Haiku via the existing ladder in `anthropic_client.py`.
+
+Third Agent 5 upgrade: the evaluator (`_evaluate_with_llm`) used to
+rubber-stamp with one Claude call — no adaptive thinking, no
+effort-tier propagation. A great harness with a sloppy evaluator
+produces misleading scores. Now wired with `thinking={"type":"adaptive"}`
+and `output_config_for_request()` so the judge reasons through synonym
+mapping + partial-match semantics with the same rigor as the builder.
+
+**Tests:** new `tests/test_agent_intelligence_upgrades.py` (15 cases
+covering all 5 agents) + extended `test_will_it_just_work.py` with
+two new assertions (all 11 enum values present in Agent 1 prompt + 4
+non-OCR worked examples). +17 tests net, 834 core passing.
+
+**Known gaps still open** (all architectural — not wiring):
+- Live `agent_thinking` SSE streaming (extended-thinking blocks
+  produced but not surfaced to UI)
+- Incremental token streaming (Agent 5 uses blocking `messages.create`
+  not `stream=True`)
+- Agent 2 per-scope parallelism (single serial call vs N parallel)
+- In-run web_fetch URL cache within Agent 4's deep-verify loop
+- Idempotency keys + DRY_RUN propagation in Agent 5 harness writes
+- Atlas schema_version enforcement
+- AWS SigV4 / OAuth2 authorization_code / mTLS auth patterns
+
+ Production code: ~40,900
 LoC across PuzzleEval Python core (26,600), FastAPI backend (2,344), and
 React frontend (12,018). Full documentation set lives at:
 

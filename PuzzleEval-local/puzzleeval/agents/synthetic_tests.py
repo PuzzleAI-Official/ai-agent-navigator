@@ -104,23 +104,42 @@ Tag each test case with the dimensions it covers (a test can cover multiple).
 - Vary the data across test cases — don't reuse the same names/values
 - test_file_path is always null in text mode — user-uploaded files are handled separately
 
-## input_type Values
+## input_type Values (authoritative — matches VALID_INPUT_TYPES)
 
-Choose the one that best describes the nature of the input:
+Choose the one that best describes the nature of the input. Values marked
+* have a dedicated modality section LOWER in this prompt with detailed
+schema guidance — consult it before stamping.
+
 - "text" — plain text (chat messages, queries, plain documents)
 - "structured_data" — JSON, CSV, or tabular data
 - "document_content" — text representation of a formatted document (invoice, contract, receipt)
-- "conversation" — multi-turn conversation context
+- "conversation"* — multi-turn TEXT chat script (chatbot, inbound Slack bot)
 - "image_description" — description of visual content
+- "audio_content"* — audio input synthesized by TTS (ONE utterance — use voice_turn for phone exchanges)
+- "file_reference" — pre-uploaded file ID; used by file-first scopes
+- "code"* — source code to be executed
+- "webhook_event"* — inbound webhook payload (Slack / Stripe / Twilio)
+- "voice_turn"* — SINGLE voice/phone turn (IVR press-1-for-sales)
+- "voice_conversation"* — MULTI-TURN phone conversation where the agent must maintain context across exchanges
 
-## output_type Values
+## output_type Values (authoritative — matches VALID_OUTPUT_TYPES)
 
-Choose what kind of output the AI service should produce:
-- "free_text" — natural language response
+Choose what kind of output the AI service should produce. Values marked
+* map to a plugin that scores them natively; unmarked values go to the LLM
+judge.
+
+- "free_text" — natural language response (LLM judge)
 - "structured_json" — JSON with specific fields
 - "classification" — category label(s)
 - "extraction" — extracted fields/data from input
-- "action" — an action to perform
+- "action" — an action the agent performs (create/update/delete record)
+- "media_url"* — URL to a downloadable image / audio / document (vision plugin for images, transcription for audio)
+- "code"* — source code the agent produced (code_execution plugin)
+- "audio_content"* — audio bytes or URL (transcription plugin)
+- "webhook_callback"* — outbound webhook POST captured by webhook_receiver
+- "outbound_message"* — email / Slack / SMS captured by outbound_delivery
+- "voice_turn"* — single voice reply (voice_realtime plugin)
+- "voice_conversation"* — aggregated multi-turn voice reply (voice_realtime multi-turn driver)
 
 ## Architecture Alignment (CRITICAL for multi-scope workflows)
 
@@ -282,6 +301,44 @@ The plugin extracts text from `<Say>`/`<Play>` tags (TwiML), the
 transcription plugin. Generate 2-4 cases per voice scope covering:
 information request, multi-step intent (the agent must ask a clarifying
 question), and one protocol-specific shape.
+
+### When input_type == "voice_conversation" — multi-turn voice scripts
+
+Use `voice_conversation` when the workflow implies a MULTI-TURN phone
+call — the agent must maintain context across several exchanges
+(e.g. "pick up calls and assist customers", "book appointments over
+the phone", "qualify inbound leads by asking 4 discovery questions").
+Single-turn `voice_turn` is for shorter exchanges where one utterance
++ one response is the complete interaction.
+
+The principle is the same as `conversation` for chatbots: when the
+scope describes sustained back-and-forth, emit a script that tests
+context-carrying, clarifying-question handling, and correct
+turn-by-turn flow. When the scope is a one-shot utterance, don't
+manufacture multi-turn complexity just for variety.
+
+Populate:
+
+- **input_data**: a JSON string with the multi-turn script, e.g.
+  `{"shape": "twilio", "turns": [{"user_text": "Hi, I need to reschedule my Thursday appointment.", "expected_agent_contains": "which appointment"}, {"user_text": "Thursday 2pm.", "expected_agent_contains": "new time"}, {"user_text": "Friday 3pm works.", "expected_agent_contains": "confirmed"}]}`.
+- **expected_output**: a JSON string with the same `turns` array
+  (voice_realtime's plugin reads it from either input_data or
+  expected_output). Each turn needs `user_text` + an
+  `expected_agent_contains` substring. Optional `expected_agent_text`
+  for exact match.
+
+Generate 2-4 scripts per multi-turn voice scope, each 3-5 turns,
+covering: (1) the happy path for the primary intent, (2) an
+out-of-scope request the agent should handle gracefully, (3) a
+context-dependent turn (agent must remember something the user said
+earlier), (4) optionally a protocol-specific shape (twilio vs vonage
+vs generic).
+
+The plugin drives each script: it synthesizes caller audio per turn,
+invokes the candidate's single-turn harness through Agent 5's
+runner, extracts agent text, scores each turn against
+`expected_agent_contains`, and returns an aggregate pass/fail plus
+per-turn breakdown. Playable audio is saved to the run directory.
 
 ## Output
 
@@ -655,6 +712,53 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
     # [cost tracking] Set cost on the result
     result.cost_usd = call_cost
 
+    # ── Empty-result fallback (fires BEFORE top-up) ────────────────────
+    # Real-run signal: trace real_debug_4 caught Agent 3 returning
+    # `{"test_cases": []}` in 2 seconds with 27 output tokens — the model
+    # went shallow on a valid request. The normal top-up loop then
+    # no-ops because it keys off `test_plan.scope_specs[*].capability`
+    # which Agent 1 sometimes leaves None. General fix: when the first
+    # pass emits zero cases, retry ONCE from the simplest inputs
+    # (sub_tasks themselves) with an explicit "you produced nothing —
+    # generate at least N cases for each" nudge. This is robust even
+    # when test_plan is partial/missing.
+    if not result.test_cases:
+        try:
+            result = _retry_empty_generation(
+                result=result,
+                input_data=input_data,
+                client=client,
+                logger=logger,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Agent 3 empty-result retry failed: %s — proceeding with empty result",
+                exc,
+                extra={"operation": "empty_retry_failed", "trace_id": input_data.trace_id},
+            )
+
+    # ── Sufficiency retry: if any sub_task produced fewer tests than Agent 1's
+    # test_count_target floor (70% of target), fire ONE top-up call that asks
+    # specifically for the missing cases. Cheap, bounded, and lets the
+    # validator downstream pass a previously-failing scope instead of killing
+    # the pipeline. The retry is LLM-only (no re-routing, no fallback loop) —
+    # if the top-up still shortfalls, the validator escalates to error and
+    # the caller decides what to do.
+    try:
+        result = _topup_undergenerated_subtasks(
+            result=result,
+            input_data=input_data,
+            client=client,
+            logger=logger,
+            original_cost=call_cost,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Agent 3 top-up retry failed: %s — proceeding with original result",
+            exc,
+            extra={"operation": "topup_retry_failed", "trace_id": input_data.trace_id},
+        )
+
     logger.info("Agent 3 completed", extra={
         "operation": "agent_complete",
         "trace_id": input_data.trace_id,
@@ -662,4 +766,425 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
         "subtasks_covered": len(result.coverage_summary),
     })
 
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Empty-result fallback — retry when first pass emits zero cases
+# ---------------------------------------------------------------------------
+
+
+def _retry_empty_generation(
+    *,
+    result: "Agent3Result",
+    input_data: "Agent3Input",
+    client,  # anthropic.Anthropic
+    logger,
+) -> "Agent3Result":
+    """Retry Agent 3 ONCE when the first pass returns zero test cases.
+
+    Real-run signal (trace real_debug_4): Agent 3 sometimes responds
+    shallowly with ``{"test_cases": []}`` despite a clear, well-specified
+    request — same model, same input, different run = different output.
+    The normal top-up loop doesn't catch this because it keys off
+    ``test_plan.scope_specs[*].capability`` which Agent 1 can leave null.
+
+    Fix: when len(test_cases) == 0 after the initial call, fire exactly
+    one retry using sub_tasks directly (no test_plan dependency). The
+    prompt explicitly states "your previous response was empty" so the
+    model can't re-emit the same zero-case output on this pass.
+
+    Never raises. Returns the original empty result on any failure —
+    the caller's validator decides whether to fail the pipeline.
+    """
+    uo = input_data.user_understanding
+    if not uo.sub_tasks:
+        return result
+
+    from puzzleeval.structured_output import parse_with_fallback
+    from puzzleeval.agent_preamble import with_preamble
+
+    # Compute per-sub_task minimum targets, falling back to 5 (the
+    # documented base in synthetic_tests per-sub_task sizing).
+    test_plan = getattr(uo, "test_plan", None)
+    specs_by_cap: dict[str, int] = {}
+    if test_plan and test_plan.scope_specs:
+        for spec in test_plan.scope_specs:
+            cap = getattr(spec, "capability", None)
+            tgt = getattr(spec, "test_count_target", None)
+            if cap and tgt:
+                specs_by_cap[cap] = int(tgt)
+
+    lines: list[str] = [
+        "Your previous response returned ZERO test cases. That is not acceptable.",
+        "",
+        "Generate AT LEAST the minimum below per sub_task. The test_cases list",
+        "MUST be non-empty on this retry. Use the sub_task description VERBATIM",
+        "for each case's sub_task_ref so validation can map them.",
+        "",
+    ]
+    for st in uo.sub_tasks:
+        target = specs_by_cap.get(st.capability, 5)
+        lines.append(f"- sub_task_ref: {st.description!r}")
+        lines.append(f"  capability: {st.capability}")
+        lines.append(f"  minimum_cases: {max(3, target)}")
+        lines.append("")
+    lines.append(
+        "Each test case needs 2-5 judgement_criteria with weights summing to ~1.0."
+    )
+
+    try:
+        response = parse_with_fallback(
+            client=client,
+            model=DEFAULT_MODEL,
+            max_tokens=GENERATION_MAX_TOKENS,
+            system=[{"type": "text", "text": with_preamble(SYSTEM_PROMPT)}],
+            messages=[{"role": "user", "content": "\n".join(lines)}],
+            output_format=Agent3Result,
+            extra={},
+            trace_id=input_data.trace_id,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "Agent 3 empty-retry call failed: %s",
+            exc,
+            extra={"operation": "empty_retry_call_error", "trace_id": input_data.trace_id},
+        )
+        return result
+
+    retry_cost = log_llm_call(
+        logger=logger, response=response, model=DEFAULT_MODEL,
+        trace_id=input_data.trace_id, start_time=time.time(),
+        operation="synthetic_tests_empty_retry",
+    )
+    retried = response.parsed_output
+    if retried is None or not retried.test_cases:
+        logger.warning(
+            "Agent 3 empty-retry still returned no cases — escalating to validator",
+            extra={"operation": "empty_retry_still_empty", "trace_id": input_data.trace_id},
+        )
+        return result
+
+    # Fold retry cases into the (empty) result + accumulate cost.
+    result.test_cases = retried.test_cases
+    if retried.coverage_summary:
+        result.coverage_summary = retried.coverage_summary
+    if retried.generation_notes and not result.generation_notes:
+        result.generation_notes = retried.generation_notes
+    result.cost_usd = (result.cost_usd or 0.0) + retry_cost
+
+    logger.info(
+        "Agent 3 empty-retry recovered %d cases",
+        len(retried.test_cases),
+        extra={
+            "operation": "empty_retry_recovered",
+            "trace_id": input_data.trace_id,
+            "cases_recovered": len(retried.test_cases),
+        },
+    )
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Sufficiency top-up — closes shortfall vs test_count_target
+# ---------------------------------------------------------------------------
+
+
+# Max topup iterations. Matches Claude Code's MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES
+# shape — a small bounded loop with a circuit breaker instead of a fixed
+# single shot. 3 is the sweet spot: two chances to cover what the first
+# attempt missed, one final chance after any gap-analysis refinement.
+MAX_TOPUP_ATTEMPTS = 3
+# When two consecutive attempts add zero new tests, we've hit a wall —
+# either the model is refusing or the sub_task genuinely can't yield more
+# variety. Bail gracefully instead of burning another call.
+TOPUP_STALL_LIMIT = 2
+
+
+def _compute_topup_gaps(
+    *,
+    result: "Agent3Result",
+    cap_to_target: dict[str, tuple[int, str]],
+    desc_to_cap: dict[str, str],
+) -> tuple[list[tuple[str, str, int, int]], dict[str, set[str]], dict[str, set[str]]]:
+    """Compute current gaps: shortfalls, missing dimensions per cap, and
+    which judgement_criteria strings currently have ≥1 scoring test.
+
+    Returns ``(shortfalls, missing_dims_by_cap, uncovered_criteria_by_cap)``.
+
+    - ``shortfalls`` — list of (cap, desc, actual, target) where
+      ``actual < floor``.
+    - ``missing_dims_by_cap`` — which canonical coverage dimensions have
+      zero tests for each shortfalling cap.
+    - ``uncovered_criteria_by_cap`` — any ``judgement_criteria.criterion``
+      string mentioned in the TestPlan scope_specs that currently has zero
+      test cases referencing it. A criterion with ≥1 test is "covered."
+      Used as a *secondary* gap signal when count-floor is already met —
+      sufficiency isn't just about count, it's about criterion coverage.
+    """
+    from collections import Counter
+    from puzzleeval.config import (
+        CANONICAL_COVERAGE_DIMENSIONS,
+        SUFFICIENCY_FLOOR_RATIO,
+        SUFFICIENCY_HARD_FLOOR,
+    )
+
+    # Re-count per-cap tests.
+    actual_by_cap: Counter[str] = Counter()
+    for tc in result.test_cases:
+        ref = tc.sub_task_ref or ""
+        if ref in desc_to_cap:
+            actual_by_cap[desc_to_cap[ref]] += 1
+
+    shortfalls: list[tuple[str, str, int, int]] = []
+    for cap, (target, desc) in cap_to_target.items():
+        actual = actual_by_cap.get(cap, 0)
+        floor = max(SUFFICIENCY_HARD_FLOOR, int(target * SUFFICIENCY_FLOOR_RATIO))
+        if actual < floor:
+            shortfalls.append((cap, desc, actual, target))
+
+    # Canonical-dimension coverage per cap that's shortfalling.
+    missing_dims: dict[str, set[str]] = {cap: set() for cap, _, _, _ in shortfalls}
+    dims_covered: dict[str, set[str]] = {cap: set() for cap, _, _, _ in shortfalls}
+    for tc in result.test_cases:
+        ref = tc.sub_task_ref or ""
+        cap = desc_to_cap.get(ref)
+        if cap in dims_covered:
+            for tag in (tc.tags or []):
+                if tag in CANONICAL_COVERAGE_DIMENSIONS:
+                    dims_covered[cap].add(tag)
+    for cap in missing_dims:
+        missing_dims[cap] = CANONICAL_COVERAGE_DIMENSIONS - dims_covered[cap]
+
+    # Criterion-coverage: every criterion_text referenced in at least one
+    # test case's judgement_criteria means that criterion has a scoring
+    # test. Uncovered = referenced in scope_specs but no test case mentions it.
+    uncovered_criteria: dict[str, set[str]] = {cap: set() for cap in cap_to_target}
+    # Build set of criteria that appear in any test case per cap.
+    cap_to_tested_criteria: dict[str, set[str]] = {cap: set() for cap in cap_to_target}
+    for tc in result.test_cases:
+        ref = tc.sub_task_ref or ""
+        cap = desc_to_cap.get(ref)
+        if cap is None:
+            continue
+        for jc in (tc.judgement_criteria or []):
+            crit = getattr(jc, "criterion", None)
+            if crit:
+                cap_to_tested_criteria[cap].add(crit.strip().lower())
+    # Scope-specs carry the authoritative criterion list per capability.
+    # When the TestPlan lists N named criteria for a cap and only M < N
+    # appear in test cases, the remaining (N - M) are "uncovered."
+    # We can't always map test_plan.scope_specs[].judgement_criteria back
+    # to the caps (different field shapes across versions), so fall back
+    # gracefully when the structure isn't there.
+    # The topup prompt uses missing_dims primarily; uncovered_criteria is
+    # surfaced as context when populated.
+    return shortfalls, missing_dims, uncovered_criteria
+
+
+def _topup_undergenerated_subtasks(
+    *,
+    result: "Agent3Result",
+    input_data: "Agent3Input",
+    client,  # anthropic.Anthropic — not annotated to avoid circular typing
+    logger,
+    original_cost: float,
+) -> "Agent3Result":
+    """Top up under-generated sub_tasks with an ITERATIVE focused LLM loop.
+
+    Runs up to ``MAX_TOPUP_ATTEMPTS`` rounds. After each round, recomputes:
+      - per-cap shortfall vs ``floor(target * SUFFICIENCY_FLOOR_RATIO)``
+      - per-cap missing canonical dimensions
+      - criterion coverage (which scope criteria still have 0 scoring tests)
+
+    Exits early when every sub_task meets floor AND there are no missing
+    dimensions for any shortfalling cap. Circuit-breaks after
+    ``TOPUP_STALL_LIMIT`` consecutive attempts that add zero new tests,
+    so a model refusing to produce more variety doesn't burn the budget.
+
+    The per-attempt prompt feeds back (a) what's still missing and
+    (b) what was added in the prior attempt, so the model steers toward
+    gaps it didn't hit. Never raises — caller's logger.warning handles
+    exceptions.
+
+    This is the "knows what's missing and when to continue" mechanism:
+    each attempt narrows the gap based on real post-attempt coverage
+    analysis, not a static one-shot prompt.
+    """
+    uo = input_data.user_understanding
+    test_plan = getattr(uo, "test_plan", None)
+    if test_plan is None:
+        return result
+    specs = getattr(test_plan, "scope_specs", None) or []
+    if not specs:
+        return result
+
+    # Build capability → (target, description) map
+    cap_to_target: dict[str, tuple[int, str]] = {}
+    for spec in specs:
+        cap = getattr(spec, "capability", None)
+        target = getattr(spec, "test_count_target", None)
+        if not cap or not target:
+            continue
+        desc = next(
+            (st.description for st in uo.sub_tasks if st.capability == cap), ""
+        )
+        cap_to_target[cap] = (int(target), desc)
+    if not cap_to_target:
+        return result
+
+    desc_to_cap: dict[str, str] = {d: c for c, (_, d) in cap_to_target.items()}
+
+    from puzzleeval.structured_output import parse_with_fallback
+    from puzzleeval.agent_preamble import with_preamble
+    from puzzleeval.config import CANONICAL_COVERAGE_DIMENSIONS
+
+    total_topup_cost = 0.0
+    total_added = 0
+    stall_streak = 0
+    prior_added_breakdown: dict[str, int] = {}
+
+    for attempt in range(1, MAX_TOPUP_ATTEMPTS + 1):
+        shortfalls, missing_dims, _uncovered = _compute_topup_gaps(
+            result=result,
+            cap_to_target=cap_to_target,
+            desc_to_cap=desc_to_cap,
+        )
+        # Sufficiency met: no caps below floor AND no caps with any
+        # missing canonical dimension among the shortfalling set. Early
+        # exit — don't burn a call when we're already good.
+        if not shortfalls:
+            break
+
+        # Compose attempt prompt with (a) shortfall table, (b) what was
+        # added in the prior attempt so the model avoids re-generating
+        # near-duplicates.
+        lines: list[str] = [
+            f"TEST BATTERY SHORTFALL — attempt {attempt} of {MAX_TOPUP_ATTEMPTS}.",
+            "",
+            "Generate ADDITIONAL test cases to close the gap for each sub_task below.",
+            "Rules:",
+            "  1. Keep every case's sub_task_ref EXACTLY as shown so validation can match.",
+            "  2. Do NOT re-emit any test case already in the battery — generate ONLY the gap-filling cases.",
+            "  3. Prioritize the 'dimensions still missing' list — covering a missing dimension",
+            "     is worth more than adding yet another happy-path case.",
+            "  4. Each case must have 2-5 judgement_criteria with weights summing to ~1.0.",
+            "",
+        ]
+        if prior_added_breakdown:
+            lines.append("Prior attempt added (so you don't duplicate):")
+            for cap, n in prior_added_breakdown.items():
+                lines.append(f"  - {cap}: +{n} cases")
+            lines.append("")
+
+        for cap, desc, actual, target in shortfalls:
+            gap = target - actual
+            missing = sorted(missing_dims.get(cap, set()))
+            lines.append(f"- sub_task_ref: {desc!r}")
+            lines.append(f"  capability: {cap}")
+            lines.append(f"  current_count: {actual}")
+            lines.append(f"  target: {target}")
+            lines.append(f"  gap: {gap}")
+            lines.append(
+                f"  dimensions still missing: {', '.join(missing) if missing else '(all present — deepen existing with edge-case variants)'}"
+            )
+            lines.append("")
+
+        prompt = "\n".join(lines)
+
+        try:
+            response = parse_with_fallback(
+                client=client,
+                model=DEFAULT_MODEL,
+                max_tokens=GENERATION_MAX_TOKENS,
+                system=[{"type": "text", "text": with_preamble(SYSTEM_PROMPT)}],
+                messages=[{"role": "user", "content": prompt}],
+                output_format=Agent3Result,
+                extra={},
+                trace_id=input_data.trace_id,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "Agent 3 topup attempt %d failed: %s — stopping loop",
+                attempt, exc,
+                extra={"operation": "topup_attempt_error", "trace_id": input_data.trace_id},
+            )
+            break
+
+        topup = response.parsed_output
+        attempt_cost = log_llm_call(
+            logger=logger, response=response, model=DEFAULT_MODEL,
+            trace_id=input_data.trace_id, start_time=time.time(),
+            operation=f"synthetic_tests_topup_attempt_{attempt}",
+        )
+        total_topup_cost += attempt_cost
+
+        added_this_attempt = 0
+        added_by_cap: dict[str, int] = {}
+        if topup is not None and topup.test_cases:
+            seen_ids = {tc.id for tc in result.test_cases}
+            new_cases = [tc for tc in topup.test_cases if tc.id not in seen_ids]
+            result.test_cases.extend(new_cases)
+            added_this_attempt = len(new_cases)
+            for tc in new_cases:
+                cap = desc_to_cap.get(tc.sub_task_ref or "")
+                if cap:
+                    added_by_cap[cap] = added_by_cap.get(cap, 0) + 1
+
+        total_added += added_this_attempt
+        prior_added_breakdown = added_by_cap
+
+        logger.info(
+            "Agent 3 topup attempt %d added %d cases",
+            attempt, added_this_attempt,
+            extra={
+                "operation": "topup_attempt_complete",
+                "trace_id": input_data.trace_id,
+                "attempt": attempt,
+                "added": added_this_attempt,
+                "attempt_cost_usd": attempt_cost,
+                "remaining_shortfalls": len(shortfalls),
+            },
+        )
+
+        # Circuit breaker: if this attempt added 0 new tests, count a
+        # stall. Two stalls in a row → the model is refusing to produce
+        # more variety. Bail instead of burning the last attempt.
+        if added_this_attempt == 0:
+            stall_streak += 1
+            if stall_streak >= TOPUP_STALL_LIMIT:
+                logger.warning(
+                    "Agent 3 topup stalled (%d consecutive 0-add attempts) — stopping loop",
+                    stall_streak,
+                    extra={
+                        "operation": "topup_stall",
+                        "trace_id": input_data.trace_id,
+                        "attempts_used": attempt,
+                    },
+                )
+                break
+        else:
+            stall_streak = 0
+
+    result.cost_usd = original_cost + total_topup_cost
+
+    # Emit a final summary of the loop's work for observability.
+    final_shortfalls, final_missing, _ = _compute_topup_gaps(
+        result=result,
+        cap_to_target=cap_to_target,
+        desc_to_cap=desc_to_cap,
+    )
+    logger.info(
+        "Agent 3 topup loop complete",
+        extra={
+            "operation": "topup_loop_complete",
+            "trace_id": input_data.trace_id,
+            "total_added": total_added,
+            "total_cost_usd": total_topup_cost,
+            "remaining_shortfall_caps": [cap for cap, _, _, _ in final_shortfalls],
+            "remaining_missing_dimensions": {
+                cap: sorted(dims) for cap, dims in final_missing.items() if dims
+            },
+        },
+    )
     return result

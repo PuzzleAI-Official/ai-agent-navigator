@@ -125,7 +125,7 @@ When you set is_clear=true, you MUST also produce the `workflow` field (unless t
   - `description` — one sentence a user would read.
   - `capability` — EXACT SAME STRING as the matching SubTask.capability. This is the join key; downstream agents match steps to sub-tasks by capability string. Keep them identical.
   - `input_from` — where this step's input comes from. Either the literal string "user" (the user provides a file/text/prompt) or another step's id like "step_1" (this step consumes step_1's output).
-  - `output_format` — one of: "free_text", "structured_json", "classification", "extraction", "action", "media_url", "code", "audio_content", "webhook_callback", "outbound_message", "voice_turn". Match the TestCase.output_type enum. Modality-specific guidance: use `"code"` when the step generates source code (the code_execution tool plugin will run it); `"audio_content"` when the step generates speech (the transcription plugin will STT the response); `"media_url"` when the step generates an image / audio file / document the user downloads (the vision plugin handles images, transcription handles audio); `"action"` only when the step performs an external write with NO meaningful body to evaluate; `"webhook_callback"` when the step is INBOUND-driven (Slack mention, Intercom widget message, Stripe event, generic webhook) and we verify by inspecting captured callbacks via the webhook_receiver plugin; `"outbound_message"` when the step's success criterion is "did the message actually land at the destination" — email / Slack / SMS — verified by the outbound_delivery plugin's mock receivers; `"voice_turn"` for voice/phone agents tested via the voice_realtime plugin's local audio loopback. Picking the right output_format here is what enables the right tool plugin downstream — get it wrong and the LLM judge takes over (less precise for these modalities).
+  - `output_format` — picks the downstream plugin. See the modality table below for when to use each. Must be one of the `VALID_OUTPUT_TYPES` enum values.
   - `depends_on` — list of step ids that must finish first. Use this to encode the true DAG — the `steps[]` order is for presentation; `depends_on` is what the chained harness will actually follow. IMPORTANT: two steps that DON'T list each other in `depends_on` are implicitly parallel — they can run concurrently. Only serialize steps (B depends_on A) when B genuinely needs A's OUTPUT as INPUT. Don't artificially serialize independent branches.
   - `parallel_group` — optional string tag. Use the SAME tag on steps that belong to one intentional fan-out (e.g. `"ingest_branch"` on three steps that all read the user's file and feed a single merge step). Purely a UI hint so those steps render side-by-side in one visual cluster. Omit (leave null) for linear chains and single-step blueprints. `depends_on` is still authoritative for DAG semantics; `parallel_group` only affects layout.
   - `all_in_one_compatible` — true in almost all cases (horizontal tools like Zapier / n8n / Make reach most roles). Set false ONLY for niche roles no horizontal tool covers (e.g., a proprietary enterprise integration). ALSO set false when the user references an UNSPECIFIED integration ("my system", "our platform", "our CRM" — without naming it): no candidate can be matched to an unnamed target, so all-in-one is not a valid option for that step. Record the ambiguity in `notes` so Agent 4 knows to flag it.
@@ -145,6 +145,36 @@ When you set is_clear=true, you MUST also produce the `workflow` field (unless t
 6. **Parallelism is default, not opt-in.** If the user describes THREE things they want done to the same input ("extract line items AND verify tax IDs AND categorize"), those are THREE parallel branches — not a chain. Only make step B wait on step A if the user's words imply A's output feeds B. A common trap: emitting `step_2 depends_on=["step_1"]` and `step_3 depends_on=["step_2"]` when the user actually described three independent operations. Ask yourself for every edge: "does this step literally need the upstream step's OUTPUT?" If no, drop the edge.
 7. **Fan-in merge steps are explicit.** When the user says "combine / merge / reconcile / then sync all of that to X," that's a distinct step that `depends_on` every parallel upstream branch. Don't hide it inside one of the branches.
 8. **Acyclic.** Never emit a cycle (A depends_on B, B depends_on A). If you find yourself wanting to, the workflow isn't a DAG — split the repeated work into separate steps or revisit the decomposition.
+
+### Modality table — pick `output_format` by what the step produces
+
+Picking the right `output_format` routes downstream test generation and
+evaluation to the RIGHT plugin. The wrong choice makes the LLM judge take
+over (less precise + non-deterministic). This table covers every value in
+`VALID_OUTPUT_TYPES`:
+
+| output_format | Use when the step produces… | Plugin that scores it |
+|---|---|---|
+| `free_text` | natural-language responses (chatbot replies, summaries, translations) | LLM judge |
+| `structured_json` | structured JSON matching a schema (extracted fields, API payload) | LLM judge + schema check |
+| `classification` | one or more category labels (intent, sentiment, topic) | LLM judge + exact-match |
+| `extraction` | specific fields pulled from free input (names, dates, totals) | LLM judge + field-match |
+| `action` | an external side effect with no meaningful body to evaluate (generic create / update / delete) | LLM judge reads "did the action happen?" |
+| `media_url` | the step returns a URL to a downloadable image / audio / document | vision plugin (images) or transcription plugin (audio) |
+| `code` | source code — the code_execution plugin compiles + runs it | code_execution plugin |
+| `audio_content` | synthesized speech (TTS response) | transcription plugin (STT → compare) |
+| `webhook_callback` | the step fires an outbound HTTP callback (webhook) we capture | webhook_receiver plugin |
+| `outbound_message` | email / Slack / SMS the agent sends — success = did it land at the destination | outbound_delivery plugin (mock SMTP/Slack/SMS receivers) |
+| `voice_turn` | voice/phone reply — TwiML / NCCO / JSON / audio blob | voice_realtime plugin |
+| `voice_conversation` | multi-turn phone agent that maintains context across several exchanges (answer call + assist caller + hand off or close) | voice_realtime plugin (multi-turn driver) |
+
+Picking rules:
+- If the step generates a FILE the user downloads, it's `media_url`.
+- If the step fires OUTBOUND communication (email / Slack / SMS) and success = "did it arrive," it's `outbound_message` — NOT `action`.
+- If the step is INBOUND-driven (someone DMs a Slack bot, a Stripe event arrives, a widget message comes in), it's `webhook_callback`.
+- If the step produces a SINGLE voice reply (IVR press-1-for-sales, quick lookup), it's `voice_turn`. If the step is a MULTI-TURN phone conversation where the agent must maintain context across exchanges (answer call + assist customer + qualify lead + book appointment), it's `voice_conversation`. Clue words: "answer calls", "pick up calls", "handle inbound support", "qualify leads over the phone", "book by phone", "multi-turn", "hold a conversation". When in doubt between the two, prefer `voice_conversation` — it's strictly more general and the voice_realtime plugin handles both shapes.
+- `audio_content` is for TTS that isn't a full phone-turn — e.g., "generate a narrated podcast intro."
+- `action` is the fallback for generic writes (create DB row, update record, delete subscriber) with no body we can meaningfully evaluate.
 
 ### Examples
 
@@ -180,6 +210,35 @@ Two-root parallel ingestion (user says: "take photos of receipts AND voice memos
   ]
   architecture_options: ["all_in_one", "best_per_step"]
   notes: "Two independent ingestion roots (photo and audio), fan-in at step_2 which takes both."
+
+Chatbot + outbound email confirmation (user says: "build a chatbot that handles customer orders and sends email confirmations"):
+  steps: [
+    {id:"step_1", role:"chatbot", capability:"order-taking chatbot", input_from:"user", output_format:"free_text", depends_on:[]},
+    {id:"step_2", role:"email_notifier", capability:"transactional email send", input_from:"step_1", output_format:"outbound_message", depends_on:["step_1"], side_effects:"creates_records"}
+  ]
+  architecture_options: ["all_in_one", "best_per_step"]
+  notes: "step_2 uses outbound_message (NOT action) because success = 'did the email actually land in the customer's inbox'. The outbound_delivery plugin's mock SMTP receiver verifies delivery."
+
+Inbound Slack bot (user says: "when someone @-mentions our Slack bot, reply using our knowledge base"):
+  steps: [
+    {id:"step_1", role:"slack_mention_responder", capability:"inbound slack mention reply", input_from:"user", output_format:"webhook_callback", depends_on:[]}
+  ]
+  architecture_options: ["all_in_one"]
+  notes: "Single-step inbound flow. output_format=webhook_callback because the Slack platform POSTs an event to our URL and we reply via a POST back — the webhook_receiver plugin captures the reply to verify."
+
+Code generation (user says: "generate Python code that solves LeetCode-style problems"):
+  steps: [
+    {id:"step_1", role:"code_generation", capability:"python code generation", input_from:"user", output_format:"code", depends_on:[]}
+  ]
+  architecture_options: ["all_in_one"]
+  notes: "output_format=code routes to the code_execution plugin, which RUNS the generated code against test_inputs/test_outputs from Agent 3 and scores by execution success — not by LLM-judging the code's text."
+
+Voice / phone agent (user says: "a phone agent that answers 'what are your hours' with our business hours"):
+  steps: [
+    {id:"step_1", role:"voice_agent", capability:"voice IVR agent", input_from:"user", output_format:"voice_turn", depends_on:[]}
+  ]
+  architecture_options: ["all_in_one"]
+  notes: "Single-step voice turn. The voice_realtime plugin serves a synthesized caller audio file, captures the agent's TwiML/NCCO/JSON/audio response, and scores via transcription + text-match."
 
 ### When to leave workflow null
 
@@ -388,6 +447,38 @@ def run_user_understanding_agent(input_data: Agent1Input) -> Agent1Result:
     current_user_text = input_data.user_text
     if input_data.additional_context and not input_data.conversation_history:
         current_user_text += f"\n\nAdditional context:\n{input_data.additional_context}"
+
+    # Surface proceed_with_partial_info as an explicit operator instruction.
+    # When True, the caller (CLI --no-interactive, FastAPI auto-run path)
+    # has signaled "no human-in-the-loop will answer follow-up questions."
+    # Agent 1 must respect critical-vs-optional: if the user's message has
+    # enough for has_concrete_subtasks + has_domain, produce a complete
+    # result with sensible defaults for optional fields (budget=None,
+    # technical_level="some-technical", integrations=[]). If critical
+    # info is genuinely missing, it should still return is_clear=False
+    # and explain what's missing in clarification_needed.message — the
+    # caller will then surface that as a user error, not hang.
+    if getattr(input_data, "proceed_with_partial_info", False):
+        current_user_text += (
+            "\n\n---\n"
+            "OPERATOR DIRECTIVE: proceed_with_partial_info=True. No human "
+            "is available to answer follow-up questions on this turn. "
+            "Apply this rule:\n"
+            "- If the user's message + any uploaded files give you enough "
+            "  for BOTH critical info fields (has_concrete_subtasks=True "
+            "  AND has_domain=True), set is_clear=True, populate a complete "
+            "  UserUnderstandingOutput using reasonable defaults for any "
+            "  OPTIONAL fields the user didn't specify (budget=null, "
+            "  technical_level='some-technical' if unclear, "
+            "  integrations=[] if none mentioned, monthly_volume=null "
+            "  if no hint). Build the full workflow + test_plan. Do NOT "
+            "  block on optional info.\n"
+            "- If a critical field is genuinely missing (e.g. the user "
+            "  wrote one vague sentence), still return is_clear=False "
+            "  with clarification_needed.message explaining what minimum "
+            "  info you need. The caller will surface that as an error, "
+            "  not hang."
+        )
 
     # ★ CORE LINE 3: Build the conversation messages
     messages = _build_messages(

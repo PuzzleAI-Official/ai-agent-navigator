@@ -222,3 +222,82 @@ async def get_report(run_id: str):
             status_code=500,
             detail=f"Report assembly failed: {exc}",
         )
+
+
+@router.get("/runs/audio")
+async def serve_run_audio(path: str):
+    """Serve a captured audio artifact saved under a run's sandbox.
+
+    The frontend receives absolute filesystem paths in
+    ``EvaluationReport.candidate_reports[*].failure_evidence[*].audio_paths``
+    (or ``success_evidence`` / ``TestCaseResult.audio_paths``). Those are
+    absolute so the evaluation report stays self-contained on disk; the
+    browser can't read a filesystem path directly, so it calls this endpoint
+    to stream the file back.
+
+    Security: we only serve files inside an allowed runs directory tree.
+    Multiple roots are permitted so both (a) backend-driven pipeline runs
+    (``puzzleeval-api/runs``) and (b) CLI-driven runs
+    (``PuzzleEval-local/runs``) can render audio through the same UI.
+    The operator can extend the allowlist via the
+    ``PUZZLEEVAL_EXTRA_RUNS_ROOTS`` env var (comma-separated absolute
+    paths). Any resolved path OUTSIDE every allowed root is rejected
+    with 403.
+    """
+    import os
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    backend_root = Path(__file__).resolve().parent.parent
+    allowed_roots: list[Path] = [(backend_root / "runs").resolve()]
+    # Sibling CLI runs dir — same project layout used in dev + CI.
+    cli_dev_root = (backend_root.parent / "PuzzleEval-local" / "runs").resolve()
+    if cli_dev_root.exists() and cli_dev_root not in allowed_roots:
+        allowed_roots.append(cli_dev_root)
+    # Operator-supplied extras.
+    extras_env = os.environ.get("PUZZLEEVAL_EXTRA_RUNS_ROOTS", "").strip()
+    if extras_env:
+        for entry in extras_env.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                resolved = Path(entry).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if resolved.exists() and resolved not in allowed_roots:
+                allowed_roots.append(resolved)
+    requested = Path(path).resolve()
+    # Containment check — requested must live under at least one root.
+    contained = False
+    for root in allowed_roots:
+        try:
+            requested.relative_to(root)
+            contained = True
+            break
+        except ValueError:
+            continue
+    if not contained:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"path is outside every allowed runs directory "
+                f"(configured roots: {[str(r) for r in allowed_roots]})"
+            ),
+        )
+    if not requested.exists() or not requested.is_file():
+        raise HTTPException(status_code=404, detail="audio file not found")
+    # Best-effort MIME detection; default to audio/wav.
+    ext = requested.suffix.lower()
+    media_type = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".ogg": "audio/ogg",
+        ".webm": "audio/webm",
+        ".flac": "audio/flac",
+    }.get(ext, "application/octet-stream")
+    return FileResponse(
+        path=str(requested),
+        media_type=media_type,
+        filename=requested.name,
+    )

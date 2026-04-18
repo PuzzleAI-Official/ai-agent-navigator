@@ -130,6 +130,66 @@ class ProviderRegistry:
     def is_empty(self) -> bool:
         return len(self.providers) == 0
 
+    def iter_env_vars(self) -> dict[str, str]:
+        """Flat union of every provider's env_vars + OAuth env vars.
+
+        Used by :func:`sync_to_environ` to propagate registry-sourced
+        credentials into ``os.environ``, putting the registry on par
+        with ``.env`` as a credential source. Later providers' keys
+        overwrite earlier ones only when both declare the SAME env var
+        name — normally providers use distinct keys (e.g. MINDEE_API_KEY
+        vs VERYFI_API_KEY), so collisions are rare.
+        """
+        out: dict[str, str] = {}
+        for entry in self.providers.values():
+            for k, v in entry.all_env_vars().items():
+                if v:  # never propagate empty strings
+                    out[k] = v
+        return out
+
+
+def sync_to_environ(
+    registry: ProviderRegistry,
+    *,
+    override: bool = False,
+) -> list[str]:
+    """Propagate registry env_vars into ``os.environ``.
+
+    This is what elevates the registry from "candidate-scoped credential
+    source" to "first-class credential source on par with .env". After
+    this runs, SYSTEM-LEVEL plugins (tts, transcription, voice_realtime,
+    webhook_receiver, outbound_delivery) that read ``os.environ.get(
+    "OPENAI_API_KEY")`` etc. see the registry's value — no need for the
+    user to duplicate keys across .env AND the registry.
+
+    Semantics mirror ``python-dotenv``'s ``load_dotenv(override=False)``:
+      - existing non-empty ``os.environ`` values WIN (explicit shell
+        exports or earlier .env load still beat the registry).
+      - empty-string placeholders in ``os.environ`` get EVICTED first
+        so the registry's real value reaches the agents (same footgun
+        fix used in ``_autoload_dotenv``).
+
+    With ``override=True``, the registry wins unconditionally — used
+    only by tests that need to swap credentials mid-run.
+
+    Returns the list of env var names that were actually written. Safe
+    to call multiple times; subsequent calls are near no-ops.
+    """
+    applied: list[str] = []
+    for key, value in registry.iter_env_vars().items():
+        current = os.environ.get(key)
+        if not override:
+            # Evict empty-string placeholders (common CI pattern: env
+            # declared but unfilled) so the registry's real value lands.
+            if current is not None and current.strip() == "":
+                del os.environ[key]
+                current = None
+            if current is not None and current.strip() != "":
+                continue
+        os.environ[key] = value
+        applied.append(key)
+    return applied
+
 
 # ============================================================================
 # Loading

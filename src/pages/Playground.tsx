@@ -47,6 +47,7 @@ const Playground = () => {
     workflow,
     // Per-scope selection state (Phase 6 SelectionPanel)
     perScopeCandidates,
+    defaultPicks, // Phase 7 smart-default pre-check set
     isSelectionSubmitting,
     submitSelection,
     // Rejection entries from the deep-verify pass
@@ -481,6 +482,7 @@ const Playground = () => {
                   candidates={candidates}
                   workflowSteps={workflow.steps}
                   perScopeCandidates={perScopeCandidates}
+                  defaultPicks={defaultPicks}
                   onSubmit={submitSelection}
                   isSubmitting={isSelectionSubmitting}
                 />
@@ -522,20 +524,53 @@ const Playground = () => {
                 </motion.div>
               )}
 
-              {/* Results stage — side-by-side comparison */}
-              {stage === "results" && candidates.length > 0 && (
+              {/* Results stage — side-by-side comparison. Rendered even
+                  when candidates.length === 0 so all-rejected runs still
+                  show the rejection summary + any advisories in the report.
+                  Previously gated on candidates.length > 0 → blank pane
+                  when Agent 2 returned zero or Phase 6.5 rejected everyone.
+                  Each sub-component null-guards its own empty inputs. */}
+              {stage === "results" && (
                 <motion.div
                   key="results"
                   initial={{ opacity: 0 }}
                   animate={{ opacity: 1 }}
                 >
+                  {/* Empty-state banner when truly nothing landed.
+                      Better than a blank pane — tells the user what
+                      happened and what to try next. */}
+                  {candidates.length === 0 && rejections.length === 0 && (
+                    <div className="rounded border border-amber-800/60 bg-amber-950/20 p-3 text-xs text-amber-200">
+                      No candidates were tested. This usually means Agent 2
+                      found zero matches or every verified candidate was
+                      rejected at deep-verify. Try broadening your
+                      description, or add a custom provider in the selection
+                      panel next time.
+                    </div>
+                  )}
                   {/* Rejection summary (renders nothing when `rejections` is empty). */}
                   <RejectionSummary
                     rejections={rejections}
                     workflowSteps={workflow?.steps}
                   />
                   {evaluationReport && <EvaluationReportCard report={evaluationReport} />}
-                  <ResultsComparison candidates={candidates} />
+                  {candidates.length > 0 && (
+                    <ResultsComparison
+                      candidates={candidates}
+                      /* Phase 9: per-scope tables. The backend's evaluation_report
+                         payload may carry a `scope_runs` array (one entry per
+                         blueprint scope); we thread it into ResultsComparison
+                         so the per-scope view renders instead of the legacy
+                         flat card layout. Type is loose (Record<string,unknown>)
+                         coming out of the SSE payload; ResultsComparison's
+                         type guard handles empty / missing / malformed. */
+                      scopeRuns={
+                        (evaluationReport as { scope_runs?: unknown[] } | null)
+                          ?.scope_runs as never
+                      }
+                      workflowSteps={workflow?.steps}
+                    />
+                  )}
                 </motion.div>
               )}
             </AnimatePresence>

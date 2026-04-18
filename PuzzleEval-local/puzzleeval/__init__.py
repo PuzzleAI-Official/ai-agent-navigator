@@ -79,3 +79,43 @@ def _autoload_dotenv() -> None:
 
 
 _autoload_dotenv()
+
+
+# ----------------------------------------------------------------------
+# Propagate provider_registry.json credentials into os.environ.
+#
+# The registry was historically a CANDIDATE-SCOPED credential source —
+# Agent 5 read it to inject keys into harness subprocesses. System-level
+# plugins (tts, transcription, voice_realtime, webhook_receiver,
+# outbound_delivery) read ``os.environ`` directly and were blind to the
+# registry. Users had to duplicate OpenAI/ElevenLabs keys across .env
+# AND the registry.
+#
+# This call promotes the registry to a first-class credential source on
+# par with .env. After it runs, plugins' ``is_available()`` reads the
+# same values the harnesses will, from ONE source of truth.
+#
+# Runs AFTER ``_autoload_dotenv`` so explicit .env / shell values still
+# win (override=False). Empty-string placeholders get evicted first so
+# the registry's real value reaches the plugins.
+#
+# Silent skip when the registry file doesn't exist — the function short-
+# circuits and returns an empty registry, nothing propagates. Same for
+# malformed JSON. The registry is optional; the pipeline works without it.
+# ----------------------------------------------------------------------
+def _autoload_provider_registry() -> None:
+    try:
+        from puzzleeval.provider_registry import load_registry, sync_to_environ
+    except ImportError:
+        return
+    try:
+        registry = load_registry()
+        sync_to_environ(registry, override=False)
+    except Exception:  # noqa: BLE001
+        # Never let registry propagation crash import. Any failure here
+        # is logged by the caller when they subsequently call load_registry
+        # themselves (Agent 5 / CLI path).
+        return
+
+
+_autoload_provider_registry()

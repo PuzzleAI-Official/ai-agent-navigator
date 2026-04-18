@@ -105,6 +105,13 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
   const [perScopeCandidates, setPerScopeCandidates] = useState<
     Record<string, string[]>
   >({});
+  // Phase 7 default picks — the top-K per scope ranked by the weighted
+  // scorer (user_picked / credentials / relevance / docs / pricing_fit).
+  // SelectionPanel pre-checks these instead of "all candidates." Empty
+  // on resume until selection_required fires.
+  const [defaultPicks, setDefaultPicks] = useState<
+    Record<string, string[]>
+  >({});
   const [isSelectionSubmitting, setIsSelectionSubmitting] = useState(false);
 
   // Per-candidate rejection entries from the Phase 6.5 deep-verify pass.
@@ -146,12 +153,60 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
         case "selection_required": {
           // Phase 6: pipeline paused after Agent 2 — show SelectionPanel.
           // Payload: per_scope_candidates (scope_id -> candidate name list)
+          //          + default_picks (scope_id -> top-K per Phase 7 ranker)
+          // SelectionPanel uses default_picks to pre-check Phase 7's smart
+          // choice instead of all candidates.
           setStage("selection");
           const psc = data.per_scope_candidates as Record<string, string[]> | undefined;
+          const dp = data.default_picks as Record<string, string[]> | undefined;
           setPerScopeCandidates(psc ?? {});
+          setDefaultPicks(dp ?? {});
           addActivity("pipeline", "info", "Waiting for your candidate selection...", {
             status: "progress",
           });
+          break;
+        }
+
+        case "test_cases_ready": {
+          // Agent 3 finished — surface the count so users see progress
+          // between screening and harness building (the long phase).
+          const tcount = (data.count as number) ?? 0;
+          addActivity(
+            "agent_3",
+            "info",
+            `Test cases generated: ${tcount}`,
+            { status: "success" },
+          );
+          break;
+        }
+
+        case "agent_blocked": {
+          // Billing gate denied this agent. User needs the specific reason
+          // (plan feature missing / credits insufficient) to know what to
+          // do — generic "pipeline_failed" alone is unhelpful.
+          const agent = (data.agent as string) || "agent";
+          const reason = (data.reason as string) || "billing gate";
+          const plan = (data.plan as string) || "";
+          addActivity(
+            agent,
+            "error",
+            `Blocked: ${reason}${plan ? ` (plan: ${plan})` : ""}`,
+            { status: "error" },
+          );
+          break;
+        }
+
+        case "scope_verified_complete": {
+          // Per-scope aggregate from Agent 4's deep-verify loop.
+          const scopeId = (data.scope_id as string) || "scope";
+          const v = (data.verified_count as number) ?? 0;
+          const r = (data.rejected_count as number) ?? 0;
+          addActivity(
+            "agent_4",
+            "info",
+            `${scopeId}: ${v} verified, ${r} rejected`,
+            { status: "success" },
+          );
           break;
         }
 
@@ -822,6 +877,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
     workflow, // Phase 3: blueprint from Agent 1, consumed by WorkflowDiagram
     // Phase 6: selection state + handlers
     perScopeCandidates,
+    defaultPicks, // Phase 7 top-K pre-checked in SelectionPanel
     isSelectionSubmitting,
     submitSelection,
     // Rejection entries from the deep-verify pass

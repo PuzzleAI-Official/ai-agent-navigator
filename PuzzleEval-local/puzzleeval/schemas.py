@@ -49,6 +49,22 @@ class Agent1Input(BaseModel):
         description="Previous conversation turns for multi-turn context"
     )
 
+    # Single-turn proceed signal. When True, Agent 1 MUST return a
+    # populated ``result`` and set ``is_clear=True`` iff its critical
+    # info_status fields (has_concrete_subtasks + has_domain) are both
+    # satisfied — using reasonable defaults for any optional missing
+    # fields (budget, technical_level, integrations). Set by the CLI's
+    # --no-interactive flag and the FastAPI auto-run path. Without this
+    # signal, Agent 1 defaults to multi-turn behavior (ask follow-ups).
+    proceed_with_partial_info: bool = Field(
+        default=False,
+        description=(
+            "True ⇒ Agent 1 does best-effort in one turn when critical "
+            "info is present, using defaults for optional fields. False "
+            "(default) ⇒ multi-turn conversation asking for clarification."
+        ),
+    )
+
 
 # ============================================================================
 # Agent 1 Output Schemas
@@ -209,14 +225,19 @@ class WorkflowStep(BaseModel):
     output_format: str = Field(
         default="structured_json",
         description=(
-            "Shape of this step's output. Matches the TestCase.output_type "
-            "enum: 'free_text' | 'structured_json' | 'classification' | "
-            "'extraction' | 'action' | 'media_url' | 'code' | "
-            "'audio_content'. Drives which tool plugin (if any) Agent 5's "
-            "evaluator dispatches to: 'code' → code_execution, "
-            "'audio_content' / 'media_url' → vision or transcription, "
-            "others → LLM judge. Phase 9's harness uses this to decide "
-            "whether to serialize the output before passing to the next step."
+            "Shape of this step's output. Authoritative enum (matches "
+            "VALID_OUTPUT_TYPES in validators.py): 'free_text' | "
+            "'structured_json' | 'classification' | 'extraction' | 'action' "
+            "| 'media_url' | 'code' | 'audio_content' | 'webhook_callback' "
+            "| 'outbound_message' | 'voice_turn' | 'voice_conversation'. "
+            "Drives which tool plugin Agent 5's evaluator dispatches to: "
+            "'code' → code_execution, 'media_url'/'audio_content' → vision "
+            "or transcription, 'webhook_callback' → webhook_receiver, "
+            "'outbound_message' → outbound_delivery, 'voice_turn' → "
+            "voice_realtime (single-turn), 'voice_conversation' → "
+            "voice_realtime (multi-turn driver), others → LLM judge. "
+            "Use 'voice_conversation' for sustained multi-turn phone "
+            "agents; 'voice_turn' for one-shot voice replies."
         )
     )
 
@@ -1235,15 +1256,19 @@ class Candidate(BaseModel):
             "to the caller. Soft vocabulary: 'sync' (immediate response — most "
             "REST GETs and simple POSTs), 'async_polling' (returns a job ID; "
             "caller polls until ready — common for long-running ops like OCR, "
-            "transcription, batch embeddings, fine-tuning), 'other' (Agent 2 "
-            "saw evidence of a non-sync/non-polling pattern — streaming, SSE, "
-            "webhook callback, batch file upload — but lacks enough detail to "
-            "characterize it from snippets), 'unknown' (insufficient signal). "
-            "This is a HINT. Phase 6.5's deep verify reads the real docs and "
-            "populates the richer ScreenedCandidate.interaction_model. Agent 5 "
-            "reads the rich form when available, this hint otherwise. Any "
-            "string other than the four above is coerced to 'unknown' by the "
-            "validator."
+            "transcription, batch embeddings, fine-tuning), 'sse_streaming' "
+            "(Server-Sent Events over a long-lived HTTP connection — LLM "
+            "token streaming, progress events), 'websocket' (the PRIMARY "
+            "protocol is a wss:// WebSocket — OpenAI Realtime, ElevenLabs "
+            "Conversational AI, voice/phone realtime APIs; Agent 5 uses this "
+            "signal to select the WebSocket harness pattern instead of REST), "
+            "'other' (Agent 2 saw evidence of a non-sync/non-polling pattern "
+            "but lacks enough detail to characterize it from snippets), "
+            "'unknown' (insufficient signal). This is a HINT. Phase 6.5's "
+            "deep verify reads the real docs and populates the richer "
+            "ScreenedCandidate.interaction_model. Agent 5 reads the rich form "
+            "when available, this hint otherwise. Any string other than the "
+            "six above is coerced to 'unknown' by the validator."
         )
     )
 
@@ -2518,6 +2543,18 @@ class TestCaseResult(BaseModel):
             "scored and the LLM judge filled in the rest. ['llm_judge'] when "
             "no specialized plugin claimed the modality. Surfaces in the "
             "report so the user can see how each result was scored."
+        ),
+    )
+
+    audio_paths: list[dict] = Field(
+        default_factory=list,
+        description=(
+            "Playable audio artifacts produced for this test case, in order. "
+            "Each entry: ``{role: 'caller' | 'agent' | ..., path: '<abs path>'}``. "
+            "Populated by modality plugins that produce audio (voice_realtime, "
+            "tts, transcription). Empty list for any non-voice test. The "
+            "EvaluationReport surfaces these as playback links in evidence so "
+            "users can hear the actual exchange, not just read transcripts."
         ),
     )
 

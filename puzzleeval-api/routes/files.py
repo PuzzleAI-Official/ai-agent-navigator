@@ -65,8 +65,32 @@ async def upload_files(run_id: str, files: list[UploadFile] = File(...)):
 
     for upload_file in files:
         file_id = str(uuid.uuid4())[:8]
-        safe_name = upload_file.filename or f"file_{file_id}"
+        # Path-traversal sanitization: strip any directory components,
+        # normalize separators, reject empty/whitelist-only results.
+        # Windows + POSIX both treat "../" traversal identically here
+        # because Path(...).name discards leading path segments.
+        raw_name = upload_file.filename or f"file_{file_id}"
+        # pathlib.PurePosixPath + PureWindowsPath both reduce "../../x"
+        # to "x" via `.name`. Handle both separators regardless of OS.
+        from pathlib import PurePosixPath, PureWindowsPath
+        basename = PurePosixPath(raw_name).name or PureWindowsPath(raw_name).name
+        # Scrub any remaining shell-metachars or hidden-file markers that
+        # could confuse downstream tooling (harness builders, reports).
+        safe_name = "".join(
+            c if c.isalnum() or c in "._-" else "_" for c in basename
+        ).strip("._")
+        if not safe_name:
+            safe_name = f"file_{file_id}"
         dest = run_upload_dir / safe_name
+        # Final paranoia — resolve the destination and confirm it's still
+        # inside run_upload_dir. Prevents any symlink / Unicode trickery.
+        try:
+            dest_resolved = dest.resolve()
+            run_root_resolved = run_upload_dir.resolve()
+            if run_root_resolved not in dest_resolved.parents and dest_resolved != run_root_resolved:
+                raise HTTPException(status_code=400, detail="invalid filename")
+        except (OSError, RuntimeError):
+            raise HTTPException(status_code=400, detail="invalid filename")
 
         content = await _read_with_cap(upload_file, MAX_UPLOAD_BYTES_PER_FILE)
         with open(dest, "wb") as f:

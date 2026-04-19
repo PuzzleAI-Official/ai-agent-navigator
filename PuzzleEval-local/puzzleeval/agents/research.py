@@ -746,22 +746,34 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
         try:
             from puzzleeval.agent_preamble import with_preamble
             from puzzleeval.config import output_config_for_request
+            from puzzleeval.anthropic_client import retry_on_transient_5xx
             _kwargs_research: dict[str, object] = {}
             _ocfg = output_config_for_request()
             if _ocfg:
                 _kwargs_research["output_config"] = _ocfg
-            research_response = client.messages.create(
-                model=RESEARCH_MODEL,  # Sonnet 4.6 for better search quality
-                max_tokens=RESEARCH_MAX_TOKENS,
-                system=[{"type": "text", "text": with_preamble(RESEARCH_SYSTEM_PROMPT)}],
-                messages=messages,
-                tools=[web_search_tool],
-                # Adaptive thinking — Sonnet reasons between tool calls about which
-                # search to run next + how to interpret results. Same mechanism
-                # Agent 5's builder loop uses; Claude Code uses native thinking
-                # whenever the model is asked to plan multi-step work.
-                thinking={"type": "adaptive"},
-                **_kwargs_research,
+            # Wrap Step 1 in retry_on_transient_5xx so a brief Anthropic 500
+            # window (observed: seconds-scale degraded mode) doesn't forfeit
+            # the expensive search pass. The SDK's internal retry happens
+            # within milliseconds which is too fast to span a real incident.
+            def _step1_call():
+                return client.messages.create(
+                    model=RESEARCH_MODEL,  # Sonnet 4.6 for better search quality
+                    max_tokens=RESEARCH_MAX_TOKENS,
+                    system=[{"type": "text", "text": with_preamble(RESEARCH_SYSTEM_PROMPT)}],
+                    messages=messages,
+                    tools=[web_search_tool],
+                    # Adaptive thinking — Sonnet reasons between tool calls about which
+                    # search to run next + how to interpret results. Same mechanism
+                    # Agent 5's builder loop uses; Claude Code uses native thinking
+                    # whenever the model is asked to plan multi-step work.
+                    thinking={"type": "adaptive"},
+                    **_kwargs_research,
+                )
+
+            research_response = retry_on_transient_5xx(
+                _step1_call,
+                trace_id=input_data.trace_id,
+                operation_label="research_step1",
             )
 
         # [error handling] Same pattern as Agent 1 — different error types
@@ -889,18 +901,35 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
     # grammar exceeds Anthropic's size/timeout budget, we fall back to a
     # non-strict tool-call shape and validate the JSON through Pydantic
     # post-hoc — same final object, no hard failure.
+    #
+    # Retry on transient 5xx via retry_on_transient_5xx: Anthropic
+    # occasionally returns HTTP 500 "Internal server error" for seconds at
+    # a time, and the SDK's internal max_retries=3 happens within
+    # milliseconds — not enough to span a real backend incident. We add
+    # a second tier of longer-baked retries (2s → 6s) so Anthropic has
+    # time to stabilise rather than forfeit Step 1's ~$0.25 spend on
+    # a transient.
     step2_start = time.time()
     try:
         from puzzleeval.structured_output import parse_with_fallback
-        structure_response = parse_with_fallback(
-            client=client,
-            model=DEFAULT_MODEL,
-            max_tokens=STRUCTURE_MAX_TOKENS,
-            system=[{"type": "text", "text": with_preamble(STRUCTURE_SYSTEM_PROMPT)}],
-            messages=[{"role": "user", "content": findings_text}],
-            output_format=Agent2Result,
-            extra={},
+        from puzzleeval.anthropic_client import retry_on_transient_5xx
+
+        def _step2_call():
+            return parse_with_fallback(
+                client=client,
+                model=DEFAULT_MODEL,
+                max_tokens=STRUCTURE_MAX_TOKENS,
+                system=[{"type": "text", "text": with_preamble(STRUCTURE_SYSTEM_PROMPT)}],
+                messages=[{"role": "user", "content": findings_text}],
+                output_format=Agent2Result,
+                extra={},
+                trace_id=input_data.trace_id,
+            )
+
+        structure_response = retry_on_transient_5xx(
+            _step2_call,
             trace_id=input_data.trace_id,
+            operation_label="research_structure",
         )
 
     # [error handling] Same error pattern for Step 2
@@ -923,12 +952,17 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
             agent_name="research", trace_id=input_data.trace_id,
         )
     except anthropic.APIStatusError as e:
+        # retry_on_transient_5xx already retried 500/502/503; if we're here
+        # the retries were exhausted (or the status was 4xx / other 5xx).
         logger.error("API error (Step 2: structuring)", extra={
             "operation": "llm_call_structure", "trace_id": input_data.trace_id,
             "error": str(e), "error_type": "APIStatusError",
         })
         raise AgentAPIError(
-            message=f"Anthropic API error during structuring: {e}",
+            message=(
+                f"Anthropic API error during structuring: {e}. If this is a "
+                "5xx transient, re-running the pipeline typically clears it."
+            ),
             agent_name="research", trace_id=input_data.trace_id,
         )
 

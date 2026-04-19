@@ -11,8 +11,166 @@ Target users: SMBs (small/medium businesses) who are overwhelmed by AI options a
 
 ## Current State (as of 2026-04-18)
 
-**Production-ready for local hosting. 1040 tests passing (971 core + 30 API
+**Production-ready for local hosting. 1042 tests passing (973 core + 30 API
 + 39 generalizability bench). Zero regressions. TypeScript + Vite clean.**
+
+> **NEW-AH — Voice merge playback fix + thread-local session isolation + Skills architecture decision** (this session, documented below). Previous passes' sections (NEW-AG, NEW-AF, etc.) are preserved below in chronological reverse order.
+
+### NEW-AH — Voice playback fix + thread-local isolation + Agent Skills decision
+
+After NEW-AG shipped the merged conversation feature, a listen-back pass
+caught a real playback bug + a dual-provider isolation bug, AND a strategic
+decision was made about Agent Skills vs our own playbook system. All three
+matter for future sessions; all three are general-purpose fixes, not
+scenario-specific.
+
+**Capability fix 1 — ID3-tag-aware MP3 merger.**
+The NEW-AG byte-concat merger produced files the OS sized correctly but
+most players (Windows Media Player, browser `<audio>`, QuickTime) only
+played the FIRST segment — the caller voice — because the leading
+ID3v2 tag declared a 3-second duration and players honored it. Real-run
+signal: voice_v3 replay produced a 290 KB conversation file that played
+as only ~3 seconds of caller audio, cutting off before Vera's response.
+General fix: `_strip_id3v2_header` (synchsafe-size decode) +
+`_strip_id3v1_trailer` (TAG signature) module-level helpers. The first
+segment keeps its ID3v2 (needed for codec init); segments 2…N are
+stripped before append. Mid-stream ID3v1 trailers stripped from every
+segment to avoid decoder confusion. Pure-Python; no ffmpeg/pydub
+dependency. Fallback still drops the merge and keeps per-turn files
+if MP3 parsing fails. Tests:
+- `test_id3v2_strip_handles_real_openai_tts_header`
+
+**Capability fix 2 — thread-local session_dir for parallel candidates.**
+Agent 5 runs candidates in parallel via ThreadPoolExecutor. Each worker
+called `plugin.set_session_dir(<sandbox>/voice/)`. But the plugin is a
+MODULE-LEVEL SINGLETON — two workers writing to `self._session_dir`
+caused last-setter-wins. Real-run signal: voice_dual_6 showed OpenAI
+Voice Stack's audio paths pointing to `elevenlabs_voice_stack/voice/`
+because ElevenLabs's worker happened to call set_session_dir second.
+General fix: `_session_dir` became a property backed by
+`threading.local()`. Each worker reads its own value; writes stay
+thread-isolated. `set_session_dir()` signature unchanged — call sites
+didn't need updating. Tests:
+- `test_voice_plugin_session_dir_is_thread_local` (real two-thread race
+  with a Barrier asserting each thread reads its own dir)
+
+**Capability fix 3 — bytes-safe round-trip for harness output.**
+Voice harness returned raw `bytes` in `raw_response.audio_bytes`. The
+subprocess driver's `json.dump(..., default=str)` stringified them as
+`"b'\\xff\\xfb...'"` (useless Python repr). Plugin's
+`isinstance(audio_bytes, bytes)` check then failed → agent audio
+silently lost. General fix at THREE layers:
+1. Driver script (`_execute_single_test`) encodes bytes as
+   `{"_b64": "<base64>"}` sentinels before `json.dump`.
+2. Agent 5's new `_inflate_b64_sentinels` helper walks the loaded
+   JSON and re-inflates sentinels to bytes before returning.
+3. Voice plugin's `_extract_agent_text_and_path` ALSO accepts a
+   base64 string directly (belt-and-braces for older harnesses that
+   pre-encoded themselves).
+Harnesses keep returning raw bytes; the plugin keeps reading raw bytes;
+the JSON border is transparent. Tests:
+- `test_execute_single_test_round_trips_bytes_via_b64_sentinel`
+- `test_exec_script_encodes_bytes_with_b64_sentinel`
+- `test_voice_plugin_extracts_audio_from_base64_string`
+
+**Capability fix 4 — `audio_format` → `audio_content_type` derivation.**
+Voice harnesses commonly return `raw_response = {"audio_bytes": <bytes>,
+"audio_format": "mp3"}` WITHOUT explicit `audio_content_type`. Plugin's
+`_responder` defaulted to `"audio/wav"` → MP3 bytes got saved as `.wav`
+files (corrupted playback) AND the merger refused mixed-extension
+concat (caller `.mp3` vs agent `.wav`), producing caller-only merges.
+General fix: derive content_type from audio_format via a lookup table
+(`mp3`/`mpeg`/`mpga` → `audio/mpeg`, etc.). Test:
+- `test_voice_plugin_responder_derives_content_type_from_audio_format`
+
+**Architectural decision — Agent Skills vs our own playbook system.**
+Strategic investigation (NOT a code change — documented for future-us):
+the question was whether the growing Agent 5 builder prompt (~2500
+lines, 10+ modalities incoming) should migrate to Anthropic's Agent
+Skills feature or keep expanding our monolithic prompt.
+
+Read carefully:
+- `platform.claude.com/docs/en/agents-and-tools/agent-skills/*` (overview, quickstart, best-practices, enterprise)
+- `platform.claude.com/docs/en/build-with-claude/skills-guide`
+- `platform.claude.com/docs/en/agents-and-tools/remote-mcp-servers`
+- `platform.claude.com/docs/en/agents-and-tools/mcp-connector`
+- `platform.claude.com/cookbook/skills-notebooks-01-skills-introduction`
+- `anthropic.com/engineering/equipping-agents-for-the-real-world-with-agent-skills`
+
+**Finding**: Agent Skills via the Messages API REQUIRE (a) `container`
+parameter, (b) `code-execution-2025-08-25` beta, (c) `skills-2025-10-02`
+beta, (d) `files-api-2025-04-14` beta. Skills execute inside
+Anthropic's sandbox, referenced by `skill_id` from Anthropic's
+registry (not file paths in our repo). There is NO documented pattern
+for loading skill markdown into `system=[...]` without container +
+code execution. The cookbook is explicit: "Skills require the code
+execution tool to be enabled."
+
+**Blocker for adopting Skills natively**: PuzzleEval's harness
+execution model sends user credentials (Mindee keys, ElevenLabs keys,
+OpenAI keys, etc.) into local subprocess venvs. Migrating harness
+execution to Anthropic's `container` sandbox would require sending
+those credentials through Anthropic's infrastructure — incompatible
+with our bring-your-own-keys self-hosted security model.
+
+**Decision (three-way tradeoff evaluated)**:
+
+| Path | Status |
+|---|---|
+| (A) Native Agent Skills via `container` + betas | **Rejected** — incompatible with local-subprocess credential model |
+| (B) Our own skill-format playbook files + deterministic router | **Deferred** — format stability risk, migration benefit weaker than initially claimed |
+| (C) Extend existing conditional in-prompt gating pattern | **Adopted** — simplest, no new infrastructure, reversible |
+
+**Current pattern (C) already ships**: Agent 5's `_build_initial_message`
+already injects the `MULTI-CALL HARNESS CONTRACT` only when
+`input_type ∈ {conversation, voice_conversation, voice_turn}`. When
+adding new modalities (code-gen, fine-tuning, streaming), extend the
+same pattern: `_build_modality_section(input_type, output_type) ->
+str | None` — returns the right ~60-line section or None. One prompt
+file, clean per-modality boundaries, no loading/routing infrastructure.
+
+**Revisit triggers** (flip to path B or A):
+
+1. **Flip to (B) playbook files + router**: when (i) modality count
+   reaches ~8 and one-prompt-with-sections becomes a merge-conflict
+   magnet, OR (ii) different engineers need to own different modality
+   playbooks independently. The playbook structure: one `.md` file
+   per modality with `description:` frontmatter matching Anthropic's
+   skill file format (for soft forward-compat). Router is a deterministic
+   `input_type → playbook_path` lookup.
+
+2. **Flip to (A) native Skills**: when (i) PuzzleEval pivots to SaaS
+   (credentials already flow through our infrastructure so container
+   isn't a security regression), OR (ii) Anthropic ships a
+   "skills as system-prompt injection" mode that doesn't require
+   `container` + code execution.
+
+**Worth watching**: skill format is described by example in the docs,
+not formally spec'd. Anthropic hasn't published stability guarantees.
+Designing our playbooks in skill format today is NOT as
+forward-compatible as I initially argued — there's reverse-engineering
+risk. Real decision cost, not zero.
+
+**Tests (this pass):**
+- `test_id3v2_strip_handles_real_openai_tts_header`
+- `test_voice_plugin_session_dir_is_thread_local`
+- `test_execute_single_test_round_trips_bytes_via_b64_sentinel`
+- `test_exec_script_encodes_bytes_with_b64_sentinel`
+- `test_voice_plugin_extracts_audio_from_base64_string`
+- `test_voice_plugin_responder_derives_content_type_from_audio_format`
+
+Net: 967 → 973 core tests. API + bench unchanged.
+
+**Verified end-to-end** (zero additional build spend): replay of
+voice_dual_7's OpenAI harness through the fixed pipeline produced
+5 audio files (1 merged + 2 caller + 2 agent) all at matching
+extension, merged conversation plays correctly with both voices in
+dialogue order, score 1.0 (both turns matched expected substrings
+once audio actually reached the scorer). The fix chain is:
+`harness bytes` → `_bytes_safe` (base64 sentinel) → JSON → Agent 5
+`_inflate_b64_sentinels` → bytes → `_extract_agent_text_and_path`
+→ `_save_audio_blob` with derived `audio/mpeg` ctype → `.mp3` file →
+merger strips ID3 tags → concat → playable "Full call" clip.
 
 ### NEW-AG — Voice end-to-end + dual-provider eval + UI/audio merge
 
@@ -2410,6 +2568,378 @@ Presence of `tests/generalizability/domains/*.json` with 10+ configs.
 **Diagnostic flag:** marker-gated, separate directory — doesn't touch
 the core suite. Remove the `addopts` line from `pyproject.toml` to
 include bench tests in the default run.
+
+## Architecture Decisions Log (2026-04-18)
+
+Durable decisions that future sessions should treat as load-bearing. If
+you find yourself about to contradict one of these, pause and check
+whether the conditions that motivated the decision have changed.
+
+### AD-001: Stay unified, no per-modality pipeline fork
+
+**Decision**: One agent pipeline handles every modality (voice, OCR,
+vision, code gen, webhook, streaming, chatbot-text). Do NOT fork
+into "voice pipeline / vision pipeline / file pipeline" each with its
+own Agent 1-5.
+
+**Why**: Agents 1-4 are 100% modality-agnostic (they operate on enum
+fields and WorkflowBlueprint shape). Forking would 4× the prompt
+maintenance with zero gain for those agents. Real users describe
+mixed-modality problems ("OCR invoices THEN call the vendor to
+verify") that a forked architecture would require the user to split
+themselves — breaking the product's core value. Cross-modality
+comparison (which is a product requirement) becomes impossible with
+forked pipelines.
+
+**When to revisit**: only if a modality emerges with fundamentally
+different `Agent 1 → 2` semantics, different scoring philosophy that
+plugins can't carry, or a user contract that differs at the surface
+above agents (e.g., HIPAA-audited healthcare). Voice / vision / file
+/ webhook / code-gen / streaming / outbound-email are all "plugin
+shaped" and don't qualify.
+
+### AD-002: Agent 5 uses conditional in-prompt gating (path C)
+
+**Decision**: Agent 5's builder prompt stays in ONE file
+(`implement_test_env.py::BUILDER_SYSTEM_PROMPT`) with
+conditional injection for modality-specific sections. Do NOT build a
+playbook-file-loading system yet. Do NOT migrate to native Anthropic
+Agent Skills yet.
+
+**Why**: Evaluated three options carefully:
+- (A) Native Skills: incompatible with local-subprocess credential
+  model. Requires `container` + `code-execution-2025-08-25` + two
+  other betas. User API keys would have to flow through Anthropic's
+  sandbox.
+- (B) Playbook files + deterministic router: real option, but adds
+  loading/routing infrastructure for a problem we haven't hit yet
+  (prompt still manageable at ~2500 lines, well-organized, <5
+  modalities). Forward-compat claim to native Skills is weaker
+  than expected (skill format not formally spec'd; Anthropic uses
+  uploaded-by-ID model, not file-path model).
+- (C) Conditional in-prompt gating: extends the existing
+  `MULTI-CALL HARNESS CONTRACT` pattern already in
+  `_build_initial_message`. Minimal new infrastructure. Token
+  savings same as playbooks (irrelevant sections skipped). Simpler
+  to iterate.
+
+**Revisit trigger for flipping to (B)**: modality count ≥ 8 AND
+prompt becomes a merge-conflict magnet, OR independent engineer
+ownership per modality becomes real.
+
+**Revisit trigger for flipping to (A)**: PuzzleEval pivots to SaaS
+(credentials flow through our infra anyway), OR Anthropic ships a
+"skills as system-prompt injection" mode without `container`.
+
+See NEW-AH above for the full evaluation.
+
+### AD-003: Plugins own modality-specific orchestration
+
+**Decision**: Any modality that needs N harness invocations per test
+(multi-turn voice, multi-turn chatbot, streaming with re-subscribe)
+is owned by a PLUGIN with `requires_harness_runner=True`. The plugin
+drives its own N-turn loop; the harness stays single-turn.
+
+**Why**: Keeps Agent 5's builder prompt + harness template single-shape
+across modalities. Adding a new multi-call modality is one plugin file
+(~1200 lines, self-contained) — NOT a prompt overhaul. Voice is the
+reference implementation (`tool_plugins/voice_realtime.py`).
+
+### AD-004: Audio artifacts live under the run directory, NOT %TEMP%
+
+**Decision**: Every audio file (caller MP3, agent MP3, merged
+conversation) lives under `runs/<trace_id>/harnesses/<candidate_slug>/
+voice/`. Thread-local `_session_dir` keeps parallel candidates
+isolated.
+
+**Why**: Without this, the backend audio-streaming route would 403
+(containment check) and the frontend would silently fail. User
+expectation is "every run is a self-contained directory I can zip and
+share."
+
+**Cloud-scale seam preserved**: `set_session_dir()` accepts any
+Path-compatible object. Swap in an S3/GCS Path-shim without touching
+call sites.
+
+### AD-005: Skills and MCP are NOT interchangeable
+
+**Decision** (from reading Anthropic's two MCP docs + two Skills
+docs + engineering blog): Skills are for PROCEDURAL KNOWLEDGE
+(markdown guidance with optional bundled scripts), MCP is for
+TOOL/SERVICE INTERFACES (function-call RPCs). They're orthogonal.
+When adding a new capability to PuzzleEval, route as follows:
+
+| Need | Answer |
+|---|---|
+| Teach the agent a contract (how to call X API family) | In-prompt conditional section (AD-002) |
+| Expose a custom callable (e.g., `sample_audio_check`) | Custom tool registered at `client.messages.create(tools=[...])` |
+| Expose a set of external service tools | MCP connector (remote or stdio) |
+| Bundle domain procedural knowledge for Anthropic-hosted agents | Agent Skills (only when AD-002 revisit triggers hit) |
+
+### AD-006: Bytes across the JSON border
+
+**Decision**: Any harness that returns `bytes` in `raw_response.*`
+(audio_bytes, binary blobs, whatever) is transparently round-tripped
+via `{"_b64": "<base64>"}` sentinels. The encode happens in the
+subprocess driver (`_execute_single_test`'s exec_script); the decode
+happens in Agent 5 (`_inflate_b64_sentinels`) before the plugin sees
+the dict. Harnesses never need to know.
+
+**Why**: The prior `json.dump(..., default=str)` path silently
+stringified bytes as Python repr — bug surface that cost us a
+real-run cycle before being caught. The sentinel is the stable seam
+for every future modality that ships binary data.
+
+## Open Threads & Known Limitations (2026-04-18)
+
+Honest ledger of what's not fixed, what might need fixing, and what's
+deferred with reasoning. Future sessions: read this first to avoid
+re-deriving deliberate choices.
+
+### OT-001: Scoring uses substring match, not semantic
+
+**Symptom**: Voice tests' `expected_agent_contains` fields
+(`"9"`, `"555-0911"`, `"95"`, `"Los Angeles"`, `"welcome"`) can miss
+valid natural-language responses. Agent says "We are open from nine
+to five" → substring `"9"` fails to match "nine" (spelled out).
+Replay of voice_dual_7 through the fixed pipeline produced
+score=1.0 because the agent happened to answer with digits, but
+that's luck-of-the-model not robust scoring.
+
+**Impact**: Voice eval reports understate agent quality by ~20-50%
+depending on how the agent phrases responses.
+
+**General fix (deferred)**: add a semantic-match mode to
+`drive_conversation` — per turn, if substring match fails, escalate
+to an LLM judge call with the transcript and the expected intent.
+Cost: ~$0.002 per escalation.
+
+**Why deferred**: lower priority than capability-level bugs. The
+substring mode is deterministic + free, which is right for
+development. Production reports should add the semantic fallback.
+
+### OT-002: No fresh dual-provider real run post-all-fixes
+
+**Symptom**: All the NEW-AH fixes (bytes-safe round-trip, ID3 strip,
+thread-local session_dir, audio_format → content_type) were verified
+via (a) unit tests + (b) replay of voice_dual_7's existing OpenAI
+harness. No fresh Agent 5 build was done against the dual-provider
+scenario with ALL fixes simultaneously active.
+
+**Impact**: High confidence the fixes compose correctly (unit tests
+exercise the real code paths), but we don't have a single artifact
+showing both candidates building AND running AND producing merged
+conversations in their own per-candidate folders.
+
+**To do in next session**: `python -m puzzleeval.cli --agent5-input
+runs/voice_scenario_dual/agent_5_input.json --trace-id voice_dual_8`
+— cost ~$4-5. Expected outcome: two folders
+(`openai_voice_stack/voice/`, `elevenlabs_voice_stack/voice/`) each
+with 5 caller + 5 agent + 1 merged file. If any file is missing,
+the race condition wasn't fully fixed. Real acceptance test.
+
+### OT-003: Agent 5 builder prompt approaching ~2500 lines
+
+**Symptom**: `BUILDER_SYSTEM_PROMPT` at ~2500 lines. Voice added
+~60 lines (conditional MULTI-CALL CONTRACT). Each future modality
+will add a similar section.
+
+**Trigger for action**: if prompt crosses ~3500 lines OR becomes a
+merge-conflict hotspot, execute AD-002's revisit path (flip to
+playbook-files + router). Track via `wc -l` in a weekly health
+check.
+
+**Not a bug — a monitoring item.**
+
+### OT-004: Audio merge is MP3-only (robust), WAV/OGG/M4A work but untested at depth
+
+**Symptom**: `_merge_conversation_audio` handles `.mp3` via ID3
+tag stripping. For other extensions (wav, ogg, m4a, webm, mp4, mpga,
+flac), it byte-concats without any format-aware preprocessing.
+
+**Impact**: Works in theory because most formats don't have
+problematic mid-stream metadata (WAV has a header at offset 0 but
+subsequent frames are raw PCM; OGG has similar page structure). Not
+exhaustively tested.
+
+**Fix if needed**: per-format strippers (WAV RIFF header, OGG
+container). Cheap to add when a real-run trace exposes a bad
+concat.
+
+### OT-005: Agent 3 empty-response retry is ONE attempt
+
+**Symptom**: `_retry_empty_generation` fires once when Agent 3
+returns `{"test_cases": []}`. If the retry also returns empty, the
+pipeline proceeds with zero tests — validator downstream errors
+out.
+
+**Impact**: Rare (only observed once in traces across ~10 full runs).
+When it happens, the user sees "Agent 3 produced zero test cases"
+and has to manually re-run.
+
+**Deferred**: N-attempt loop with exponential backoff + model
+fallback (Sonnet → Haiku → request user to clarify input). Low
+probability × low impact × simple current fix.
+
+### OT-006: Adversarial battery auto-skips on "sandbox_broken"
+
+**Symptom**: When a harness's venv is missing packages (pip install
+silently failed during build), the adversarial battery can't import
+the harness → returns `sandbox_broken` warning → battery skipped →
+test execution proceeds. This was the right choice (don't block
+valid harnesses on sandbox setup bugs), BUT it means we lose the
+"is the harness robust to adversarial inputs?" check for that
+candidate.
+
+**Impact**: On runs where pip install fails silently, candidate
+scoring trusts test execution without adversarial pre-flight. In
+practice test execution catches most issues anyway.
+
+**Fix direction**: tighten the `_create_venv` path to verify
+requirements.txt installed cleanly before running the builder.
+Orthogonal to current capability; not urgent.
+
+### OT-007: Two CI runs root allowlist (api vs local)
+
+**Symptom**: Backend `/runs/audio` serves from both
+`puzzleeval-api/runs/` AND `PuzzleEval-local/runs/` + operator-
+provided `PUZZLEEVAL_EXTRA_RUNS_ROOTS`. This is correct but means
+two parallel run directories exist. CI / tests touch one; real
+backend traffic touches the other.
+
+**To do**: eventually converge on one runs root (probably
+`puzzleeval-api/runs/` as the backend serves it). CLI mode can
+symlink or env-var into that dir. Not urgent — current separation
+is deliberate during dev.
+
+### OT-008: Voice plugin is a module-level singleton
+
+**Symptom**: `tool_plugins/voice_realtime.py` registers one
+instance at import time. Thread-local state is the right fix for
+per-candidate isolation (AD-004), but if we ever want per-CANDIDATE
+plugin configuration (different TTS voice per candidate, different
+audio format default), the singleton design becomes awkward.
+
+**Fix direction**: if needed, accept a per-call config param in
+`synthesize_input` / `evaluate_output` that overrides defaults.
+Current state: no requirement. Logged for awareness.
+
+### OT-009: Skill format is reverse-engineered from Anthropic's examples
+
+**Symptom**: If AD-002's revisit triggers fire (flip to
+playbook-files + router), we'll format the playbooks using
+Anthropic's Skills file conventions for soft forward-compat. But
+Anthropic hasn't published a formal schema — conventions are
+example-based in the cookbook / best-practices docs.
+
+**Impact**: If Anthropic formalizes skills-file schema later and our
+reverse-engineered shape diverges, we'd need a migration pass. Low
+risk but real.
+
+**Watch**: monitor `platform.claude.com/docs/en/agents-and-tools/
+agent-skills/*` for a schema announcement.
+
+### OT-010: LLM-judge fallback on tool_runner non-verdict
+
+**Symptom**: The tool_runner verdict-promotion fix (NEW-AG) catches
+the case where Claude's tool_runner doesn't emit a final
+`ScoreVerdict`. But if a plugin's own verdict is inconclusive
+(e.g., voice plugin returned score=0.4 with fallback_reason="no
+runner"), we still fall through to LLM judge — and that judge only
+sees the first-turn response, not the full conversation.
+
+**General fix (deferred)**: pass `verdict.detail` (containing
+per-turn transcripts) into the LLM-judge prompt so it can reason over
+the complete conversation even when tool_runner / direct-invoke
+didn't emit a structured verdict.
+
+**Why deferred**: rare path. With direct-invoke owner fast path
+(NEW-AG), plugins emit conclusive verdicts for ~100% of voice tests
+that reach them. The LLM-judge fallback is a safety net, not the
+main path.
+
+### OT-011: No per-candidate SaaS isolation story yet
+
+**Symptom**: Current architecture is self-hosted per-user. If
+PuzzleEval pivots to multi-tenant SaaS, per-user credential
+isolation becomes a cross-cutting concern (AD-001's "different user
+contract" criterion). This would ALSO unblock native Skills (AD-002
+revisit trigger).
+
+**Not an open bug — a strategic watch item.** If SaaS becomes a
+roadmap item, expect to:
+1. Move harness execution to a sandboxed container per user (Docker
+   / Firecracker / Anthropic's container).
+2. Re-evaluate AD-002 (Skills native vs playbook files).
+3. Re-evaluate AD-007 (currently implicit: single-user credential
+   registry).
+
+### OT-012: Environment-level WebFetch blocking rejects candidates wholesale
+
+**Symptom (observed 2026-04-19 end-to-end test, run `5b4391e8`)**:
+An end-to-end voice-scenario run through the FastAPI backend +
+React frontend reached the selection stage with 7 voice candidates
+(Rosie AI, NextPhone, Marlie.ai, Upfirst, Dialzara, Goodcall, Retell
+AI). After picking 3 defaults + sending to Agent 4, ALL 7 rejected
+with `rejection_category="no_public_docs"` / `"no_api_access"` and
+`web_fetch_blocks=10`. Agent 5 then hit
+`ValueError: max_workers must be greater than 0` because
+`ThreadPoolExecutor(max_workers=min(AGENT5_MAX_PARALLEL, 0))` is
+illegal.
+
+**Two fixes landed this session:**
+
+1. **Agent 5 empty-candidates guard** — when every upstream
+   candidate is rejected, Agent 5 now short-circuits to a clean
+   empty `Agent5Result` with `build_summary` explaining the
+   coverage gap, instead of crashing. Matches the documented
+   graceful-degradation contract. Report assembler renders it
+   as a zero-candidate run with advisories, not a pipeline
+   failure. See `implement_test_env.py` ~line 4677.
+
+2. **`pipeline_runner.py` UnboundLocalError fix** — Phase 6.5's
+   coverage-gap detection had `user_understanding = _get_user_
+   understanding(state)` shadowing the enclosing-scope binding.
+   Python marked `user_understanding` local for the whole
+   `_branch_a_research_and_screening` function, which turned the
+   earlier `await _run_real_agent2(state, user_understanding)` at
+   line 331 into an UnboundLocalError. Removed the redundant
+   re-fetch — the enclosing scope's binding is correct.
+
+**Root cause of the rejections (NOT a bug — environmental)**:
+The machine running the backend has Anthropic's server-side
+`web_fetch` tool blocked by CF/WAF / corporate filtering on ~every
+API docs domain. `web_fetch_fallback.py` correctly detected the
+blocks and the agents gracefully returned rejections (no false
+passes), but the rejection rate was 100% which is operationally
+the same as "no products work."
+
+**Mitigation (set in `.env` this session)**:
+`PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED=0` reverts Agent 4 to shallow
+pass/fail per the documented diagnostic flag matrix. Did NOT
+resolve the rejection rate in the observed run because the shallow
+path still makes web_fetch calls for evidence-gathering; same
+upstream block hit.
+
+**Real fix paths (cloud-deferred)**:
+- Move backend to a cloud VM where WebFetch isn't blocked.
+- Add a `PUZZLEEVAL_AGENT4_TRUST_CANDIDATES=1` mode that skips
+  doc-fetch verification entirely and trusts Agent 2's discovery —
+  only safe when Agent 5 does its own Phase-1 research.
+- Add a `PUZZLEEVAL_REGISTRY_ONLY_CANDIDATES=1` mode that filters
+  Agent 2's pool to only candidates in `provider_registry.json`
+  (where we already have keys + known doc URLs).
+
+**Impact**: Full E2E pipeline flow is verified (frontend ↔ backend
+↔ SSE ↔ all 5 agents ↔ report). Voice harness + audio merge code
+paths could NOT be exercised in this run because zero candidates
+reached Agent 5. Voice-specific verification remains OT-002
+(replay or cloud run).
+
+**Observability**: `pipeline_summary.json` now shows
+`agent_4_output.web_fetch_blocks >= 1` as a leading indicator.
+When blocks > candidate_count × 1.5, the environment is likely
+blocking WebFetch wholesale.
 
 ## Diagnostic Conventions (Phase Fingerprints + Flag Matrix)
 

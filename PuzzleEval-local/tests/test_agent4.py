@@ -391,9 +391,17 @@ class TestScreeningAgent:
         mock_response.usage.cache_read_input_tokens = 0
         return mock_response
 
+    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_valid_input_produces_result(self, mock_anthropic_class):
-        """Valid input should produce a valid Agent4Result."""
+        """Valid input should produce a valid Agent4Result.
+
+        Forces the shallow per-candidate verification path via
+        `AGENT4_DEEP_VERIFY_ENABLED=False` — these tests exercise the
+        shallow path's pause_turn / per-candidate-error handling, not the
+        deep-verify runner (which has its own tests in
+        `tests/test_deep_verify_and_fallback.py`).
+        """
         expected_result = _make_agent4_result()
 
         mock_client = MagicMock()
@@ -406,7 +414,7 @@ class TestScreeningAgent:
             )
             for c in _make_sample_candidates()
         ]
-        mock_client.messages.create.side_effect = verify_responses
+        mock_client.beta.messages.create.side_effect = verify_responses
 
         # Final structuring call
         mock_client.messages.parse.return_value = self._make_mock_structure_response(
@@ -427,15 +435,16 @@ class TestScreeningAgent:
         assert result.total_candidates_screened == 5
 
         # Verify per-candidate calls were made (5 calls for 5 candidates)
-        assert mock_client.messages.create.call_count == 5
+        assert mock_client.beta.messages.create.call_count == 5
 
         # Verify tools include both web_fetch and web_search
-        first_call = mock_client.messages.create.call_args_list[0]
+        first_call = mock_client.beta.messages.create.call_args_list[0]
         tools = first_call.kwargs.get("tools", [])
         tool_types = {t["type"] for t in tools}
         assert "web_fetch_20250910" in tool_types
         assert "web_search_20250305" in tool_types
 
+    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_single_candidate_api_error_doesnt_kill_pipeline(self, mock_anthropic_class):
         """If one candidate's verification fails, others should still proceed."""
@@ -462,7 +471,7 @@ class TestScreeningAgent:
                     )
                 )
 
-        mock_client.messages.create.side_effect = responses
+        mock_client.beta.messages.create.side_effect = responses
 
         # Structuring still works
         mock_client.messages.parse.return_value = self._make_mock_structure_response(
@@ -480,6 +489,7 @@ class TestScreeningAgent:
         result = run_screening_agent(input_data)
         assert result is not None
 
+    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_structure_step_none_output_raises_error(self, mock_anthropic_class):
         """If structuring returns None, should raise AgentOutputError."""
@@ -490,7 +500,7 @@ class TestScreeningAgent:
 
         # All verification calls succeed
         candidates = _make_sample_candidates()
-        mock_client.messages.create.side_effect = [
+        mock_client.beta.messages.create.side_effect = [
             self._make_mock_verify_response(f"CANDIDATE: {c.name}\nDETERMINATION: PASS")
             for c in candidates
         ]
@@ -510,6 +520,7 @@ class TestScreeningAgent:
         with pytest.raises(AgentOutputError, match="no parsed output"):
             run_screening_agent(input_data)
 
+    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_pause_turn_handled_per_candidate(self, mock_anthropic_class):
         """pause_turn during per-candidate verification should continue."""
@@ -535,7 +546,7 @@ class TestScreeningAgent:
                 f"CANDIDATE: {c.name}\nDETERMINATION: PASS"
             ))
 
-        mock_client.messages.create.side_effect = responses
+        mock_client.beta.messages.create.side_effect = responses
         mock_client.messages.parse.return_value = self._make_mock_structure_response(
             expected_result
         )
@@ -551,8 +562,9 @@ class TestScreeningAgent:
         assert result is not None
 
         # 6 create calls: candidate 0 (2 calls: pause + continue) + candidates 1-4 (4 calls)
-        assert mock_client.messages.create.call_count == 6
+        assert mock_client.beta.messages.create.call_count == 6
 
+    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_structure_step_api_error_raises(self, mock_anthropic_class):
         """API error in the structuring step should raise AgentAPIError."""
@@ -564,7 +576,7 @@ class TestScreeningAgent:
 
         # All verifications succeed
         candidates = _make_sample_candidates()
-        mock_client.messages.create.side_effect = [
+        mock_client.beta.messages.create.side_effect = [
             self._make_mock_verify_response(f"CANDIDATE: {c.name}\nDETERMINATION: PASS")
             for c in candidates
         ]
@@ -592,6 +604,72 @@ class TestScreeningAgent:
         assert WEB_FETCH_TOOL["max_uses"] == 3  # docs page + homepage + follow link
         assert WEB_SEARCH_TOOL["type"] == "web_search_20250305"
         assert WEB_SEARCH_TOOL["max_uses"] == 3  # standard + capability + site-scoped
+
+    @patch("puzzleeval.agents.screening.anthropic.Anthropic")
+    def test_verify_routes_through_beta_endpoint_with_context_management_beta(
+        self, mock_anthropic_class
+    ):
+        """
+        Regression test — the shallow screening verification call MUST route
+        through ``client.beta.messages.create`` with the
+        ``context-management-2025-06-27`` beta header. The prior
+        implementation called ``client.messages.create`` with
+        ``extra_body={"context_management": ...}``, which the non-beta
+        endpoint rejects with HTTP 400 "context_management extra inputs not
+        permitted" — that single misconfiguration caused every candidate to
+        mass-reject with `no_public_docs` / `"transient API error"` even when
+        their docs were perfectly reachable. See CLAUDE.md OT-012.
+        """
+        expected_result = _make_agent4_result()
+
+        mock_client = MagicMock()
+        mock_anthropic_class.return_value = mock_client
+
+        candidates = _make_sample_candidates()
+        mock_client.beta.messages.create.side_effect = [
+            self._make_mock_verify_response(
+                f"CANDIDATE: {c.name}\nDETERMINATION: PASS"
+            )
+            for c in candidates
+        ]
+        mock_client.messages.parse.return_value = self._make_mock_structure_response(
+            expected_result
+        )
+
+        input_data = Agent4Input(
+            candidates=_make_agent2_result(),
+            user_understanding=_make_user_understanding(),
+            trace_id="test-beta-routing",
+        )
+
+        from puzzleeval.agents.screening import run_screening_agent
+        run_screening_agent(input_data)
+
+        # Must have used the beta endpoint, not the regular one.
+        assert mock_client.beta.messages.create.call_count == len(candidates)
+        assert mock_client.messages.create.call_count == 0
+
+        first_call_kwargs = mock_client.beta.messages.create.call_args_list[0].kwargs
+
+        # Beta header must carry the context-management beta.
+        betas = first_call_kwargs.get("betas") or []
+        assert "context-management-2025-06-27" in betas, (
+            f"Expected 'context-management-2025-06-27' in betas, got {betas}"
+        )
+
+        # `context_management` is a direct kwarg on beta.messages.create —
+        # the old `extra_body` path was what the API rejected.
+        assert "context_management" in first_call_kwargs, (
+            "context_management must be a direct kwarg on beta.messages.create"
+        )
+        cm = first_call_kwargs["context_management"]
+        edit_types = [e.get("type") for e in cm.get("edits", [])]
+        assert "clear_tool_uses_20250919" in edit_types
+
+        # Must NOT pass context_management inside extra_body (the old bug).
+        assert "extra_body" not in first_call_kwargs or (
+            "context_management" not in (first_call_kwargs.get("extra_body") or {})
+        )
 
 
 # ============================================================================

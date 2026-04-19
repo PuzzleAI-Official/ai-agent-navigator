@@ -418,9 +418,21 @@ def _verify_single_candidate(
             _ocfg = output_config_for_request()
             if _ocfg:
                 _kwargs_verify["output_config"] = _ocfg
-            response = client.messages.create(
+            # [critical] `context_management` is a beta-gated Anthropic API
+            # parameter. The regular `client.messages.create` endpoint does
+            # not accept it and returns HTTP 400 "context_management extra
+            # inputs not permitted". We MUST route through
+            # `client.beta.messages.create` with the `context-management-
+            # 2025-06-27` beta header, matching how `deep_verify_runner.py`
+            # wires the same feature. Prior code passed `context_management`
+            # via `extra_body=`, which made the API reject EVERY verification
+            # call — every candidate surfaced as "transient API error" and
+            # got mass-rejected with `no_public_docs` even though their docs
+            # were reachable. See CLAUDE.md OT-012 investigation.
+            response = client.beta.messages.create(
                 model=SCREENING_MODEL,
                 max_tokens=VERIFICATION_MAX_TOKENS,
+                betas=["context-management-2025-06-27"],
                 system=[{"type": "text", "text": with_preamble(VERIFICATION_SYSTEM_PROMPT)}],
                 messages=messages,
                 tools=[WEB_FETCH_TOOL, WEB_SEARCH_TOOL],
@@ -433,15 +445,13 @@ def _verify_single_candidate(
                 # summarizes at 150K (compact_20260112). Mirrors Agent 5's
                 # in-loop strategy. Without this, multi-page-fetch verification
                 # of complex APIs can blow the context window mid-loop.
-                extra_body={
-                    "context_management": {
-                        "edits": [
-                            {
-                                "type": "clear_tool_uses_20250919",
-                                "trigger": {"type": "input_tokens", "value": 80000},
-                            }
-                        ]
-                    }
+                context_management={
+                    "edits": [
+                        {
+                            "type": "clear_tool_uses_20250919",
+                            "trigger": {"type": "input_tokens", "value": 80000},
+                        }
+                    ]
                 },
                 **_kwargs_verify,
             )

@@ -4674,6 +4674,40 @@ def run_implement_test_env_agent(
     # ★ CORE: Launch all harness builds in parallel
     results_by_index: dict[int, TestHarness | FailedHarness] = {}
 
+    # Guard: ThreadPoolExecutor requires max_workers > 0. When every upstream
+    # candidate was rejected (e.g., Agent 4 deep-verify found no public docs
+    # across the board), we short-circuit to an empty harness set so the
+    # report assembler sees "zero harnesses" cleanly instead of crashing the
+    # run on `ValueError: max_workers must be greater than 0`. This matches
+    # the documented graceful-degradation contract in the Agent 5 design.
+    if not candidates:
+        logger.warning(
+            "Agent 5 received zero candidates to build — returning empty result",
+            extra={
+                "operation": "agent5_empty_candidates",
+                "trace_id": input_data.trace_id,
+            },
+        )
+        return Agent5Result(
+            harnesses=[],
+            failed_harnesses=[],
+            total_candidates_attempted=0,
+            total_build_cost_usd=0.0,
+            build_summary=(
+                "No candidates reached Agent 5 — every upstream candidate "
+                "was rejected (typically Agent 4 deep-verify couldn't reach "
+                "any public API docs for this workflow). Report will render "
+                "the run as a coverage gap rather than a zero-harness error."
+            ),
+            candidate_runs=[],
+            failed_test_runs=[],
+            total_test_cases=0,
+            total_test_cost_usd=0.0,
+            test_execution_summary="No candidates to test.",
+            web_fetch_blocks=0,
+            scope_runs=[],
+        )
+
     with ThreadPoolExecutor(max_workers=min(AGENT5_MAX_PARALLEL, len(candidates))) as executor:
         future_to_index = {}
         for i, candidate in enumerate(candidates):

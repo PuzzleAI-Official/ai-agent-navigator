@@ -387,6 +387,58 @@ export function SelectionPanel({
           </div>
         )}
       </div>
+
+      {/*
+        Bottom primary CTA — confirm selection and continue.
+        Historically the panel only surfaced "Start Testing" at the
+        top-right, right next to the "N/M selected" counter. Users
+        scrolled down past the per-scope columns and landed on the
+        "+ Add custom provider" toggle as the last visible action,
+        which read as "you must add something before you can proceed"
+        — there was no confirm-and-continue CTA in the natural reading
+        flow. That feedback was unambiguous: users who only wanted to
+        select (no injection) had nowhere obvious to submit. This
+        bottom bar mirrors the top button so confirmation is reachable
+        wherever the user's eye lands.
+      */}
+      <div
+        className="mt-6 pt-5 border-t border-white/[0.06] flex items-center justify-between gap-4"
+        data-testid="selection-bottom-cta"
+      >
+        <div className="flex-1 min-w-0">
+          <p className="text-[12px] text-white/60 font-sans">
+            {totalSelected === 0 ? (
+              <>
+                <span className="text-amber-300/80">Select at least one candidate</span>{" "}
+                to continue. Adding custom providers is optional.
+              </>
+            ) : (
+              <>
+                Ready to test{" "}
+                <span className="text-white/90 font-semibold">
+                  {totalSelected}
+                </span>{" "}
+                candidate{totalSelected === 1 ? "" : "s"}
+                {userAdded.length > 0 && (
+                  <>
+                    {" "}
+                    ({userAdded.length} custom-added)
+                  </>
+                )}
+                . Adding more custom providers is optional.
+              </>
+            )}
+          </p>
+        </div>
+        <button
+          onClick={handleSubmit}
+          disabled={isSubmitting || totalSelected === 0}
+          className="shrink-0 px-5 py-2.5 rounded-lg bg-blue-500/25 text-blue-100 text-[12px] font-grotesk font-semibold uppercase tracking-[0.08em] border border-blue-400/40 hover:bg-blue-500/40 hover:border-blue-400/60 disabled:opacity-40 disabled:cursor-not-allowed transition-all shadow-[0_0_24px_rgba(59,130,246,0.15)]"
+          data-testid="selection-submit-bottom"
+        >
+          {isSubmitting ? "Submitting…" : "Confirm & Start Testing"}
+        </button>
+      </div>
     </motion.div>
   );
 }

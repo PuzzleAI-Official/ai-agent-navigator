@@ -263,10 +263,13 @@ async def run_pipeline(state: RunState):
         except AttributeError:
             workflow_payload = None
             test_plan_payload = None
-        emit("workflow_blueprint", {
+        _workflow_payload = {
             "workflow": workflow_payload,
             "test_plan": test_plan_payload,
-        })
+        }
+        emit("workflow_blueprint", _workflow_payload)
+        # Cache for late-connect replay — see RunState docstrings.
+        state.cached_workflow_blueprint = _workflow_payload
 
         # ── Architecture summary in chat ──
         # After Agent 1 finishes, show a brief summary of the designed
@@ -363,7 +366,7 @@ async def run_pipeline(state: RunState):
                         return []
                 return []
 
-            emit("candidates_found", {"candidates": [
+            _candidates_payload = {"candidates": [
                 {
                     "name": c.get("name", ""),
                     "provider": c.get("provider", ""),
@@ -375,7 +378,12 @@ async def run_pipeline(state: RunState):
                     "coverage_confidence": c.get("coverage_confidence") or {},
                 }
                 for c in candidates
-            ]})
+            ]}
+            emit("candidates_found", _candidates_payload)
+            # Cache for late-connect replay — SelectionPanel needs
+            # `candidates` state hydrated even if the frontend missed
+            # the initial emit (page reload during pause, SSE reconnect).
+            state.cached_candidates_payload = _candidates_payload
             emit("agent_activity", {"agent": "agent_2", "message": f"Research complete — {len(candidates)} candidates selected", "status": "success"})
             emit("agent_completed", {"agent": "agent_2", "cost_usd": state.agent2_result.get("cost_usd", 0)})
             _record_agent_cost_and_emit("agent_2", state.agent2_result.get("cost_usd", 0))
@@ -388,7 +396,11 @@ async def run_pipeline(state: RunState):
             # with no actual results, which the user reads as "the system
             # broke" rather than "your niche capability has no public APIs."
             try:
-                user_understanding = _get_user_understanding(state)
+                # `user_understanding` is bound by the enclosing `run_pipeline`
+                # scope at line 251; re-fetching here would shadow the closure
+                # and turn the earlier read at line 331 into an UnboundLocalError
+                # (Python marks a name local for the whole function if any
+                # assignment to it exists anywhere in the function body).
                 workflow = getattr(user_understanding, "workflow", None)
                 blueprint_steps = (
                     [s.id for s in workflow.steps]
@@ -507,11 +519,17 @@ async def run_pipeline(state: RunState):
                         if step_id in (_coerce_coverage(c.get("covers_step_ids")))
                     ]
 
-                emit("selection_required", {
+                _selection_payload = {
                     "per_scope_candidates": per_scope_candidates,
                     "default_picks": programmatic_picks,
                     "total_candidates": len(candidates),
-                })
+                }
+                emit("selection_required", _selection_payload)
+                # Cache the payload on state so the /events endpoint can
+                # replay it to any subscriber that connects AFTER the
+                # emit — the EventBus queue itself has no replay. See
+                # RunState.pending_selection_payload.
+                state.pending_selection_payload = _selection_payload
                 state.status = "awaiting_candidate_selection"
                 state.selection_required_emitted_at = datetime.now(timezone.utc).isoformat()
                 emit("agent_activity", {
@@ -550,6 +568,10 @@ async def run_pipeline(state: RunState):
                 state.agent2_result = a2_model.model_dump()
                 state.user_selection_applied = True
                 state.status = "pipeline_running"
+                # Clear the cached selection payload — we're past the
+                # pause and a late subscriber should NOT receive a stale
+                # synthetic selection_required replay after this point.
+                state.pending_selection_payload = None
 
                 # Re-emit candidates_found with the filtered set so the
                 # frontend updates the candidate list to reflect picks.

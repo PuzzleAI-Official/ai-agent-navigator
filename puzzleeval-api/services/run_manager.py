@@ -101,6 +101,31 @@ class RunState:
     selection_required_emitted_at: Optional[str] = None
     user_selection_applied: bool = False
 
+    # Cached copy of the `selection_required` SSE payload so a late SSE
+    # subscriber (page reload during the pause, network blip reconnect)
+    # can reconstruct the selection state. Without this the EventBus has
+    # no replay — `selection_required` fires once, and any consumer that
+    # wasn't subscribed when it fired misses it forever, which looks to
+    # the user like "SelectionPanel never appeared" even though the
+    # backend is genuinely paused at `awaiting_candidate_selection`.
+    pending_selection_payload: Optional[dict] = None
+
+    # Cached workflow_blueprint payload — replayed on late SSE connects
+    # so the frontend's `workflow` state rehydrates, which is required
+    # for SelectionPanel to render (Playground conditions on
+    # `stage === "selection" && workflow`). Without this, a user who
+    # reloads the tab during the pause lands on a run that knows it's
+    # paused but has no workflow shape to render the SelectionPanel
+    # columns against.
+    cached_workflow_blueprint: Optional[dict] = None
+
+    # Cached candidates_found payload — replayed on late SSE connects so
+    # the frontend's `candidates` list (consumed by SelectionPanel and
+    # CandidateCard) rehydrates. The alternative of re-deriving from
+    # Agent 2 output dicts couples the frontend to the Agent 2 schema;
+    # caching the SSE payload keeps the frontend unchanged.
+    cached_candidates_payload: Optional[dict] = None
+
     # SSE
     event_bus: EventBus = field(default_factory=EventBus)
 

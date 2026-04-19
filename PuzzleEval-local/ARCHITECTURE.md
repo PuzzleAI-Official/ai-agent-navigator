@@ -364,6 +364,31 @@ The builder agent does its own research in Phase 1 (no separate research sub-age
 - **No cosmetic verification:** If smoke + live test pass, accept the harness. Live validation IS verification.
 - Cost: ~$1.00-1.50 per candidate for build, ~$0.10-0.50 for test execution
 
+**Subprocess seam + bytes round-trip (NEW-AH):**
+Harness execution is via `subprocess.run(venv_python, "-c", driver_script, ...)`. The `driver_script` is an inline Python snippet constructed by `_execute_single_test`:
+
+```python
+# Conceptual — see implement_test_env.py for the full encoder
+def _bytes_safe(obj):
+    if isinstance(obj, (bytes, bytearray)):
+        return {"_b64": base64.b64encode(bytes(obj)).decode("ascii")}
+    if isinstance(obj, dict):
+        return {k: _bytes_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_bytes_safe(v) for v in obj]
+    return obj
+
+result = harness.run(input_data)
+safe = _bytes_safe(result)
+json.dump(safe, open("_test_output.json", "w"), default=str)
+```
+
+On the read side, Agent 5's `_inflate_b64_sentinels` walks the JSON tree and re-inflates `{"_b64": "..."}` → real bytes before returning to the plugin. This is the stable seam for every harness that ships binary data (audio, images, file blobs) across the JSON border.
+
+**Credential resolution** (`_resolve_candidate_credentials`): union of every registered provider whose normalized key appears anywhere in the candidate's searchable surface (name + provider + validation_notes). Enables cross-provider harnesses like "ElevenLabs Voice Stack" to get ElevenLabs + OpenAI + Anthropic keys from one lookup. No breaking schema change — still reads from `Agent5Input.provider_credentials` dict. See `tool_plugins/voice_realtime.py` docstring for the cross-provider recipe.
+
+**Multi-call modality pre-call skip** (NEW-AH): test cases with `input_type ∈ {conversation, voice_conversation, voice_turn}` or `output_type ∈ {voice_turn, voice_conversation}` bypass the initial harness pre-call. See "Multi-call modality ownership" under the plugin ecosystem section below — the plugin owns every real harness invocation.
+
 ---
 
 ### Agent 7: Analyze Agent (×N, Independent)
@@ -570,9 +595,41 @@ The plugin architecture lets each modality plug in input synthesis + output eval
 | `conversation_simulator` | (none) | ✓ | ✓ | Multi-turn scripted conversations with per-turn assertions |
 | `webhook_receiver` (NEW) | (none — local) | ✓ | ✓ | Captures inbound HTTP callbacks (Slack / Intercom / Stripe / Twilio / GitHub / generic shapes). Binds 127.0.0.1:8765 lazily. `PUZZLEEVAL_TUNNEL_URL` for offsite candidates. |
 | `outbound_delivery` (NEW) | (none — local) | ✓ | ✓ | Mock SMTP (port 2525), Slack-webhook HTTP (8766), SMS-Twilio HTTP (8767). Verifies messages actually landed. |
-| `voice_realtime` (NEW) | (none; STT needs transcription key) | ✓ | ✓ | Local audio loopback — serves synthesized caller audio, captures TwiML / NCCO / JSON / audio-blob responses. |
+| `voice_realtime` (NEW) | (none; STT needs transcription key, TTS needs `OPENAI_API_KEY` or `ELEVENLABS_API_KEY`) | ✓ | ✓ | Local audio loopback — serves synthesized caller audio, captures TwiML / NCCO / JSON / audio-blob responses. **Multi-turn**: owns `drive_conversation` (N caller+agent turns, per-turn substring scoring, full-conversation MP3 merge with ID3-tag stripping). **Thread-local session_dir** so parallel candidates write to their own `runs/<trace>/harnesses/<slug>/voice/` folder. Audio artifacts round-trip through the Agent-5 `{"_b64": "..."}` sentinel — harnesses return raw bytes, plugin gets raw bytes, JSON border is transparent. |
 
 **Registry guards:** `register_plugin()` warns on duplicate-name conflicts (or raises with `PUZZLEEVAL_STRICT_PLUGIN_REGISTRY=1`). Plugin bind-addresses default to `127.0.0.1` for security. All HTTP servers set `allow_reuse_address=True` so uvicorn restarts rebind cleanly. DoS caps: SMTP per-line 8 KB / total DATA 25 MiB, HTTP body 1 MiB.
+
+**Multi-call modality ownership (NEW-AG / NEW-AH):**
+
+Multi-turn tests (voice, chatbot) are owned by a PLUGIN, not by Agent 5 directly. The plugin's `evaluate_output(response, expected, criteria, harness_runner=...)` receives the harness runner callable and owns the N-turn loop. The single-turn harness is the same shape regardless of modality. Three patterns are set in stone:
+
+1. **Direct-invoke fast path** (`plugin_tool_runner.py`): when a plugin has `requires_harness_runner=True` AND its modality enums match the test's input_type/output_type, it's invoked DIRECTLY before Claude's tool-picker runs. Eliminates the non-determinism observed in voice_dual_4 where Claude sometimes picked voice_realtime and sometimes skipped it. Priority-sorted (most specific `output_type` match wins). Log operation: `tool_runner_direct_invoke_owner`.
+
+2. **Plugin verdict promotion** (`plugin_tool_runner.py`): when Claude's tool_runner finishes WITHOUT emitting a structured `ScoreVerdict`, the LAST conclusive plugin verdict is promoted directly instead of collapsing to LLM-judge single-turn fallback. Plugin scoring IS authoritative. Log operation: `tool_runner_promote_plugin_verdict`.
+
+3. **Multi-call pre-call skip** (`_execute_all_tests`): test cases with `input_type ∈ {conversation, voice_conversation, voice_turn}` or `output_type ∈ {voice_turn, voice_conversation}` skip the initial single-turn `_execute_single_test` call. The plugin's drive-loop owns every real harness invocation. Without this, strict harnesses (ElevenLabs Voice Stack) would return `success=False` on the bogus pre-call payload (no `audio_url` / `turn_index`) and skip the plugin path entirely. Log operation: `multi_call_pre_call_skipped`.
+
+**Voice audio stack** (`tool_plugins/voice_realtime.py`):
+
+- `synthesize_input()` → TTS caller audio via `tts` plugin chain, serves at `/audio/<token>` on 127.0.0.1:8768.
+- `drive_conversation(script, agent_responder)` → per-turn loop: synth caller → invoke responder → extract agent response (audio_bytes / text / twiml / ncco / json) → score per-turn assertion.
+- `_merge_conversation_audio(session_token, turns)` → stitches caller+agent files in dialogue order into `conversation_<token>.<ext>`. MP3-specific: strips ID3v2 tag from segments 2…N (first segment keeps it for codec init), strips ID3v1 trailers from every segment. Same-extension required; mixed types bail with `None` and per-turn files remain available.
+- `artifacts_for_token_prefix(session)` → returns all caller + agent + merged files registered under a session token (each turn uses sub-token `<session>-t<idx>`).
+
+**Audio extension / content-type derivation** (`_responder`): when the harness returns `raw_response = {"audio_bytes": <bytes>, "audio_format": "mp3"}` without an explicit `audio_content_type`, the plugin derives `audio/mpeg` from the format field. Otherwise `_save_audio_blob` would default to `.wav` → corrupted MP3 playback + mixed-extension merge failure.
+
+**Backend audio streaming** (`puzzleeval-api/routes/runs.py:serve_run_audio`):
+
+`GET /runs/audio?path=<absolute_path>` streams audio through with a containment check. Allowed roots (expanded in NEW-AG):
+1. `puzzleeval-api/runs/` (backend-driven pipeline runs)
+2. `PuzzleEval-local/runs/` (CLI-driven dev runs — auto-detected via sibling-dir lookup)
+3. Any comma-separated path in `PUZZLEEVAL_EXTRA_RUNS_ROOTS` env var.
+
+Paths outside every allowed root → HTTP 403. Containment uses `Path.resolve().relative_to(root)` — no path-traversal holes.
+
+**Frontend audio rendering** (`src/components/playground/EvaluationReportCard.tsx::AudioPathsBlock`):
+
+Role-based style table (`ROLE_STYLE`): `conversation` → violet "Full call" badge, full-width control; `caller` → blue, compact; `agent` → emerald, compact. The merged `role=conversation` clip always renders first and widest. Adding a new role is a single-entry map update.
 
 ---
 

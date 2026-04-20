@@ -340,6 +340,41 @@ runner, extracts agent text, scores each turn against
 `expected_agent_contains`, and returns an aggregate pass/fail plus
 per-turn breakdown. Playable audio is saved to the run directory.
 
+### CRITICAL: `input_context.instructions` is REQUIRED for agent-style tests
+
+When `input_type` is any of:
+  `conversation`, `voice_conversation`, `voice_turn`, `chat`
+
+…the test case MUST populate `input_context` with an `instructions`
+string that tells the candidate's LLM-backed agent HOW TO BEHAVE. This
+is the system prompt the harness passes through to the provider
+(OpenAI Realtime, ElevenLabs ConvAI, Twilio voice, any chatbot API).
+Without it, the provider has no persona / domain / intent guidance
+and returns empty or irrelevant responses — the entire test scores 0.
+
+Derive the instructions from the workflow scope's `role` + `description`
++ the user's `domain`. Keep it 2-3 sentences, concrete about persona
+and goal. Example for the "voice agent for plumbing business" scope:
+
+```json
+"input_context": {
+  "instructions": "You are Vera, a friendly voice agent for a 24/7
+    plumbing service. Greet callers warmly, help them book appointments
+    or answer basic pricing questions, and stay on-topic for plumbing
+    services. If you cannot answer, offer to transfer to a human.",
+  "persona_name": "Vera"
+}
+```
+
+Use the SAME instructions across all tests for a given scope so every
+candidate is compared on equal footing. Do NOT vary instructions per
+test — vary the CALLER'S turns instead. Repeatable system prompt =
+fair comparison.
+
+For non-agent tests (OCR, classification, extraction, etc.),
+`input_context` can stay `{}` or hold scope-specific params only
+(language, format, etc.) — instructions are not needed there.
+
 ## Output
 
 Generate the complete test suite with:

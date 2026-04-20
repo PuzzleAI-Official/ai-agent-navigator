@@ -246,17 +246,24 @@ USER_SELECTION_ENABLED = (
 
 
 # ---------------------------------------------------------------------------
-# Agent 4 Deep Verify (Phase 6.5)
+# Agent 4 Deep-Verify flags — REMOVED.
 # ---------------------------------------------------------------------------
-AGENT4_DEEP_VERIFY_ENABLED = (
-    os.environ.get("PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED", "1") != "0"
-)
-AGENT4_DEEP_VERIFY_MAX_TURNS = int(
-    os.environ.get("PUZZLEEVAL_AGENT4_DEEP_VERIFY_MAX_TURNS", "15")
-)
-AGENT4_DEEP_VERIFY_MAX_PARALLEL = int(
-    os.environ.get("PUZZLEEVAL_AGENT4_DEEP_VERIFY_MAX_PARALLEL", "5")
-)
+# The deep-verify path (full atlas extraction in Agent 4) was removed
+# along with its supporting modules (``deep_verify_runner.py``,
+# ``provider_atlas.py``, ``deep_verify_prompt.py``, ``manual_atlas.py``).
+# Rationale: Agent 4's atlas extraction and Agent 5's build-oriented
+# research have different goals (structured provider surface vs
+# build-ready api_spec.txt). Forcing both into Agent 4 produced
+# atlases Agent 5 couldn't consume efficiently, leading to 20+ turn
+# build loops where the builder re-read SDK source to rediscover
+# what the atlas had in the wrong shape.
+#
+# Current split:
+#   Agent 4: shallow verify (screening.py) — confirm public API exists,
+#            emit auth_method + verified_api_docs_url + access_method
+#   Agent 5: Phase-1 research (implement_test_env.py BUILDER_SYSTEM_PROMPT)
+#            — Sonnet reads docs, writes api_spec.txt, then switches to
+#            Opus for build.
 
 
 # ---------------------------------------------------------------------------
@@ -319,7 +326,26 @@ FETCH_RATE_LIMIT_BACKOFF_SECONDS = int(
 #   than the default 4096 (a full harness.py + requirements.txt can be 2-3K tokens).
 # ---------------------------------------------------------------------------
 AGENT5_BUILDER_MODEL = os.environ.get("PUZZLEEVAL_BUILDER_MODEL", "claude-opus-4-7")
-AGENT5_MAX_TURNS = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_TURNS", "25"))
+# AGENT5_MAX_TURNS: upper bound on the outer loop. The real stop signal is
+# adaptive progress tracking (diminishing returns). This is just the worst-case
+# ceiling — legitimately complex builds (voice WebSocket SDK with session
+# state, OAuth flows, multi-endpoint pipelines) can legitimately need 25-35
+# turns. Prior 25 cap was killing Phase 2 debug cycles on complex SDKs.
+AGENT5_MAX_TURNS = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_TURNS", "40"))
+# DIMINISHING_RETURNS_WINDOW: if N consecutive turns produce ZERO file
+# writes AND ZERO new research findings, we're stuck — inject a wrap-up
+# nudge. Not a hard stop: the agent can still write code to recover. Pattern
+# adapted from Claude Code's query/tokenBudget.ts diminishing-returns detector.
+AGENT5_DIMINISHING_RETURNS_WINDOW = int(
+    os.environ.get("PUZZLEEVAL_AGENT5_DIMINISHING_WINDOW", "3")
+)
+# MAX_REASSESSMENT_TIERS: hard cap on STRATEGIC_PIVOT escalations. After
+# N tier escalations with no progress, the loop accepts that this candidate
+# can't be built and emits a FailedHarness cleanly. Without this cap the
+# reassessment counter could grow unbounded on pathologically broken APIs.
+AGENT5_MAX_REASSESSMENT_TIERS = int(
+    os.environ.get("PUZZLEEVAL_AGENT5_MAX_REASSESSMENT_TIERS", "4")
+)
 AGENT5_MAX_BUDGET_PER_CANDIDATE = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_PER_CANDIDATE", "3.0")
 )
@@ -341,7 +367,17 @@ AGENT5_CODE_TIMEOUT_LONG = int(
     os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT_LONG", "600")
 )
 AGENT5_MAX_OUTPUT_TOKENS = int(
-    os.environ.get("PUZZLEEVAL_AGENT5_MAX_TOKENS", "8192")
+    # 24K — raised from 16K after a real-run trace (71734f9d) showed
+    # Turn 0 of ElevenLabs hitting stop_reason=max_tokens even with
+    # 16K budget, losing $0.68 to response truncation. Root cause:
+    # Sonnet 4.6 with adaptive thinking + 3 web_fetch results at 15K
+    # max_content_tokens each + write_file emission can legitimately
+    # need >16K output tokens on the first Phase 1 turn. Both Sonnet
+    # 4.6 and Opus 4.7 support up to 32K output; 24K is the safe
+    # middle that prevents truncation without the cost ceiling of 32K.
+    # Combined with ``web_fetch.max_content_tokens=10000`` (tightened
+    # this pass), the Phase 1 turn always fits comfortably.
+    os.environ.get("PUZZLEEVAL_AGENT5_MAX_TOKENS", "24000")
 )
 AGENT5_MAX_VERIFICATION_RETRIES = int(
     os.environ.get("PUZZLEEVAL_AGENT5_MAX_VERIFICATION_RETRIES", "2")

@@ -100,54 +100,37 @@ function ScopeSection({
       </div>
 
       {step?.description && (
-        <p className="text-[11px] text-white/30 font-sans mb-3 leading-[1.5]">
+        <p className="text-[11px] text-white/30 font-sans mb-4 leading-[1.5]">
           {step.description}
         </p>
       )}
 
-      {/* Candidate table */}
-      <div className="overflow-x-auto scrollbar-thin rounded-lg border border-white/[0.06] bg-white/[0.015]">
-        <table className="min-w-full border-separate border-spacing-0 text-[12px]">
-          <thead>
-            <tr>
-              <th className="text-left font-grotesk font-medium uppercase tracking-[0.08em] text-[10px] text-white/35 px-4 py-2.5 border-b border-white/[0.08] min-w-[180px]">
-                Candidate
-              </th>
-              <th className="text-left font-grotesk font-medium uppercase tracking-[0.08em] text-[10px] text-white/35 px-4 py-2.5 border-b border-white/[0.08] min-w-[200px]">
-                Pass Rate
-              </th>
-              <th className="text-right font-grotesk font-medium uppercase tracking-[0.08em] text-[10px] text-white/35 px-4 py-2.5 border-b border-white/[0.08]">
-                Score
-              </th>
-              <th className="text-right font-grotesk font-medium uppercase tracking-[0.08em] text-[10px] text-white/35 px-4 py-2.5 border-b border-white/[0.08]">
-                Avg Latency
-              </th>
-              <th className="text-right font-grotesk font-medium uppercase tracking-[0.08em] text-[10px] text-white/35 px-4 py-2.5 border-b border-white/[0.08]">
-                Cost
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {sorted.map((cr, rowIdx) => (
-              <ScopeCandidateRow
-                key={cr.candidate_name}
-                result={cr}
-                rank={rowIdx + 1}
-                isBest={rowIdx === 0}
-              />
-            ))}
-          </tbody>
-        </table>
+      {/*
+        Side-by-side candidate cards (restored from the side-by-side
+        design the legacy flat view uses). Each candidate gets its own
+        card showing pass rate + pass bar + score / latency / cost
+        summary. Cards scroll horizontally when the scope has more
+        than ~3 candidates. This replaced an earlier table layout that
+        lost the at-a-glance comparison the user kept pointing out.
+      */}
+      <div
+        className="flex gap-4 overflow-x-auto pb-3 scrollbar-thin"
+        data-testid={`scope-candidate-cards-${scope.scope_id}`}
+      >
+        {sorted.map((cr, idx) => (
+          <ScopeCandidateCard
+            key={cr.candidate_name}
+            result={cr}
+            rank={idx + 1}
+            isBest={idx === 0}
+          />
+        ))}
       </div>
     </motion.section>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Individual candidate row inside a scope table
-// ---------------------------------------------------------------------------
-
-function ScopeCandidateRow({
+function ScopeCandidateCard({
   result,
   rank,
   isBest,
@@ -157,85 +140,97 @@ function ScopeCandidateRow({
   isBest: boolean;
 }) {
   const passPercent = Math.round(result.pass_rate * 100);
-  const scoreDisplay = Math.round(result.pass_rate * 100);
-
+  const total = result.tests_passed + result.tests_failed + result.tests_errored;
   return (
-    <tr
-      className={`group transition-colors ${
-        isBest ? "bg-emerald-500/[0.04]" : "hover:bg-white/[0.02]"
+    <motion.div
+      initial={{ opacity: 0, y: 14 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: rank * 0.08 }}
+      className={`min-w-[260px] max-w-[300px] flex-shrink-0 rounded-lg border ${
+        isBest
+          ? "border-emerald-400/30 bg-emerald-500/[0.04]"
+          : "border-white/[0.08] bg-white/[0.02]"
       }`}
-      data-testid={`scope-candidate-row-${result.candidate_name}`}
+      data-testid={`scope-candidate-card-${result.candidate_name}`}
     >
-      {/* Candidate name */}
-      <td className="px-4 py-3 border-b border-white/[0.04]">
-        <div className="flex items-center gap-2">
-          <span className="text-[10px] font-mono text-white/20 w-4">
-            #{rank}
-          </span>
-          <span
-            className={`font-grotesk font-medium text-[13px] ${
-              isBest ? "text-emerald-300/90" : "text-white/80"
-            }`}
-          >
-            {result.candidate_name}
-          </span>
+      {/* Header */}
+      <div className="p-4 border-b border-white/[0.06]">
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-[10px] font-mono text-white/25">#{rank}</span>
           {isBest && (
-            <span className="text-[9px] font-grotesk tracking-[0.04em] px-1.5 py-0.5 rounded bg-emerald-400/10 text-emerald-300/70 border border-emerald-400/15">
+            <span className="text-[9px] font-grotesk tracking-[0.04em] px-1.5 py-0.5 rounded bg-emerald-400/10 text-emerald-300/80 border border-emerald-400/20">
               Best
             </span>
           )}
         </div>
-      </td>
+        <div
+          className={`font-grotesk font-medium text-[15px] leading-tight ${
+            isBest ? "text-emerald-200/95" : "text-white/90"
+          }`}
+        >
+          {result.candidate_name}
+        </div>
+      </div>
 
-      {/* Pass rate with bar */}
-      <td className="px-4 py-3 border-b border-white/[0.04]">
-        <div className="flex items-center gap-3">
-          <div className="flex-1 h-[6px] bg-white/[0.06] rounded-full overflow-hidden max-w-[120px]">
-            <motion.div
-              className={`h-full rounded-full ${
-                passPercent >= 80
-                  ? "bg-emerald-400/70"
-                  : passPercent >= 50
-                  ? "bg-amber-400/70"
-                  : "bg-red-400/70"
-              }`}
-              initial={{ width: 0 }}
-              animate={{ width: `${passPercent}%` }}
-              transition={{ duration: 0.8, delay: 0.1 }}
-            />
-          </div>
-          <span className="font-mono text-[12px] text-white/70 w-10 text-right tabular-nums">
+      {/* Pass rate */}
+      <div className="px-4 py-3 border-b border-white/[0.04]">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-[10px] font-grotesk uppercase tracking-[0.08em] text-white/35">
+            Pass rate
+          </span>
+          <span className="font-mono text-[13px] text-white/80 tabular-nums">
             {passPercent}%
           </span>
-          <span className="text-[10px] text-white/25 font-mono">
-            {result.tests_passed}/{(result.tests_passed + result.tests_failed + result.tests_errored)}
-          </span>
         </div>
-      </td>
+        <div className="h-[6px] bg-white/[0.06] rounded-full overflow-hidden">
+          <motion.div
+            className={`h-full rounded-full ${
+              passPercent >= 80
+                ? "bg-emerald-400/70"
+                : passPercent >= 50
+                ? "bg-amber-400/70"
+                : "bg-red-400/70"
+            }`}
+            initial={{ width: 0 }}
+            animate={{ width: `${passPercent}%` }}
+            transition={{ duration: 0.8, delay: 0.1 }}
+          />
+        </div>
+        <div className="text-[10px] text-white/30 font-mono mt-1">
+          {result.tests_passed}/{total} passed
+        </div>
+      </div>
 
-      {/* Score */}
-      <td className="px-4 py-3 border-b border-white/[0.04] text-right">
-        <span className="font-mono text-[13px] text-white/75 tabular-nums">
-          {scoreDisplay}
-        </span>
-        <span className="text-[10px] text-white/25 ml-0.5">/100</span>
-      </td>
-
-      {/* Avg latency */}
-      <td className="px-4 py-3 border-b border-white/[0.04] text-right">
-        <span className="font-mono text-[13px] text-white/75 tabular-nums">
-          {Math.round(result.avg_latency_ms)}
-        </span>
-        <span className="text-[10px] text-white/25 ml-0.5">ms</span>
-      </td>
-
-      {/* Cost */}
-      <td className="px-4 py-3 border-b border-white/[0.04] text-right">
-        <span className="font-mono text-[13px] text-white/75">
-          ${result.total_cost_usd.toFixed(4)}
-        </span>
-      </td>
-    </tr>
+      {/* Score / latency / cost grid */}
+      <div className="p-4 grid grid-cols-3 gap-3">
+        <div>
+          <div className="text-[9px] font-grotesk uppercase tracking-[0.08em] text-white/35 mb-0.5">
+            Score
+          </div>
+          <div className="font-mono text-[13px] text-white/80 tabular-nums">
+            {passPercent}
+            <span className="text-[9px] text-white/30">/100</span>
+          </div>
+        </div>
+        <div>
+          <div className="text-[9px] font-grotesk uppercase tracking-[0.08em] text-white/35 mb-0.5">
+            Latency
+          </div>
+          <div className="font-mono text-[13px] text-white/80 tabular-nums">
+            {Math.round(result.avg_latency_ms)}
+            <span className="text-[9px] text-white/30 ml-0.5">ms</span>
+          </div>
+        </div>
+        <div>
+          <div className="text-[9px] font-grotesk uppercase tracking-[0.08em] text-white/35 mb-0.5">
+            Cost
+          </div>
+          <div className="font-mono text-[13px] text-white/80">
+            ${result.total_cost_usd.toFixed(3)}
+          </div>
+        </div>
+      </div>
+    </motion.div>
   );
 }
 

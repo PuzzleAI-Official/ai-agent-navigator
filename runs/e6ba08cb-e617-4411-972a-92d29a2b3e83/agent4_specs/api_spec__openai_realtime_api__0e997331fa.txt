@@ -1,0 +1,286 @@
+Good - I have substantial evidence from search snippets. Now let me fetch the API reference and the SIP docs page for complete endpoint coverage.
+Now I have enough evidence. Let me produce the full spec.
+
+---
+
+## Phase 4A — Result
+
+Real docs confirmed at `https://developers.openai.com/api/docs/guides/realtime-websocket` (successfully fetched). WebSocket URL, auth header, Python examples, and REST endpoints all confirmed from search snippets and the fetched page.
+
+## Phase 4B — Spec Extraction
+
+Endpoints confirmed across search results 1, 2, 8, 10:
+- WSS `wss://api.openai.com/v1/realtime` — primary session
+- POST `/v1/realtime/client_secrets` — GA key endpoint
+- POST `/v1/realtime/sessions` — beta session/key endpoint  
+- POST `/v1/realtime/calls` — WebRTC SDP exchange
+- POST `/v1/realtime/calls/{call_id}/accept`
+- POST `/v1/realtime/calls/{call_id}/reject`
+- POST `/v1/realtime/calls/{call_id}/hangup`
+- POST `/v1/realtime/calls/{call_id}/refer`
+
+OpenAPI spec: Not available (WebSocket event-driven API; the hinted paths will all 404).
+
+Pricing: Confirmed per-token billing from `openai.com/api/pricing` (search result 13).
+
+---
+
+```
+SERVICE: OpenAI Realtime API
+BASE_URL: https://api.openai.com/v1
+AUTH_HEADER: "Authorization: Bearer {api_key}"
+
+ENDPOINTS:
+  - method: WSS_CONNECT
+    path: wss://api.openai.com/v1/realtime?model={model}
+    description: >
+      Open a persistent WebSocket session to a realtime model for bidirectional
+      audio/text event streaming. Primary interface for voice agents. Once
+      connected, send/receive JSON events (session.update, response.create,
+      input_audio_buffer.append, etc.). Optional query param call_id attaches
+      the socket to an existing SIP or WebRTC call.
+    request_format: >
+      WebSocket upgrade; query params: model (required, e.g. gpt-realtime),
+      call_id (optional, attaches to existing SIP/WebRTC session).
+      Auth via Authorization header on upgrade request, OR via subprotocol
+      strings in browser environments (openai-insecure-api-key.{key},
+      openai-beta.realtime-v1).
+    python_request_param: websocket  # use websocket-client library, not requests
+    response_format: >
+      Bidirectional JSON events over WebSocket. Server events include:
+      session.created, session.updated, response.created, response.done,
+      response.audio.delta, response.audio.done, response.text.delta,
+      response.function_call_arguments.delta, input_audio_buffer.speech_started,
+      input_audio_buffer.speech_stopped, input_audio_buffer.committed, error.
+      Client events include: session.update, response.create,
+      conversation.item.create, input_audio_buffer.append,
+      input_audio_buffer.commit, input_audio_buffer.clear, response.cancel,
+      conversation.item.delete, conversation.item.truncate.
+
+  - method: POST
+    path: /v1/realtime/client_secrets
+    description: >
+      GA endpoint. Generate a short-lived ephemeral API key for use by browser
+      or mobile clients connecting via WebRTC or WebSocket, so that the
+      long-lived API key never leaves the server. Replaces the beta
+      /v1/realtime/sessions endpoint for key generation.
+    request_format: >
+      JSON body: model (string, required), voice (string, optional),
+      instructions (string, optional), tools (array, optional),
+      turn_detection (object, optional), modalities (array, optional),
+      input_audio_format (string, optional), output_audio_format (string, optional),
+      temperature (float, optional), max_response_output_tokens (int or "inf", optional)
+    python_request_param: json=
+    response_format: >
+      JSON: { client_secret: { value: "ek_...", expires_at: <unix_ts> }, session: {...} }
+
+  - method: POST
+    path: /v1/realtime/sessions
+    description: >
+      BETA endpoint. Create a realtime session and generate ephemeral token
+      (used in WebRTC quickstart and browser clients). Functionally similar to
+      /v1/realtime/client_secrets but from the beta interface. Requires
+      OpenAI-Beta: realtime=v1 header.
+    request_format: >
+      JSON body: model (string, required), voice (string, optional),
+      instructions (string, optional), modalities (array, optional)
+    python_request_param: json=
+    response_format: >
+      JSON: { client_secret: { value: "ek_...", expires_at: <unix_ts> } }
+
+  - method: POST
+    path: /v1/realtime/calls
+    description: >
+      WebRTC SDP offer exchange. Client POSTs an SDP offer with
+      Content-Type: application/sdp; response body contains the SDP answer.
+      Response Location header carries a unique call_id usable for server-side
+      WebSocket sideband attachment.
+    request_format: >
+      Body: raw SDP offer text (Content-Type: application/sdp).
+      Auth: ephemeral key (ek_...) in Authorization header.
+    python_request_param: data=
+    response_format: >
+      Body: SDP answer text; Location header: /v1/realtime/calls/{call_id}
+
+  - method: POST
+    path: /v1/realtime/calls/{call_id}/accept
+    description: >
+      Accept an inbound SIP call routed to your webhook endpoint. Supply the
+      realtime session parameters (model, voice, instructions, tools) to
+      configure the AI agent that will answer. Called from your webhook handler
+      in response to a realtime.call.incoming webhook event.
+    request_format: >
+      Path param: call_id. JSON body: same params as /v1/realtime/client_secrets
+      (model, voice, instructions, tools, turn_detection, modalities, etc.)
+    python_request_param: json=
+    response_format: JSON 200 OK when SIP call is accepted and session configured
+
+  - method: POST
+    path: /v1/realtime/calls/{call_id}/reject
+    description: >
+      Decline an inbound SIP call. Called from webhook handler when the call
+      should not be answered (e.g. unsupported country code, outside hours).
+    request_format: >
+      Path param: call_id. JSON body: status_code (int, optional, e.g. 486 for Busy;
+      default 603 Decline)
+    python_request_param: json=
+    response_format: JSON 200 OK after SIP rejection is relayed to carrier
+
+  - method: POST
+    path: /v1/realtime/calls/{call_id}/hangup
+    description: >
+      Terminate an active SIP or WebRTC realtime session. Works for both
+      call types.
+    request_format: Path param: call_id. No request body.
+    python_request_param: json=  # empty body
+    response_format: 200 OK when teardown begins
+
+  - method: POST
+    path: /v1/realtime/calls/{call_id}/refer
+    description: >
+      Transfer (refer) an active SIP call to another number or SIP URI.
+      Places a SIP REFER to the carrier for warm or blind transfer.
+    request_format: >
+      Path param: call_id. JSON body: target_uri (string, required,
+      e.g. "tel:+14155550123" or "sip:agent@example.com")
+    python_request_param: json=
+    response_format: 200 OK once REFER is relayed to SIP provider
+
+RESPONSE_FORMAT: >
+  WebSocket session: bidirectional JSON event stream.
+  REST endpoints: standard JSON response bodies with 200 OK on success,
+  JSON error objects on failure ({"error": {"type": ..., "message": ..., "code": ...}}).
+
+SDK_PACKAGE: "pip install openai"  # official openai SDK; also pip install websocket-client for raw WebSocket
+
+ACCEPTED_INPUT_FORMATS: >
+  Audio: PCM16 (raw 16-bit PCM, 24kHz, mono), G.711 μ-law, G.711 A-law.
+  Audio is Base64-encoded and sent as input_audio_buffer.append events over WebSocket.
+  Text: UTF-8 JSON over WebSocket.
+  Images: supported as conversation items (base64-encoded).
+  Video: supported (frame extraction handled by model).
+
+PYTHON_EXAMPLES:
+  # Example 1: Connect to Realtime API via WebSocket (voice agent)
+  # pip install websocket-client
+  import os
+  import json
+  import websocket
+
+  OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+  url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+  headers = ["Authorization: Bearer " + OPENAI_API_KEY]
+
+  def on_open(ws):
+      print("Connected to Realtime API.")
+      # Configure session for voice agent with function calling
+      ws.send(json.dumps({
+          "type": "session.update",
+          "session": {
+              "type": "realtime",
+              "instructions": "You are a helpful voice assistant. Be concise.",
+              "modalities": ["audio", "text"],
+              "voice": "verse",
+              "input_audio_format": "pcm16",
+              "output_audio_format": "pcm16",
+              "turn_detection": {
+                  "type": "server_vad",
+                  "threshold": 0.5,
+                  "silence_duration_ms": 300
+              },
+              "tools": [
+                  {
+                      "type": "function",
+                      "name": "book_appointment",
+                      "description": "Book an appointment in the CRM",
+                      "parameters": {
+                          "type": "object",
+                          "properties": {
+                              "name": {"type": "string"},
+                              "date": {"type": "string"}
+                          },
+                          "required": ["name", "date"]
+                      }
+                  }
+              ],
+              "tool_choice": "auto"
+          }
+      }))
+
+  def on_message(ws, message):
+      event = json.loads(message)
+      print("Received:", event.get("type"))
+      if event["type"] == "response.function_call_arguments.done":
+          # Handle function call result
+          args = json.loads(event["arguments"])
+          print("Function call:", event["name"], args)
+          # Send function output back
+          ws.send(json.dumps({
+              "type": "conversation.item.create",
+              "item": {
+                  "type": "function_call_output",
+                  "call_id": event["call_id"],
+                  "output": json.dumps({"status": "booked", "confirmation": "APT-123"})
+              }
+          }))
+          ws.send(json.dumps({"type": "response.create"}))
+
+  ws = websocket.WebSocketApp(url, header=headers, on_open=on_open, on_message=on_message)
+  ws.run_forever()
+
+  # Example 2: Generate ephemeral key for browser/client use
+  import requests
+  url = "https://api.openai.com/v1/realtime/client_secrets"
+  headers = {
+      "Authorization": "Bearer YOUR_OPENAI_API_KEY",
+      "Content-Type": "application/json"
+  }
+  body = {
+      "model": "gpt-realtime",
+      "voice": "verse",
+      "instructions": "You are a helpful assistant.",
+      "modalities": ["audio", "text"],
+      "turn_detection": {"type": "server_vad"}
+  }
+  response = requests.post(url, headers=headers, json=body)
+  ephemeral_key = response.json()["client_secret"]["value"]
+  print("Ephemeral key:", ephemeral_key)
+
+  # Example 3: Hang up a call (SIP or WebRTC)
+  import requests
+  call_id = "rtc_u1_9c6574da8b8a41a18da9308f4ad974ce"
+  response = requests.post(
+      f"https://api.openai.com/v1/realtime/calls/{call_id}/hangup",
+      headers={"Authorization": "Bearer YOUR_OPENAI_API_KEY"}
+  )
+  print(response.status_code)  # 200
+
+OPENAPI_URL: not_found  # WebSocket event-driven API; no OpenAPI/Swagger spec published
+
+ACCESS_METHOD: free_signup
+SIGNUP_URL: https://platform.openai.com/signup
+
+ROUTING_TABLE:
+  scope=step_1:  # role=voice_agent
+    - endpoint: WSS wss://api.openai.com/v1/realtime?model={model}  (primary -- native speech-to-speech voice agent with VAD, function calling, multi-turn context)
+    - endpoint: POST /v1/realtime/client_secrets  (fallback -- generate ephemeral key to authenticate browser/client-side WebSocket/WebRTC connection)
+    - input_channel: audio_content  # PCM16/G711 audio frames sent as Base64 via input_audio_buffer.append WebSocket events; text also accepted
+
+USER_SELECTABLE_PARAMS:
+  - name: model
+    allowed_values: "gpt-realtime | gpt-realtime-1.5 | gpt-realtime-mini | gpt-4o-realtime-preview | gpt-4o-realtime-preview-2024-12-17 | gpt-4o-mini-realtime-preview"
+    affects: quality, cost, latency
+    default: "gpt-realtime"
+
+  - name: voice
+    allowed_values: "alloy | ash | ballad | coral | echo | marin | sage | shimmer | verse"
+    affects: output_style
+    default: "verse"
+
+  - name: modalities
+    allowed_values: '["audio", "text"] | ["text"]'
+    affects: output_shape
+    default: '["audio", "text"]'
+
+  - name: instructions
+    allowed_values

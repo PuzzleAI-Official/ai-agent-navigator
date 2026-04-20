@@ -254,7 +254,9 @@
       "Bash(ANTHROPIC_API_KEY=dummy python -m pytest tests/test_prod_audit_fixes.py -q --tb=short)",
       "Bash(ANTHROPIC_API_KEY=dummy python -m pytest tests/ -q --tb=short)",
       "Bash(ls /c/Users/Deanh/OneDrive/Desktop/ai-agent-navigator/PuzzleEval-local/real_debug_3*.log)",
-      "Bash(ls /c/Users/Deanh/OneDrive/Desktop/ai-agent-navigator/PuzzleEval-local/*.log)"
+      "Bash(ls /c/Users/Deanh/OneDrive/Desktop/ai-agent-navigator/PuzzleEval-local/*.log)",
+      "Bash(python -c ' *)",
+      "Bash(ANTHROPIC_API_KEY=dummy python -m pytest tests/test_deep_verify_and_fallback.py tests/test_prod_audit_fixes.py -q --no-header)"
     ]
   }
 }

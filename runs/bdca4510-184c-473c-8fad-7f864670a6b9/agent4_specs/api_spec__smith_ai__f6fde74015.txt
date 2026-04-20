@@ -1,0 +1,362 @@
+Good, I found the real docs at `docs.smith.ai`. Now let me fetch the API category page and the outbound call request page in parallel.
+Now let me fetch the Outreach Campaigns API article and the pricing page in parallel.
+Let me fetch the core outbound call API article to get actual endpoint details and code examples.
+Let me fetch the Developer API category to get all API docs links.
+Let me use my last search to get the actual endpoint details and request body format.
+I now have all the information I need. Let me compile the complete analysis.
+
+---
+
+## Phase 4C — Scope Coverage Verification
+
+**step_1: role=voice_agent**
+- Smith.ai is a voice receptionist service (AI + human agents) that answers inbound calls and makes outbound calls.
+- The REST API's primary function is triggering outbound calls via POST `/outbound/`. Inbound call answering is configured via dashboard + phone forwarding, not via API.
+- The outbound call API enables a workflow to dispatch a receptionist to call a contact. This partially serves the `voice_agent` role (outbound triggering is API-driven; inbound is dashboard-driven).
+- **Status: verified_generic** — the service IS a voice agent; the API covers outbound triggering; inbound call management is configuration-only.
+
+---
+
+## Phase 4D — Decision
+
+**PASS** — Real API docs found, self-service paid subscription (30-day money-back), self-service signup, at least one scope partially verified.
+
+---
+
+```
+SERVICE: Smith.ai Virtual Receptionist & AI Receptionist
+BASE_URL: https://app.smith.ai/api/vr/v1
+AUTH_HEADER: Authorization: token {api_access_token}
+
+ENDPOINTS:
+  - method: POST
+    path: /outbound/
+    description: Submit one or more leads for an outbound call by a Smith.ai receptionist (human or AI). The receptionist will call the provided callback_number, follow the action_required instructions, and optionally retry per cadence settings.
+    request_format: application/json — JSON array of lead objects
+    python_request_param: json=
+    response_format: JSON — confirmation of queued call request(s)
+
+RESPONSE_FORMAT: JSON confirmation. Exact response shape not confirmed from public docs (helpdocs article body not rendered). Expected to return status/acknowledgment for queued outbound call(s).
+
+SDK_PACKAGE: none
+
+ACCEPTED_INPUT_FORMATS: JSON body (application/json) — lead contact data including name, email, phone number, call reason, and instructions
+
+PYTHON_EXAMPLES:
+  # Example 1: Basic outbound call request (single lead)
+  import requests
+
+  url = "https://app.smith.ai/api/vr/v1/outbound/"
+  headers = {
+      "Authorization": "token YOUR_API_ACCESS_TOKEN",
+      "Content-Type": "application/json"
+  }
+  payload = [
+      {
+          "first_name": "John",
+          "last_name": "Smith",
+          "email": "john.smith@example.com",
+          "callback_number": "+16505554422",
+          "reason": 2,
+          "availability": 2,
+          "action_required": "Follow the outbound call instructions",
+          "action_fallback": "Follow the outbound call instructions",
+          "send_summary_to": "owner@example.com"
+      }
+  ]
+  response = requests.post(url, headers=headers, json=payload)
+  print(response.json())
+
+  # Example 2: Outbound call with retry cadence and custom availability window
+  import requests
+
+  url = "https://app.smith.ai/api/vr/v1/outbound/"
+  headers = {
+      "Authorization": "token YOUR_API_ACCESS_TOKEN",
+      "Content-Type": "application/json"
+  }
+  payload = [
+      {
+          "callback_number": "6505130855",
+          "reason": 2,
+          "action_required": "Please call the client back as soon as possible",
+          "action_fallback": "Call them again",
+          "first_name": "John",
+          "attempts": 2,
+          "cadence_amount": 1,
+          "cadence_unit": 1,
+          "availability": 3,
+          "custom_from": "07:00 AM",
+          "custom_to": "06:00 PM",
+          "custom_weekdays": {
+              "monday": "false",
+              "tuesday": "true",
+              "wednesday": "true",
+              "thursday": "true",
+              "friday": "true",
+              "saturday": "false",
+              "sunday": "false"
+          },
+          "custom_timezone": "US/Pacific"
+      }
+  ]
+  response = requests.post(url, headers=headers, json=payload)
+  print(response.json())
+
+OPENAPI_URL: not_found
+
+ACCESS_METHOD: paid_only
+SIGNUP_URL: https://app.smith.ai/vr/get-started/
+
+ROUTING_TABLE:
+  scope=step_1:
+    - endpoint: POST /outbound/  (primary — triggers receptionist-placed outbound voice call to contact)
+    - input_channel: text
+
+USER_SELECTABLE_PARAMS:
+  - name: reason
+    allowed_values: 1 (Spanish caller) | 2 (Schedule a consultation) | 3 (Advise outside practice areas) | 4 (Collect payments) | 5 (Reschedule appointment) | 6 (Inform follow-up email sent) | 7 (Correct a mistake) | 8 (Other)
+    affects: output_style
+    default: none (required field)
+  - name: reason_other_text
+    allowed_values: free_text (max 200 chars)
+    affects: output_style
+    default: none (required only when reason=8)
+  - name: availability
+    allowed_values: 1 (24/7) | 2 (business hours, default) | 3 (custom window)
+    affects: latency
+    default: 2
+  - name: attempts
+    allowed_values: integer (0 = unlimited retries)
+    affects: latency
+    default: none
+  - name: cadence_amount
+    allowed_values: integer
+    affects: latency
+    default: none
+  - name: cadence_unit
+    allowed_values: 1 (minutes) | 2 (hours)
+    affects: latency
+    default: none
+  - name: custom_from
+    allowed_values: time string e.g. "07:00 AM"
+    affects: latency
+    default: none (used when availability=3)
+  - name: custom_to
+    allowed_values: time string e.g. "06:00 PM"
+    affects: latency
+    default: none (used when availability=3)
+  - name: custom_weekdays
+    allowed_values: object with day keys (monday-sunday), values "true"/"false"
+    affects: latency
+    default: none (used when availability=3)
+  - name: custom_timezone
+    allowed_values: TZ string e.g. "US/Pacific"
+    affects: latency
+    default: none (used when availability=3)
+
+UPSTREAM_PROVIDER: self
+
+INTERACTION_MODEL:
+  synchronous: false
+  async_polling: false
+  webhook_callback: false
+  sse_streaming: false
+  batch_file: false
+  event_subscription: false
+  notes: "The API queues outbound call requests for execution by human/AI receptionists. The call itself is synchronous to the receptionist; the API call is fire-and-forget (no polling needed — results delivered via email/SMS summary). Call summaries can be routed to Slack, SMS, or email via dashboard configuration."
+
+SANDBOX:
+  sandbox_available: false
+  sandbox_base_url: n/a
+  sandbox_docs_url: n/a
+  notes: "No sandbox environment documented. API requires an active paid Smith.ai plan. Test calls can be placed via the dashboard."
+
+PRICING_BREAKDOWN:
+  source_url: https://smith.ai/pricing/receptionists
+  tiers:
+    - name: Virtual Receptionist Starter
+      monthly_cost_usd: 300
+      included_units: 30
+      unit_name: calls
+      overage_cost_per_unit_usd: 11.50
+    - name: Virtual Receptionist Basic
+      monthly_cost_usd: 810
+      included_units: 90
+      unit_name: calls
+      overage_cost_per_unit_usd: 10.50
+    - name: Virtual Receptionist Pro
+      monthly_cost_usd: 2100
+      included_units: 300
+      unit_name: calls
+      overage_cost_per_unit_usd: 8.50
+    - name: Virtual Receptionist Enterprise
+      monthly_cost_usd: 0
+      included_units: custom
+      unit_name: calls
+      overage_cost_per_unit_usd: n/a
+    - name: AI Receptionist (entry)
+      monthly_cost_usd: 95
+      included_units: 30
+      unit_name: calls
+      overage_cost_per_unit_usd: 4.25
+  notes: "AI Receptionist plans start at ~$95/mo (30 prepaid calls, $4.25/call overage). Virtual Receptionist (human-staffed) plans start at $300/mo. No free tier; 30-day money-back guarantee. Annual plans include 10% discount. Add-ons billed per call: appointment booking $1.50, SMS/Slack notifications $0.50, call recording $0.25, etc. Outreach Campaigns is a separate product with separate pricing."
+  confidence: medium
+```
+
+---
+
+```atlas
+{
+  "provider": "Smith.ai",
+  "base_urls": [
+    "https://app.smith.ai/api/vr/v1",
+    "https://app.smith.ai/api/oc/v1"
+  ],
+  "authentication": [
+    {
+      "mode": "api_key",
+      "header_name": "Authorization",
+      "format": "token <api_access_token>",
+      "notes": "API token generated from the Smith.ai dashboard under Virtual Receptionist account settings. A separate API key exists for Outreach Campaigns plans. See https://docs.smith.ai/article/p4ea2x3sx6-generate-an-api-token"
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "POST",
+      "path": "/outbound/",
+      "purpose": "Submit one or more leads for an outbound call by a Smith.ai human or AI receptionist. Receptionist calls the contact at callback_number, follows action_required instructions if answered, action_fallback if not. Supports retry cadence and custom availability windows.",
+      "request_shape": "application/json — JSON array of lead objects. Required: callback_number (string, E.164), reason (int 1-8), action_required (string max 500), action_fallback (string). Optional: first_name, last_name, email, send_summary_to, availability (1=24/7|2=business hours|3=custom), attempts (int, 0=unlimited), cadence_amount (int), cadence_unit (1=minutes|2=hours), custom_from (time string), custom_to (time string), custom_weekdays (object), custom_timezone (TZ string), reason_other_text (string max 200, required when reason=8)",
+      "response_shape": "200 -> JSON confirmation of queued call request(s). Exact schema not publicly documented.",
+      "python_example": "import requests\nurl = 'https://app.smith.ai/api/vr/v1/outbound/'\nheaders = {'Authorization': 'token YOUR_API_TOKEN', 'Content-Type': 'application/json'}\npayload = [{'first_name': 'John', 'last_name': 'Smith', 'email': 'john@example.com', 'callback_number': '+16505554422', 'reason': 2, 'availability': 2, 'action_required': 'Follow outbound call instructions', 'action_fallback': 'Follow outbound call instructions', 'send_summary_to': 'owner@example.com'}]\nresponse = requests.post(url, headers=headers, json=payload)\nprint(response.json())",
+      "error_codes": [],
+      "auth_required": "api_key",
+      "scope_hints": ["voice_agent", "outbound_calling", "lead_followup"],
+      "idempotency_support": "none",
+      "oauth_scopes": [],
+      "deprecated": false,
+      "replaced_by": "",
+      "retryable_errors": ["429", "500", "502", "503", "504"],
+      "doc_url": "https://docs.smith.ai/article/7p93p6osc0-using-the-outbound-call-request-api"
+    },
+    {
+      "method": "POST",
+      "path": "/campaigns/{campaign_id}/leads/",
+      "purpose": "Add leads to an existing Outreach Campaign, triggering the campaign's outbound call sequence for those contacts. Uses a separate Outreach Campaigns API key. Exact path is inferred — see docs for confirmed URL.",
+      "request_shape": "application/json — lead contact object with first_name, last_name, email, phone, and any additional custom fields configured for the campaign. Campaign ID required in URL.",
+      "response_shape": "JSON confirmation. Exact schema not publicly documented.",
+      "python_example": "",
+      "error_codes": [],
+      "auth_required": "api_key",
+      "scope_hints": ["outreach_campaigns", "lead_generation", "voice_agent"],
+      "idempotency_support": "none",
+      "oauth_scopes": [],
+      "deprecated": false,
+      "replaced_by": "",
+      "retryable_errors": ["429", "500", "502", "503", "504"],
+      "doc_url": "https://docs.smith.ai/article/pyqom9aqtv-generate-an-outreach-campaigns-api-key"
+    }
+  ],
+  "pagination": "none",
+  "rate_limits": [],
+  "user_selectable_params": [
+    {
+      "name": "reason",
+      "allowed_values": "1 (Spanish caller) | 2 (Schedule consultation) | 3 (Advise outside practice areas) | 4 (Collect payments) | 5 (Reschedule appointment) | 6 (Inform follow-up email sent) | 7 (Correct mistake) | 8 (Other)",
+      "affects": "output_style",
+      "default": "none (required)"
+    },
+    {
+      "name": "availability",
+      "allowed_values": "1 (24/7) | 2 (business hours) | 3 (custom window)",
+      "affects": "latency",
+      "default": "2"
+    },
+    {
+      "name": "attempts",
+      "allowed_values": "integer (0 = unlimited retries until contact reached)",
+      "affects": "latency",
+      "default": "none"
+    },
+    {
+      "name": "cadence_unit",
+      "allowed_values": "1 (minutes) | 2 (hours)",
+      "affects": "latency",
+      "default": "none"
+    }
+  ],
+  "sdks": [],
+  "doc_page_map": [
+    {
+      "url": "https://docs.smith.ai/category/ydtshfm8im-api",
+      "covers": "Developer/API Resources overview — links to all API articles"
+    },
+    {
+      "url": "https://docs.smith.ai/article/p4ea2x3sx6-generate-an-api-token",
+      "covers": "How to generate a Virtual Receptionist API token from the dashboard"
+    },
+    {
+      "url": "https://docs.smith.ai/article/7p93p6osc0-using-the-outbound-call-request-api",
+      "covers": "POST /outbound/ — outbound call request API usage guide"
+    },
+    {
+      "url": "https://docs.smith.ai/article/snw2akcaik-outbound-api-fields",
+      "covers": "POST /outbound/ — full field reference with types, required flags, and value choices"
+    },
+    {
+      "url": "https://docs.smith.ai/article/pyqom9aqtv-generate-an-outreach-campaigns-api-key",
+      "covers": "How to generate a separate Outreach Campaigns API key"
+    },
+    {
+      "url": "https://docs.smith.ai/article/ebcobompnd-smith-ai-chat-api-documentation-for-extended-data-and-widget-visibility",
+      "covers": "Smith.ai Chat JavaScript API — extended data and widget visibility controls"
+    },
+    {
+      "url": "https://smith.ai/pricing/receptionists",
+      "covers": "Virtual Receptionist pricing tiers: Starter, Basic, Pro, Enterprise"
+    },
+    {
+      "url": "https://smith.ai/pricing/ai-receptionist",
+      "covers": "AI Receptionist pricing tiers"
+    }
+  ],
+  "openapi_url": null,
+  "global_error_codes": [],
+  "webhooks_or_events": "No outbound webhooks from Smith.ai to caller. Call summaries are delivered via email, SMS, Slack, or Microsoft Teams as configured in the dashboard. No programmatic webhook registration via API.",
+  "interaction_modes": ["synchronous"],
+  "sandbox_available": false,
+  "sandbox_base_url": "",
+  "sandbox_credential_flow": "not_applicable",
+  "upstream_provider": null,
+  "pricing_summary": "Virtual Receptionist: $300/mo (30 calls), $810/mo (90 calls), $2100/mo (300 calls). AI Receptionist: ~$95/mo (30 calls), overage ~$4.25/call. No free tier; 30-day money-back guarantee. Outreach Campaigns priced separately. Add-ons $0.25–$1.50/call.",
+  "version_pin_header": ""
+}
+```
+
+DECISION: PASS
+REASON: Smith.ai has a documented REST API at `app.smith.ai/api/vr/v1` with a confirmed POST `/outbound/` endpoint, token-based auth, self-service paid signup, and full field reference in public helpdocs — sufficient for Agent 5 to build and test against.
+
+---
+
+<atlas_completeness>
+endpoints_captured: 2
+endpoints_estimated_total: 3 (outbound call request, outreach campaigns add-lead, chat JavaScript API — the chat one is not REST so excluded from REST count; REST total is ~2)
+required_fields_populated: SERVICE, BASE_URL, AUTH_HEADER, ENDPOINTS, RESPONSE_FORMAT, PYTHON_EXAMPLES, ROUTING_TABLE, USER_SELECTABLE_PARAMS, INTERACTION_MODEL, SANDBOX, PRICING_BREAKDOWN
+required_fields_empty: OPENAPI_URL (not_found, no spec exists), SDK_PACKAGE (none)
+confidence: medium
+known_unknowns:
+  - Outreach Campaigns REST endpoint exact path (confirmed to exist from docs nav; separate API key; URL pattern inferred as /campaigns/{id}/leads/ but not confirmed from article body — helpdocs didn't render article body content)
+  - Response body schema for POST /outbound/ (article body not rendered by helpdocs.io)
+  - Outreach Campaigns API authentication header format (confirmed separate key; exact header format unknown)
+  - AI Receptionist pricing exact tiers (confirmed ~$95/mo start from third-party reviews; official pricing page showed "Talk to our team" for some tiers)
+  - Rate limits (not documented publicly)
+  - Whether the Chat API has any REST endpoints alongside the JavaScript widget API
+</atlas_completeness>
+
+VERIFICATION_COMPLETE
+VERDICT: PASS
+VERIFIED_SCOPES: step_1
+REMOVED_SCOPES: (none)
+API_SPEC_WRITTEN: true
+COMPLETENESS_CONFIDENCE: medium
+NOTES: Smith.ai is a virtual receptionist service (human + AI agents) with a narrow REST API primarily for triggering outbound calls. The sole confirmed REST endpoint is POST `https://app.smith.ai/api/vr/v1/outbound/` — it accepts a JSON array of leads and dispatches a receptionist to call them. Auth is `Authorization: token <key>`. A separate Outreach Campaigns API exists with its own API key, but its exact endpoint path could not be confirmed (helpdocs.io served only sidebar navigation for article pages, not article bodies). The `step_1: role=voice_agent` scope is verified_generic: Smith.ai IS a voice answering service; the API enables outbound call triggering; inbound answering is configured via dashboard/phone-forwarding, not API calls. No free tier — requires paid subscription ($300/mo+ for human, ~$95/mo for AI); self-service signup at `https://app.smith.ai/vr/get-started/`. Known unknowns: Outreach Campaigns endpoint exact URL, response body schema, rate limits.

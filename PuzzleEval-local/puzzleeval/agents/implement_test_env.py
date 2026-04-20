@@ -132,20 +132,17 @@ def _format_modality_context_for_builder(input_data: "Agent5Input") -> str:
 
 
 def _format_atlas_context_for_builder(candidate: ScreenedCandidate) -> str:
-    """Format the structured ScreenedCandidate enrichment fields (sandbox,
-    interaction model, upstream provider, openapi URL, user-selectable
-    params) into a builder-readable context block.
+    """Return structured hints from ScreenedCandidate's enrichment fields.
 
-    Phase 6.5's deep-verify produces these fields but the builder
-    historically didn't see them in its initial message — so the builder
-    re-discovered everything via web research. This block ensures the
-    builder ACTS on what we already know:
+    Architecture note: Agent 4 now only does a shallow verify (exists/
+    blocked). It does NOT produce an atlas JSON. Agent 5 does its own
+    Phase-1 research via web_search + web_fetch and writes its own
+    api_spec.txt into the sandbox.
 
-      - sandbox available → use the sandbox base URL during tests
-      - async_polling     → emit poll helper, set longer timeouts
-      - sse_streaming     → emit stream consumer
-      - openapi_url       → fetch and parse spec for endpoint exactness
-      - user_selectable_params → build tests that exercise the knobs
+    This helper still surfaces any simple enrichment fields Agent 4
+    happens to populate (sandbox_available, upstream_provider,
+    interaction_model flags on the shallow path). Returns an empty
+    string when nothing is populated — the common case today.
     """
     sections: list[str] = []
 
@@ -158,7 +155,7 @@ def _format_atlas_context_for_builder(candidate: ScreenedCandidate) -> str:
                 active_modes.append(flag)
         if active_modes:
             sections.append(
-                "### Interaction model (from Phase 6.5 deep-verify)\n"
+                "### Interaction model hints (from Agent 4 shallow verify)\n"
                 "- Active delivery modes: " + ", ".join(active_modes) + "\n"
                 + (
                     "- This API uses async/long-running operations. Your harness "
@@ -191,176 +188,9 @@ def _format_atlas_context_for_builder(candidate: ScreenedCandidate) -> str:
             "upstream — keep test request volume modest.\n"
         )
 
-    params = getattr(candidate, "user_selectable_params", None) or []
-    if params:
-        param_lines = "\n".join(
-            f"  - {p.name} ({p.allowed_values}): default {p.default or 'unset'}"
-            for p in params[:8]
-        )
-        sections.append(
-            "### User-selectable params (from atlas)\n"
-            f"{param_lines}\n"
-            "- These are the call-level knobs the API exposes. Your harness "
-            "should accept them via input_data so future test cases can "
-            "exercise different combinations.\n"
-        )
-
-    spec_path = getattr(candidate, "api_spec_path", None)
-    if spec_path:
-        sections.append(
-            "### ⚠️ PRE-EXTRACTED ATLAS — YOUR STARTING POINT, NOT A REFERENCE\n"
-            f"- File: {spec_path}\n"
-            "- Agent 4 ALREADY researched this provider and extracted a full "
-            "atlas. It contains: endpoints (every method + path + request/"
-            "response format), auth_header, base_url, sdk_package, "
-            "interaction_model flags (sync / async_polling / sse_streaming / "
-            "webhook / event_subscription / batch_file), user_selectable_"
-            "params, sandbox details, pricing_breakdown, doc_page_map, "
-            "atlas_completeness.confidence + known_unknowns.\n"
-            "- **Your Phase 1 is: read_file(this atlas) FIRST, COPY its "
-            "fields into your api_spec.txt, then gap-fill ONLY what the "
-            "atlas explicitly marks empty/low-confidence.** This saves "
-            "5-10 turns vs researching from scratch. Do NOT duplicate work "
-            "Agent 4 already did.\n"
-            "- When to ignore the atlas: specific field is empty or marked "
-            "low-confidence AND your test cases require it. Then (and only "
-            "then) do targeted web_fetch / web_search to fill.\n"
-        )
-
-    # Atlas v2 fields (provider-level + endpoint-level) — load the atlas
-    # JSON directly and surface the fields the ScreenedCandidate enrichment
-    # dataclasses don't carry. Before this, the atlas was written to disk
-    # but Agent 5 read only a handful of fields from ScreenedCandidate and
-    # re-researched the rest via web_fetch.
-    spec_path = getattr(candidate, "api_spec_path", None)
-    if spec_path:
-        try:
-            import json as _json
-            _p = Path(spec_path)
-            if _p.exists() and _p.suffix == ".json":
-                atlas_data = _json.loads(_p.read_text(encoding="utf-8"))
-
-                # Version-pin header — Stripe-Version / OpenAI-Beta / anthropic-version.
-                # Critical for correct API behavior; harness MUST include this on
-                # every request.
-                vph = atlas_data.get("version_pin_header", "")
-                if vph:
-                    sections.append(
-                        "### API version pin (MUST include on every request)\n"
-                        f"- `{vph}` — omit this and the provider silently serves a "
-                        "different version than the atlas was extracted against.\n"
-                    )
-
-                # Sandbox credential flow (how does the user get sandbox access?)
-                scf = atlas_data.get("sandbox_credential_flow", "")
-                if scf and scf != "not_applicable":
-                    sections.append(
-                        f"### Sandbox credential flow: `{scf}`\n"
-                        + (
-                            "- Sandbox keys are issued automatically on signup. "
-                            "The user should already have one.\n"
-                            if scf == "auto_on_signup" else
-                            "- Sandbox access requires a manual request form. If "
-                            "the user doesn't have one, they'll need to request it.\n"
-                            if scf == "manual_request" else
-                            "- Sandbox access requires a sales conversation. Don't "
-                            "block the build on this — test against production "
-                            "with conservative params.\n"
-                            if scf == "contact_sales" else
-                            ""
-                        )
-                    )
-
-                # Endpoint-level fields that the builder needs to see when
-                # picking which endpoint to call. Specifically: deprecated
-                # endpoints (DON'T USE), idempotency-required endpoints
-                # (MUST include key), and doc_url jump-points for ask_research.
-                endpoints = atlas_data.get("endpoints") or []
-                deprecated_endpoints = [
-                    f"{e.get('method','?')} {e.get('path','?')}"
-                    + (f" → replaced by {e['replaced_by']}" if e.get("replaced_by") else "")
-                    for e in endpoints
-                    if e.get("deprecated")
-                ]
-                if deprecated_endpoints:
-                    sections.append(
-                        "### Deprecated endpoints (DO NOT build against these)\n"
-                        + "\n".join(f"- {e}" for e in deprecated_endpoints)
-                        + "\n"
-                    )
-
-                idem_required = [
-                    f"{e.get('method','?')} {e.get('path','?')}"
-                    for e in endpoints
-                    if e.get("idempotency_support") == "required"
-                ]
-                idem_header = [
-                    f"{e.get('method','?')} {e.get('path','?')}: {e.get('idempotency_support','')}"
-                    for e in endpoints
-                    if isinstance(e.get("idempotency_support"), str)
-                    and e.get("idempotency_support", "").startswith("header:")
-                ]
-                if idem_required or idem_header:
-                    lines = ["### Idempotency support (include key on retries to avoid duplicates)"]
-                    if idem_required:
-                        lines.append(
-                            "REQUIRED (reject without key): "
-                            + ", ".join(idem_required)
-                        )
-                    if idem_header:
-                        lines.append("Header-based: " + "; ".join(idem_header))
-                    sections.append("\n".join(lines) + "\n")
-
-                # Doc_page_map — bookmarks Agent 5's ask_research can jump
-                # directly to. Before this, the atlas had the bookmarks
-                # but the builder never saw them, so ask_research searched
-                # the same docs the deep-verify loop had already fetched.
-                dpm = atlas_data.get("doc_page_map") or []
-                if dpm:
-                    bookmark_lines = [
-                        f"  - {entry.get('url','')} — {entry.get('covers','')}"
-                        for entry in dpm[:10]  # top 10 to keep context tight
-                    ]
-                    sections.append(
-                        "### Doc bookmarks (use these in ask_research — they're "
-                        "pre-indexed by the atlas extractor)\n"
-                        + "\n".join(bookmark_lines)
-                        + "\n"
-                    )
-
-                # Per-endpoint doc_url + scope_hints summary (for the
-                # endpoints actually covering this candidate's scopes).
-                covered_scopes = set(getattr(candidate, "covers_step_ids", []) or [])
-                relevant_endpoints = []
-                for e in endpoints:
-                    hints = set(e.get("scope_hints") or [])
-                    if hints & covered_scopes or not covered_scopes:
-                        relevant_endpoints.append(e)
-                if relevant_endpoints:
-                    rel_lines = []
-                    for e in relevant_endpoints[:12]:
-                        prefix = f"{e.get('method','?')} {e.get('path','?')}"
-                        scope_hint_txt = (
-                            f" [scopes: {', '.join(sorted(e.get('scope_hints', [])))}]"
-                            if e.get("scope_hints") else ""
-                        )
-                        doc_url_txt = (
-                            f" (docs: {e['doc_url']})" if e.get("doc_url") else ""
-                        )
-                        rel_lines.append(f"  - {prefix}{scope_hint_txt}{doc_url_txt}")
-                    sections.append(
-                        "### Endpoints relevant to this candidate's scope\n"
-                        + "\n".join(rel_lines) + "\n"
-                    )
-        except Exception:
-            # Atlas parse failure is non-fatal — we just skip the extra
-            # context blocks; the spec_path reference above still points
-            # the builder at the raw file.
-            pass
-
     if not sections:
         return ""
-    return "\n---\n## STRUCTURED CONTEXT FROM PHASE 6.5\n\n" + "\n".join(sections)
+    return "\n---\n## ENRICHMENT HINTS FROM AGENT 4\n\n" + "\n".join(sections)
 
 
 def _adaptive_test_timeout(harness) -> int:
@@ -501,25 +331,43 @@ or "Let me search for..." — just call the tool. If you can say it in one sente
 don't use three. Every word of explanation costs tokens and a turn.
 </do_not_narrate>
 
-<do_not_re_read>
-If you read a file earlier in this conversation and have NOT modified it since,
-refer to what you already know. Do NOT re-read the same file. This wastes turns.
-Only re-read after YOU have patched or rewritten the file.
-</do_not_re_read>
+<do_not_repeat>
+BEFORE running any command or reading any file, check: did you already do this
+this session? If yes, the result is still valid. Do NOT:
+  - Re-run `ffmpeg -version` / `python --version` / similar environment checks.
+    Once a tool is confirmed available, it stays available for the sandbox's
+    lifetime.
+  - Re-run `pip install -r requirements.txt` after it succeeded. Packages stay
+    installed in the venv.
+  - Re-read a file you have not modified this turn. Refer to what you already
+    know from the earlier read.
+  - Re-search for something already in api_spec.txt's DOC_MAP. The spec
+    remembers what you saw.
+  - Call advisor more than twice per candidate — the advisor repeats itself
+    on the same context.
+
+If unsure whether a state changed, reason from the conversation history first.
+Re-verification is a turn you paid for.
+</do_not_repeat>
 
 <investigate_comprehensively>
-When you need to explore something (SDK methods, file structure, error details),
-write ONE comprehensive script that gets ALL the information at once. Do NOT write
-five separate scripts that each discover one fact — that wastes 10 turns instead of 2.
-Example — BAD: check_sdk1.py (list methods), check_sdk2.py (get signatures), check_sdk3.py (get source)
-Example — GOOD: one check_sdk.py that prints methods + signatures + key source in a single run.
+This ONLY applies when DEBUGGING a real error from a harness.py or smoke_test.py
+that has already run. When you need to explore an SDK to fix an observed error,
+write ONE comprehensive script — not five — that prints methods + signatures +
+key source in a single run.
+
+**DO NOT write introspection scripts BEFORE harness.py exists.** No `inspect_sdk.py`,
+no `check_*.py`, no `explore_*.py` as pre-work. Your first response to api_spec.txt
+is to WRITE harness.py, not to interrogate the SDK. A real error message from a
+failed harness.run() is far more informative than `dir(some_class)`.
 </investigate_comprehensively>
 
 <think_before_acting>
-Before writing code, ask yourself: What am I unsure about? What could go wrong?
-If the API has async polling, have I read the polling docs? If it uses an SDK,
-do I know the exact method names? Verify unknowns BEFORE writing, not after.
-One read-then-write turn is faster than write-then-debug-then-rewrite (3 turns).
+Before writing harness.py, re-read api_spec.txt. Check AUTH_HEADER, ENDPOINTS,
+and PYTHON_EXAMPLES. Resolve unknowns by reading the DOC_MAP entries OR by writing
+a first-pass harness.py and letting live errors tell you what's wrong. A ran
+harness.py with a concrete error ("AttributeError: 'Conversation' has no attribute
+'X'") is the fastest teacher — faster than any introspection script.
 </think_before_acting>
 
 <commit_and_course_correct>
@@ -580,6 +428,60 @@ def run(input_data: dict) -> dict:
 - Measure latency with time.time() around the actual API call
 - For "output": just json.dumps(response_body) -- do NOT extract or reformat fields
 - Keep it simple -- no classes, no frameworks, just a module with run()
+
+## System-prompt resilience (REQUIRED for agent-style APIs)
+
+For APIs that drive an LLM-backed agent (chatbot, voice agent, realtime
+conversation, any API where the provider needs persona/domain guidance),
+the harness MUST read a system prompt from
+``input_data["input_context"]["instructions"]`` (or one of its accepted
+aliases: ``system_prompt``, ``system``, ``agent_prompt``). Agent 3's
+test cases WILL include this field for voice/chat modalities — always
+pass it through to the provider.
+
+If the field is missing or empty (e.g., a partial test input or a
+smoke probe), the harness MUST NOT hard-fail with ``"missing system
+prompt"``. Fall back to a sensible default built from the candidate's
+name + scope role:
+
+```python
+DEFAULT_INSTRUCTIONS = (
+    "You are a helpful {scope_role} for {provider_name}. "
+    "Answer the user's questions concisely and stay on-topic."
+)
+instructions = (
+    input_data.get("input_context", {}).get("instructions")
+    or input_data.get("input_context", {}).get("system_prompt")
+    or DEFAULT_INSTRUCTIONS.format(
+        scope_role="voice agent",  # or whatever the scope is
+        provider_name="OpenAI",
+    )
+)
+```
+
+Hard-failing on missing instructions breaks post-loop test execution
+because the plugin's drive loop passes per-turn payloads without always
+setting instructions. Graceful fallback keeps tests running + scorable.
+
+## File-write discipline — no meta-memory files
+
+The ONLY files you EVER write to the sandbox:
+  ``api_spec.txt`` · ``harness.py`` · ``requirements.txt``
+  ``smoke_test.py`` · ``live_test.py`` · (optional) ``integration_test.py``
+
+**Do NOT write meta-memory / state-tracking files.** These are all
+FORBIDDEN and wasted turns:
+  ``NOTES.md`` · ``NOTES.txt`` · ``STATUS.txt`` · ``progress.md``
+  ``state.md`` · ``memory.txt`` · ``plan.md`` · ``context_backup.*``
+
+Rationale: context is auto-managed server-side (clear_tool_uses at 80K
+tokens, compact at 150K). Writing "save state before context clears"
+files does NOT help — they're on-disk but not in-context, and the live
+conversation + api_spec.txt + harness.py are the only memory you need.
+Every meta-file costs ~$0.30 and zero build progress.
+
+If you feel the urge to "save state," patch ``api_spec.txt`` with the
+relevant finding instead — that IS your memory and it survives compaction.
 
 ## ERROR-HANDLING CONTRACT (HARD REQUIREMENT)
 
@@ -657,169 +559,204 @@ Your smoke_test.py (template below) exercises these same six probes so
 you catch contract violations during the build loop, not after.
 
 ======================================================================
-## PHASE 1: ATLAS INGEST + GAP-FILL — most of the research is already done
+## PHASE 1: RESEARCH — Understand the API, then WRITE api_spec.txt
 ======================================================================
 
-**IMPORTANT:** Agent 4 has ALREADY verified this candidate and extracted a
-comprehensive atlas (endpoints, auth_header, base_url, interaction_model,
-sandbox details, pricing, doc_page_map). The atlas lives on disk at
-``api_spec_path`` and its contents are pre-summarized in the "Pre-extracted
-spec available" section of THIS message. You are not starting from zero.
+The goal of research: give the builder everything it needs to write a correct API
+call WITHOUT guessing. Specifically: the exact endpoint URL, exact auth header format,
+exact request format (multipart vs JSON vs base64, field names), and a working Python
+code example. If you find all four, the builder writes correct code in 1-2 turns.
+If any is missing, the builder guesses wrong and spends 10+ turns debugging.
 
-Your Phase 1 job is: (1) READ the atlas, (2) FILL any gaps that matter for
-YOUR specific test scenarios, (3) PRODUCE api_spec.txt in the format below
-by copying the atlas fields plus any gap-fill research you did. Only do
-fresh web research when the atlas is missing a field you need.
+Do NOT skip this phase. Do NOT code from memory.
 
-### Step 1: Read the atlas (always first)
+### Bias: WRITE EARLY, GAP-FILL AFTER — no large researches, no refinement
 
-Call ``read_file(api_spec_path)``. The atlas is structured JSON — it already
-contains what Phase 1 used to re-research from scratch. Skim it. Identify
-which fields are populated (high confidence — use them) vs which are empty
-or marked low-confidence (these are your gap-fill targets).
+The single biggest failure mode is research perfectionism — fetching page after page,
+accumulating thinking, and never calling `write_file("api_spec.txt")`. Beat this by
+writing api_spec.txt AS SOON AS you have enough to populate the required fields
+(BASE_URL, one ENDPOINT with request format, AUTH_HEADER, INPUT_COMPATIBILITY).
+Unknowns become `TODO: <specific question>` entries that you gap-fill in later turns.
 
-### Step 2: Gap-fill ONLY what's missing for your test cases
+**HARD RESEARCH BUDGET:** no more than 3 tool calls to web_search/web_fetch BEFORE
+you call write_file("api_spec.txt"). If after 3 research calls you still can't fill
+the required fields, write the spec with the fields you have (remainder as TODOs)
+anyway. Do NOT keep researching to "refine" or "verify" — that's refinement that
+never ends. Commit, then patch from live-test feedback.
 
-Compare what's in the atlas vs what your specific test cases need:
-- Atlas has endpoint X but your tests use scope Y and the atlas doesn't map
-  an endpoint to Y → gap. Fetch or search for the scope-specific endpoint.
-- Atlas's python_request_param for an endpoint is empty → gap. Fetch an
-  example page from the provider's docs (often in doc_page_map).
-- Atlas atlas_completeness.confidence is "low" AND you have fetches
-  remaining AND a specific known_unknown → resolve that specific gap.
+**Two valid flows:**
 
-Do NOT re-verify fields the atlas already populated at medium/high
-confidence. Do NOT re-fetch docs Agent 4 already processed. Trust the
-atlas unless you have a specific reason to doubt a field.
+- **Compact (preferred when first pass lands enough info)** — In a single turn:
+  `web_search` + `web_fetch` + `write_file("api_spec.txt")`. Typical for well-
+  documented providers with an OpenAPI spec or strong quickstart page. This is
+  what the "I have enough info, let me write the spec" moment looks like — act
+  on it IMMEDIATELY, don't hedge with "let me check one more thing first."
 
-### Step 3: Write api_spec.txt
+- **Incremental (when first pass has gaps)** — Turn 1: `web_search` + `web_fetch`.
+  Turn 2: `write_file("api_spec.txt")` with TODOs for anything missing. Turn 3+:
+  ONE targeted search/fetch per TODO, then `patch_file` the resolved field.
 
-Write `api_spec.txt` containing:
+**Which flow to pick:** if after your first `web_fetch` you can fill all required
+fields, write the full spec in the same turn. If there are gaps, write what you
+HAVE — TODOs included — and resolve each one in a dedicated follow-up turn. NEVER
+run a second research pass without writing the spec first.
+
+**Budget discipline:** adaptive-thinking blocks, web_fetch results, and your text
+prose all count against max_tokens. If you catch yourself mid-turn writing a long
+"analysis" of what you've read, STOP and call write_file now. The spec is your
+memory; it's always easier to patch later than to re-research.
+
+### How to research (search → navigate → fetch)
+
+1. `web_search("{service} API documentation")` — survey the docs landscape
+2. `web_search("{service} openapi.json OR swagger")` — find the machine-readable spec
+3. `web_fetch(most_promising_docs_url)` — read endpoints, auth, examples
+
+Search results include snippet content — skim them before deciding what to fetch.
+Fetching is expensive (tokens + budget); be selective.
+
+### api_spec.txt template
 
 ```
 API_SPEC_START
 SERVICE: [name]
-BASE_URL: [exact URL]
-ENDPOINTS: [ALL endpoints with METHOD, path, Content-Type, Python requests param]
-AUTH_HEADER: [exact format -- quote from the docs, do NOT guess]
-REQUEST_FORMAT: [per endpoint -- specify json=, data=, files= parameter]
+BASE_URL: [exact URL | TODO: need base URL]
+ENDPOINTS:
+  - METHOD path
+    Content-Type: ...
+    Python requests param: json= | data= | files= | params=
+    Request body: {...}
+    Response: {...}
+  [list ALL endpoints you found, not just the quickstart one]
+AUTH_HEADER: [exact format quoted from docs | TODO: need auth scheme]
+REQUEST_FORMAT: [per endpoint — json= vs data= vs files= matters]
 RESPONSE_FORMAT: [JSON structure]
-SDK_PACKAGE: [pip package or "none -- use requests"]
-ACCEPTED_INPUT_FORMATS: [file types, URL support, plain text support]
+SDK_PACKAGE: [pip package | "none -- use requests"]
+ACCEPTED_INPUT_FORMATS: [file types, URL support, plain text, base64]
 
 PYTHON_EXAMPLES:
-  [paste code snippets from docs -- file upload, URL submission, SDK usage]
+  [paste code snippets from docs — file upload, URL submission, SDK usage]
 
 DOC_REFERENCES:
-  [URLs for API reference, auth docs, SDK docs, OpenAPI spec if found]
+  [URLs: API reference, auth docs, SDK, OpenAPI spec]
 
 DOC_MAP:
-  [List doc pages you encountered during research, even ones you didn't read fully.
-   This helps ask_research find specific info during debugging without broad searching.
-   Format: URL -- one-line description]
+  [Every doc page you encountered, even ones you didn't read fully.
+   This is the lookup Phase 2 and ask_research use to resolve specific
+   questions without re-searching. Format: URL -- one-line description]
 
 INPUT_COMPATIBILITY:
-  file_upload: [YES -- endpoint + method | NO -- reason]
-  url_submission: [YES -- endpoint + method | NO -- reason]
-  plain_text: [YES -- endpoint + method | NO -- "requires binary file/URL"]
-  base64: [YES -- endpoint + field | NO -- reason]
+  file_upload: [YES -- endpoint + method | NO -- reason | TODO]
+  url_submission: [YES -- endpoint + method | NO -- reason | TODO]
+  plain_text: [YES -- endpoint + method | NO -- "requires file/URL" | TODO]
+  base64: [YES -- endpoint + field | NO -- reason | TODO]
 
 ROUTING_TABLE:
-  test_file_path is set -> [endpoint + code pattern]
-  text starts with http -> [endpoint + code pattern]
-  text is plain content, no file -> [endpoint OR "INCOMPATIBLE: reason"]
-  input_type is structured_data -> [endpoint OR "INCOMPATIBLE: reason"]
+  test_file_path is set -> [endpoint + code pattern | TODO]
+  text starts with http -> [endpoint + code pattern | TODO]
+  text is plain content, no file -> [endpoint | "INCOMPATIBLE: reason" | TODO]
+  input_type is structured_data -> [endpoint | "INCOMPATIBLE: reason" | TODO]
+
+GAPS: (delete this section when empty)
+  - [each unresolved TODO with the specific question you need answered]
 API_SPEC_END
 ```
 
-### When Phase 1 is DONE (move to Phase 2)
+### Gap-fill rule (when you have TODOs after the first write)
 
-You have enough when you can fill in: BASE_URL, at least one ENDPOINT with its
-request format, AUTH_HEADER, and INPUT_COMPATIBILITY.
+Read your spec. For each TODO:
+- Is it MUST-HAVE for Phase 2 (BASE_URL, one ENDPOINT, AUTH_HEADER, INPUT_COMPATIBILITY)?
+  Yes → ONE targeted search OR fetch this turn, then patch_file the resolved field.
+  No  → leave as TODO; Phase 2's live test is more informative than more research.
 
-### ENDPOINT-FIT CHECKPOINT (REQUIRED before Phase 2)
+**The spec is your memory.** Never re-research a field that already has a concrete
+value. Never do broad/open-ended searches — only narrow, gap-specific queries. Doing
+the same web_search twice wastes budget and buries the answer in duplicate context.
 
-Before writing harness.py, state your endpoint choice + justify it against the
-user's context. This is a first-class reasoning step — skip it and you'll
-pick the first endpoint that compiles, not the right one for the user's workload.
+### Phase 1 completion checklist — move to Phase 2 when ALL are true
 
-Emit a `<endpoint_fit>` block that answers these 4 questions:
+- [x] api_spec.txt exists on disk (you called write_file)
+- [x] BASE_URL is a concrete URL (not TODO)
+- [x] At least one ENDPOINT has METHOD, path, request format, and Content-Type
+- [x] AUTH_HEADER is quoted from docs (not TODO)
+- [x] INPUT_COMPATIBILITY for every input form your test cases will use is YES/NO (not TODO)
+- [x] ENDPOINT-FIT: you picked the RIGHT endpoint for this user's scope, not just
+      any endpoint that compiles. Write a 2-3 line `<endpoint_fit>` block:
+      - chosen_endpoint: METHOD path (or WebSocket URL for realtime/voice)
+      - scope_match: one sentence why this endpoint matches the user's scope role
+        (e.g., "voice_conversation scope → WebSocket /convai/conversation because
+        the user needs multi-turn audio; the REST /tts endpoint can't maintain
+        session state")
+      - volume_fit: one sentence tying the endpoint to user's monthly_volume
+        (LOW = atomic request, HIGH = batch/streaming if available)
 
-  <endpoint_fit>
-  chosen_endpoint: <METHOD> <path>   (e.g., POST /v1/documents)
-  alternatives_rejected: [<endpoint or "none">]   (list the atomic vs batch variants you saw)
-  why_this_one:
-    - user_scope_match:  <how the endpoint's scope_hints / purpose matches the
-                         workflow step this candidate is covering>
-    - user_volume_fit:   <why the endpoint fits the user's monthly_volume band
-                         (LOW=atomic ok, HIGH=prefer batch)>
-    - side_effects:      <if the scope creates_records/modifies_records, which
-                         sandbox URL or DRY_RUN mode are you using?>
-    - technical_level:   <if user is non-technical, did you prefer a higher-level
-                         SDK wrapper where available?>
-  version_pin_header: <the atlas's version_pin_header, or "none" if not pinned>
-  idempotency_plan:   <header name if endpoint supports/requires one, else "not_applicable">
-  </endpoint_fit>
+When the checklist passes, state your PLAN in 3 bullet lines, then move to Phase 2.
+**Remaining TODOs are FINE** — Phase 2's live tests provide cheaper, more
+informative feedback than another docs-reading turn.
 
-Pick rules (general principles — not case-specific):
+### Principle: live validation IS verification
 
-- Batch vs atomic: read monthly_volume band from the user_context block.
-  LOW → atomic. MODERATE → atomic unless the scope's test cases explicitly
-  ship batches. HIGH / VERY HIGH → batch endpoint if one exists.
-- Deprecated endpoints (atlas flags `deprecated: true`) → NEVER pick these.
-  If the atlas says `replaced_by: <new endpoint>`, that's the one.
-- When multiple endpoints match `scope_hints`, prefer the one whose
-  `purpose` string most closely describes the scope's `role`. E.g. for a
-  step with role=`classify`, prefer `POST /classify` over `POST /predict`
-  even if both take the same input shape.
-- When the scope's `side_effects` is `creates_records` / `modifies_records`,
-  ALWAYS use the sandbox / DRY_RUN endpoint when the atlas reports one.
-  Never write to production during evaluation.
-- When `technical_level=non-technical` and the provider has both an SDK
-  wrapper and a raw REST endpoint, prefer the SDK wrapper (fewer required
-  fields, better defaults).
+Your research may have errors — that's OK. Build the harness and run a live test.
+A real API error (404, 401, 400) tells you exactly what's wrong in 1 turn. Parsing
+specs to verify ahead of time takes 10+ turns and may still be wrong.
 
-Call advisor to confirm your `<endpoint_fit>`, state your PLAN, then move to
-Phase 2. Missing details can be filled during debugging.
+### DO NOT
 
-**DO NOT write ad-hoc verification scripts to double-check your research in
-Phase 1.** Your research may have errors — that's OK. Build the harness and run
-a live test. A real API error (404, 401, 400) tells you exactly what's wrong in
-1 turn. Parsing specs to verify ahead of time takes 10+ turns and may still be
-wrong. Live validation IS verification.
-
-(Nuance: this rule is about "don't spend Phase 1 turns writing extra
-tools to interrogate the API." It does NOT apply to Phase 2's
-``<verify_against_docs>`` step, which is a quick read_file(harness.py) +
-read_file(api_spec.txt) eyeball comparison BEFORE running smoke tests.
-That's cheap and catches transcription errors.)
-
-### When Phase 1 is NOT done (keep researching)
-
-You're missing endpoint URLs, auth header format, or request format — the minimum
-needed to write a working API call. Fetch more docs pages or search for the OpenAPI spec.
+- **DO NOT write ad-hoc verification scripts** to cross-check the spec before Phase 2.
+  A live 4xx is cheaper feedback than another docs-reading turn. (This does NOT
+  forbid Phase 2's `<verify_against_docs>` read_file eyeball check — that's fine.)
+- **DO NOT re-fetch docs** you already consulted — the spec remembers what you saw.
+- **DO NOT narrate your plan at length** before acting. If you are about to write
+  api_spec.txt, call write_file; don't spend 500 tokens explaining you will.
+- **DO NOT guess from training data** — always quote AUTH_HEADER and REQUEST_FORMAT
+  from fetched docs.
 
 ### When to GIVE UP
 
-If you cannot find real API documentation with actual endpoint URLs despite your
-best efforts, signal HARNESS_FAILED with reason "docs_unusable".
-
-DO NOT write harness code until you've written api_spec.txt and stated a PLAN.
+Cannot find real API documentation with actual endpoint URLs despite two distinct
+search strategies (site-scoped + OpenAPI hunt)? Signal HARNESS_FAILED with reason
+"docs_unusable". Don't burn the whole budget on fruitless research.
 
 ======================================================================
-## PHASE 2: BUILD — Write code based on your research
+## PHASE 2: BUILD — Write harness.py IMMEDIATELY, debug from real errors
 ======================================================================
 
-**USE DOCS AS SOURCE OF TRUTH.** Before writing harness.py, read_file("api_spec.txt").
-Use the ROUTING_TABLE to identify which endpoints your test cases need (based on the
-input types from the initial message). Then:
-- If PYTHON_EXAMPLES has code for those specific endpoints → copy and adapt the patterns
-- If no Python examples exist (only curl, JS, or nothing) → write from the endpoint
-  spec (URL, method, headers, body format) in the ENDPOINTS section
-- If api_spec.txt is MISSING info for endpoints you need (no URL, no request format,
-  no auth details) → use ask_research or web_search to fill the gap BEFORE writing code.
-  Do NOT guess and debug later — research first, code second.
-- NEVER write API calls from training data memory — always from api_spec.txt or fresh research
+**THE CRITICAL RULE: WRITE harness.py BEFORE ANY INSPECTION SCRIPTS.** Once
+api_spec.txt exists, your VERY NEXT write_file MUST be harness.py. Do NOT write
+`inspect_sdk.py`, `check_*.py`, `explore_*.py`, or any script that prints SDK
+methods/signatures. That introspection wastes 4-6 turns before a single API call,
+and the information you can extract statically is almost always wrong anyway (SDK
+methods accept keyword args, have hidden required params, or have version-specific
+signatures). A live harness.run() failing with a real AttributeError or TypeError
+is worth 10 introspection scripts.
+
+**SEQUENCE — follow in order, no detours:**
+
+1. **READ** api_spec.txt — locate PYTHON_EXAMPLES for your chosen endpoint
+2. **WRITE** harness.py — COPY the PYTHON_EXAMPLE pattern and adapt to the run()
+   contract. If no Python example exists, write from ENDPOINTS + AUTH_HEADER + request
+   format. Use `requests` or the provider SDK exactly as the docs show. Do NOT
+   second-guess method names from training memory — the spec is the truth.
+3. **WRITE** requirements.txt — list the pip deps (e.g., `requests`, `elevenlabs`)
+4. **RUN** `pip install -r requirements.txt`
+5. **RUN** `python smoke_test.py`
+6. **If smoke fails**: read the error → read_file("api_spec.txt") to check your
+   assumption → patch_file the specific broken line → re-run. ONLY NOW is SDK
+   introspection allowed, and ONLY if the error message is opaque (e.g.,
+   "TypeError: X() missing 1 required positional argument: 'Y'" where Y isn't in
+   the docs).
+
+**WHAT "ENOUGH INFO" MEANS.** If api_spec.txt has BASE_URL + AUTH_HEADER + one
+ENDPOINT with request format + INPUT_COMPATIBILITY, you have enough. Write harness.py.
+Missing DOC_MAP entries, missing RESPONSE_FORMAT details, or uncertainty about edge
+cases are NOT blockers — those get resolved by running the code, not researching.
+
+**WHEN api_spec.txt IS MISSING INFO for your endpoint:** do ONE targeted
+web_fetch (not web_search) of a specific doc URL, patch api_spec.txt with the
+result, then write harness.py. Never loop: no fetch → inspect → fetch → inspect
+cycle. At most one gap-fill fetch, then commit to code.
+
+**NEVER write API calls from training data memory** — always from api_spec.txt.
 
 **PRESERVE API ERROR RESPONSES.** When the API returns an error, ALWAYS include the
 response body in the error message — not just the status code. API providers return
@@ -949,24 +886,53 @@ Adapt the mock patches (Probe 1) if using httpx or a provider SDK
 instead of requests. The other five probes exercise the error-handling
 contract above and don't depend on the HTTP library.
 
-## ERROR RECOVERY — Reason About Root Cause
+## ERROR RECOVERY — Root-Cause First, DOC_MAP-Targeted Research
 
 <reason_about_errors>
-When a test fails, do NOT follow a recipe. THINK:
+When a test fails, do NOT patch the symptom. Every fix MUST be preceded by
+reasoning:
 
-1. READ the full error message. What is it actually telling you?
-2. What ASSUMPTION did you make that might be wrong?
-   - Wrong endpoint URL? → read_file("api_spec.txt") to verify
-   - Wrong auth format? → read_file("api_spec.txt") to check exact header
-   - Wrong request format? → the API may expect data= not json=, or files= not data=
+1. **READ** the full error message. What is it actually telling you?
+2. **IDENTIFY YOUR ASSUMPTION** — which line of code made it, and why?
+   - Wrong endpoint URL? → read_file("api_spec.txt") § ENDPOINTS
+   - Wrong auth format? → read_file("api_spec.txt") § AUTH_HEADER
+   - Wrong request format? → read_file("api_spec.txt") § REQUEST_FORMAT
+     (the API may expect data= not json=, or files= not data=)
    - Wrong platform? → if the service has multiple platforms (legacy vs new),
-     is your API key for the platform you're targeting? Check the registry notes.
-3. VERIFY your assumption against the docs BEFORE attempting a fix.
-4. Fix with patch_file — change ONLY the broken part.
-5. If the same error repeats after a fix, your APPROACH is wrong, not the details.
-   Use ask_research to re-verify your fundamental assumption.
-6. If truly unfixable (expired credentials, deactivated account) → signal HARNESS_FAILED.
+     is your API key for the platform you're targeting?
+3. **CHECK api_spec.txt FIRST** — if the spec has the answer, patch_file and retry.
+   If the spec is SILENT on the specific field that errored, that's the gap.
+4. **DOC_MAP-TARGETED RESEARCH** — before any broad web_search, look at the
+   DOC_MAP section of api_spec.txt. Each entry is `URL -- one-line description`.
+   Find the URL whose description best matches your gap. Then:
+   - `web_fetch(<that specific URL>)` — targeted, ONE fetch
+   - Only if DOC_MAP has no match → `ask_research(<specific question>)` with a
+     concrete question ("what's the EXACT `Content-Type` for ${endpoint}?",
+     not "how does this API work?")
+5. **Patch, retry, observe**. If the same error category repeats ≥3 times,
+   your APPROACH is wrong — not the details. Pivot: different endpoint, SDK
+   instead of raw requests, or different authentication mechanism.
+6. **Truly unfixable** (expired credentials, deactivated account, API turned
+   off) → signal HARNESS_FAILED with a specific reason.
 </reason_about_errors>
+
+<root_cause_before_patch>
+Whenever the reassessment system injects a "STRATEGIC REASSESSMENT" message,
+your NEXT emission MUST start with a `<root_cause_analysis>` block:
+
+```
+<root_cause_analysis>
+1. Error: <paste the actual error text, not a summary>
+2. My assumption: <the line of harness.py that triggered it + what I assumed>
+3. api_spec.txt says: <quote the relevant section, or "spec is silent">
+4. DOC_MAP URL that covers this: <URL or "none found — need ask_research">
+5. Fix plan: <1 sentence — which line changes, to what>
+</root_cause_analysis>
+```
+
+Then call patch_file / ask_research / run_code as the plan dictates. The
+analysis block is required — without it, symptom-patching spirals kick in.
+</root_cause_before_patch>
 
 <be_resourceful>
 When external resources fail (sample URLs return 404, CDN links are expired):
@@ -1038,11 +1004,17 @@ WEB_FETCH_TOOL = {
     "type": "web_fetch_20250910",
     "name": "web_fetch",
     "max_uses": 5,     # Docs page + specific endpoint + auth/SDK + homepage + follow link
-    "max_content_tokens": 15000,  # Limit content per page to prevent context explosion.
-    # 15K tokens (~60K chars) is enough for API endpoint details, auth format,
-    # and code examples. Full pages can be 50K+ tokens which stays in context
-    # for ALL subsequent turns at $0.60/turn. Claude Code uses 100K char limit +
-    # disk persistence; we use server-side truncation at the source.
+    "max_content_tokens": 10000,  # Limit content per page to prevent context explosion.
+    # 10K tokens (~40K chars) is enough for API endpoint details, auth format,
+    # and code examples — real-run evidence: Phase 1 research successfully
+    # extracted full spec for OpenAI Realtime at this budget. Prior 15K
+    # budget combined with adaptive thinking + tool_use intent caused Turn 0
+    # stop_reason=max_tokens truncations on complex providers (ElevenLabs);
+    # tightening to 10K reserves output headroom for thinking blocks and
+    # the write_file emission. Full docs can be 50K+ tokens which stays in
+    # context for ALL subsequent turns at $0.60/turn. Claude Code uses
+    # 100K char limit + disk persistence; we use server-side truncation
+    # at the source.
 }
 
 WEB_SEARCH_TOOL = {
@@ -1784,7 +1756,7 @@ def _run_targeted_research(
                 messages=messages,
                 tools=[
                     {"type": "web_search_20250305", "name": "web_search", "max_uses": 2},
-                    {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 2, "max_content_tokens": 15000},
+                    {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 2, "max_content_tokens": 10000},
                 ],
                 thinking={"type": "adaptive"},
                 **_kwargs_research_sub,
@@ -2016,29 +1988,15 @@ def _build_initial_message(
             "  made-up persona.\n"
         )
 
-    # wss:// advisory — when the atlas indicates a WebSocket-only endpoint
-    # and we have no WebSocket pattern in api_patterns yet, tell the builder
-    # to surface it as a limitation in live_test.py's error path instead of
-    # silently building a REST facsimile. Without this, OpenAI Realtime gets
-    # tested as a chat-completion mock and the user sees a misleading pass rate.
-    # Detect via the candidate's `verified_api_docs_url` or `data_format_notes`
-    # referencing ws:// / wss://; the deep-verify atlas interaction_model will
-    # carry this too when present.
-    atlas_path = getattr(candidate, "api_spec_path", None)
+    # wss:// advisory — when docs URL hints at WebSocket/realtime, tell the
+    # builder to surface it as a limitation in live_test.py's error path
+    # instead of silently building a REST facsimile. Without this, OpenAI
+    # Realtime gets tested as a chat-completion mock and the user sees a
+    # misleading pass rate. Detect via URL heuristic on verified_api_docs_url.
     wss_flagged = False
-    try:
-        if atlas_path and Path(atlas_path).exists():
-            spec_text = Path(atlas_path).read_text(encoding="utf-8", errors="ignore")
-            if ("wss://" in spec_text.lower()
-                    or "websocket" in spec_text.lower()
-                    or "event_subscription: true" in spec_text.lower()):
-                wss_flagged = True
-    except Exception:  # noqa: BLE001
-        pass
-    if not wss_flagged:
-        docs_url = (candidate.verified_api_docs_url or "").lower()
-        if "realtime" in docs_url or "wss" in docs_url:
-            wss_flagged = True
+    docs_url = (candidate.verified_api_docs_url or "").lower()
+    if "realtime" in docs_url or "wss" in docs_url or "websocket" in docs_url:
+        wss_flagged = True
     if wss_flagged:
         test_case_forms += (
             "\n\n  **WebSocket/Realtime endpoint detected**\n"
@@ -2307,13 +2265,37 @@ def _build_single_harness(
     consecutive_errors = 0  # Track consecutive tool results with errors
     total_reassessments = 0  # Cumulative — never reset (drives escalation tiers)
     error_history = []  # List of (turn, category) for pattern detection
-    MAX_CONSECUTIVE_ERRORS = 2  # Force strategic reassessment after this many
+    # MAX_CONSECUTIVE_ERRORS: 3 (was 2) — one extra try before strategic
+    # pivot. Some first-fix attempts legitimately fail (stale docs, wrong
+    # version), and 2 triggered pivots on legitimately-fixable bugs.
+    MAX_CONSECUTIVE_ERRORS = 3
     build_start_time = time.monotonic()  # Wall-clock timeout tracking
-    MAX_BUILD_TIME_SECONDS = 480  # 8-minute per-candidate wall-clock limit (research + build + test)
+    # MAX_BUILD_TIME_SECONDS: 900 (was 480) — complex voice / WebSocket /
+    # multi-endpoint builds legitimately take 12-15 min. Under 8 min the
+    # loop was killing mid-Phase-2 debug cycles on ElevenLabs + similar.
+    MAX_BUILD_TIME_SECONDS = 900
     candidate_web_fetch_blocks = 0  # Cumulative recoverable web_fetch blocks across turns (Phase 1 hardening)
     smoke_ever_passed = False  # Track smoke test pass across ALL turns
     smoke_passed_at_turn = -1  # Which turn the smoke test first passed
-    MAX_TURNS_AFTER_SMOKE = 15  # Allow N turns after smoke for live test + integration test fixes
+    # MAX_TURNS_AFTER_SMOKE: 25 (was 15) — more debug room after the smoke
+    # test passes. Live API calls (especially voice / async-polling) often
+    # need 5-10 fix iterations for payload shape, auth headers, etc.
+    MAX_TURNS_AFTER_SMOKE = 25
+    # --- Adaptive progress tracking (Claude Code diminishing-returns pattern) ---
+    # `progress_ring`: last N turns' "did anything change" signal. A turn
+    # counts as PROGRESS if it wrote/patched a file OR received new server-
+    # tool content (web_fetch/search/advisor result). If N turns in a row
+    # show no progress, inject a wrap-up nudge. This replaces pure turn
+    # counting as the "stuck" signal — progress-based is more honest.
+    from puzzleeval.config import (
+        AGENT5_DIMINISHING_RETURNS_WINDOW,
+        AGENT5_MAX_REASSESSMENT_TIERS,
+    )
+    progress_ring: list[bool] = []
+    diminishing_nudge_sent = False
+    # `approaches_tried`: per-candidate list of pivots taken. Cited in
+    # reassessment prompt so the builder knows what NOT to try again.
+    approaches_tried: list[str] = []
 
     # ★ CORE: Multi-turn autonomous loop with verification gate
     # Guardrails: turn limit (AGENT5_MAX_TURNS) + wall-clock timeout.
@@ -3195,6 +3177,54 @@ def _build_single_harness(
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
 
+            # ── Adaptive progress tracking (Claude Code diminishing-returns) ──
+            # A turn "made progress" if: (a) it wrote/patched a file, OR
+            # (b) it got a server-tool result (web_fetch/search/advisor).
+            # Pure text/thinking turns don't advance state, so they don't
+            # count. This is the core signal for "stuck" — independent of
+            # turn count.
+            turn_made_progress = False
+            for block in response.content:
+                if getattr(block, "type", None) == "tool_use":
+                    name = getattr(block, "name", "") or ""
+                    if name in ("write_file", "patch_file"):
+                        turn_made_progress = True
+                        break
+                if getattr(block, "type", None) == "server_tool_use":
+                    turn_made_progress = True
+                    break
+            progress_ring.append(turn_made_progress)
+            if len(progress_ring) > AGENT5_DIMINISHING_RETURNS_WINDOW:
+                progress_ring.pop(0)
+            # If N consecutive no-progress turns AND we have smoke passing,
+            # inject a wrap-up nudge (once) — the builder should commit to
+            # HARNESS_COMPLETE or pivot. This is SOFT — it doesn't break
+            # the loop, just tells the agent it's spinning.
+            if (
+                len(progress_ring) >= AGENT5_DIMINISHING_RETURNS_WINDOW
+                and not any(progress_ring)
+                and not diminishing_nudge_sent
+                and smoke_ever_passed
+            ):
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"## DIMINISHING-RETURNS DETECTED\n\n"
+                        f"The last {AGENT5_DIMINISHING_RETURNS_WINDOW} turns produced no code "
+                        f"changes and no new research findings. Smoke test has passed. "
+                        f"Either signal HARNESS_COMPLETE if the live test is passing, OR "
+                        f"identify the specific blocker with a `<root_cause_analysis>` block "
+                        f"and act on it. Don't keep thinking — either act or commit.\n"
+                    ),
+                })
+                diminishing_nudge_sent = True
+                logger.info(
+                    f"Diminishing-returns nudge sent for {candidate.name} at turn {turn}",
+                    extra={"operation": "diminishing_returns_nudge",
+                           "trace_id": trace_id,
+                           "candidate_name": candidate.name},
+                )
+
             # ── Force completion after smoke + live fix attempts ──
             # If smoke passed but agent is still trying to fix live test
             # after MAX_TURNS_AFTER_SMOKE turns, stop and fail.
@@ -3209,7 +3239,19 @@ def _build_single_harness(
                 verification_passed = True
                 break
 
-            # If stuck in an error loop, force escalating reassessment
+            # If stuck in an error loop, force escalating reassessment.
+            # Hard cap on reassessment tiers — after N escalations without
+            # recovery, accept defeat and emit FailedHarness cleanly.
+            if total_reassessments >= AGENT5_MAX_REASSESSMENT_TIERS:
+                logger.warning(
+                    f"Agent 5: max reassessment tiers ({AGENT5_MAX_REASSESSMENT_TIERS}) "
+                    f"reached for {candidate.name} — accepting failure cleanly",
+                    extra={"operation": "reassessment_cap_reached",
+                           "trace_id": trace_id,
+                           "candidate_name": candidate.name,
+                           "approaches_tried": approaches_tried},
+                )
+                break
             if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
                 total_reassessments += 1
                 last_errors = all_results_text[:500]
@@ -3226,25 +3268,45 @@ def _build_single_harness(
                             f"\n**PATTERN DETECTED:** The same '{cat_label}' error has occurred "
                             f"3+ times. This strongly suggests your fundamental assumption about "
                             f"the {cat_label} is WRONG — not the details. "
-                            f"Use `ask_research` to verify it.\n"
+                            f"Use `ask_research` to verify it — but read the DOC_MAP in api_spec.txt "
+                            f"FIRST and target the specific doc URL that covers '{cat_label}'.\n"
                         )
+                # Record this reassessment as an "approach tried" so the
+                # next tier's prompt can cite what NOT to repeat.
+                approaches_tried.append(
+                    f"tier_{total_reassessments}_{recent_cats[-1] if error_history else 'unknown'}"
+                )
+                approaches_summary = (
+                    f"\n**Approaches already attempted (do NOT repeat):**\n"
+                    + "\n".join(f"  - {a}" for a in approaches_tried[-5:])
+                    if approaches_tried else ""
+                )
 
-                # Escalating tiers based on cumulative reassessments
+                # Escalating tiers based on cumulative reassessments.
+                # Each tier REQUIRES the builder to first emit a
+                # <root_cause_analysis> block — symptom-patching without
+                # root-cause reasoning is what causes the spirals we want
+                # to break. The block must cite api_spec.txt evidence.
+                root_cause_requirement = (
+                    "\n**REQUIRED BEFORE ANY patch_file / write_file:** emit a "
+                    "`<root_cause_analysis>` block answering:\n"
+                    "  1. What exactly failed (the error message, not a summary)\n"
+                    "  2. What assumption did I make in the code? (cite the line)\n"
+                    "  3. What does api_spec.txt say about this? (cite the section — "
+                    "AUTH_HEADER / ENDPOINTS / REQUEST_FORMAT / PYTHON_EXAMPLES / DOC_MAP)\n"
+                    "  4. Which DOC_MAP URL would resolve this? (before ask_research)\n"
+                    "  5. What's the specific fix? (1-sentence plan)\n"
+                    "If the spec doesn't answer #3, that's the gap — use ask_research with the "
+                    "specific DOC_MAP URL if you identified one.\n"
+                )
                 if total_reassessments == 1:
-                    # Tier 1: Fix the specific issue
+                    # Tier 1: Fix the specific issue (root-cause-first)
                     reassessment = (
-                        f"\n\n## STRATEGIC REASSESSMENT (Tier 1)\n\n"
+                        f"\n\n## STRATEGIC REASSESSMENT (Tier 1 — root-cause it)\n\n"
                         f"You have hit errors for {consecutive_errors} consecutive turns.\n"
-                        f"**Last error:** {last_errors[:300]}\n\n"
-                        f"Compare your code against the docs:\n"
-                        f"1. `read_file('harness.py')` — check URL, auth, request format\n"
-                        f"2. `read_file('api_spec.txt')` — check what docs say\n"
-                        f"3. Fix the SPECIFIC mismatch with `patch_file`\n\n"
-                        f"**Common trap:** If the API says 'missing field/file/parameter' but your "
-                        f"code IS sending it, the REQUEST FORMAT is wrong — not the data. Check: "
-                        f"are you using the right `requests` parameter? (json= vs data= vs files= "
-                        f"vs params=). Use `ask_research` to find the exact format from the official "
-                        f"docs or OpenAPI spec if unsure.\n"
+                        f"**Last error:** {last_errors[:300]}\n"
+                        + root_cause_requirement
+                        + approaches_summary
                         + pattern_hint
                     )
                 elif total_reassessments == 2:
@@ -3255,20 +3317,24 @@ def _build_single_harness(
                         f"**Last error:** {last_errors[:300]}\n\n"
                         f"Your APPROACH may be wrong — not just the details. The endpoint URL, "
                         f"API version, or platform may have changed since the research was done.\n\n"
-                        f"**REQUIRED ACTION:** Use `ask_research` to verify your fundamental assumption:\n"
-                        f"  `ask_research('What is the current API endpoint for {candidate.name}? "
-                        f"Has the company migrated to a new platform or domain?')`\n\n"
-                        f"Do NOT try another variation of the same fix. Research first.\n"
+                        + root_cause_requirement
+                        + approaches_summary
+                        + f"\n**REQUIRED ACTION:** Before ANY more patches, use `ask_research` to "
+                          f"verify your fundamental assumption. Use a DOC_MAP URL from "
+                          f"api_spec.txt as the ground-truth source if available — don't do broad "
+                          f"searching.\n"
                         + pattern_hint
                     )
                 else:
-                    # Tier 3: Structured pivot — three different approaches required
+                    # Tier 3+: Structured pivot — three different approaches required
                     from puzzleeval.api_patterns import STRUCTURED_PIVOT_PROMPT
                     reassessment = (
-                        f"\n\n## STRATEGIC REASSESSMENT (Tier 3 — STRUCTURED PIVOT)\n\n"
+                        f"\n\n## STRATEGIC REASSESSMENT (Tier {total_reassessments} — STRUCTURED PIVOT)\n\n"
                         f"You have been stuck for {total_reassessments} reassessment cycles "
                         f"on this harness. Variation-of-the-same-approach has not worked.\n\n"
                         f"**Last error:** {last_errors[:300]}\n"
+                        + root_cause_requirement
+                        + approaches_summary
                         + pattern_hint
                         + "\n"
                         + STRUCTURED_PIVOT_PROMPT
@@ -4608,31 +4674,113 @@ def run_implement_test_env_agent(
     # [logging]
     logger = get_logger("agent_5_implement")
 
-    # Select top candidates, prioritizing those with credentials.
-    # Candidates with credentials can be fully validated (smoke + live + integration).
-    # Candidates without credentials can only pass smoke test — less valuable.
-    # Within each group, sort by user-fit score (relevance_score).
+    # ── Credential-gated candidate selection ──
+    #
+    # Only test candidates we can actually build + call: those that either
+    # (a) have a registered credential in provider_registry.json, or
+    # (b) have auth_method="no_auth" (rare — mostly free public APIs).
+    #
+    # Non-credentialed candidates waste Agent 5's budget — the build loop
+    # spends 10+ turns producing harness code that then can't authenticate
+    # against the real API. The harness appears "built" but live_test
+    # fails, the candidate shows 0% pass rate, and the user learns
+    # nothing about the candidate's actual quality — only that we didn't
+    # have a key. Filter them out so every successful build produces real
+    # test data on the real API.
+    #
+    # Fallback when ZERO credentialed candidates survive: surface zero
+    # harnesses and an explicit advisory. This is cleaner than pretending
+    # to test providers whose keys we don't have.
     all_candidates = input_data.validated_candidates
 
-    # Determine which candidates have credentials
-    cred_providers = set()
+    # Determine which candidates have credentials.
+    # Two sources (union):
+    #   1. input_data.provider_credentials — whatever the caller passed in.
+    #   2. provider_registry.json — the persistent local registry.
+    # Registry lookups use substring matching so "OpenAI Realtime API" and
+    # "OpenAI" both match the registry's "openai" entry.
+    cred_providers: set[str] = set()
     if input_data.provider_credentials:
-        cred_providers = set(input_data.provider_credentials.keys())
+        cred_providers = {k.lower() for k in input_data.provider_credentials.keys()}
+
+    # Pull the registry once; used by _has_credentials below.
+    _registry_providers: set[str] = set()
+    try:
+        from puzzleeval.provider_registry import load_registry
+        _reg = load_registry()
+        _registry_providers = {k.lower() for k in _reg.providers.keys()}
+    except Exception as _exc:  # noqa: BLE001
+        logger.warning(
+            "provider_registry load failed during candidate filter: %s",
+            _exc,
+            extra={"operation": "agent5_registry_load_failed", "trace_id": input_data.trace_id},
+        )
 
     def _has_credentials(c: ScreenedCandidate) -> bool:
-        if not cred_providers:
-            return False
-        norm_provider = _normalize(c.provider)
-        norm_name = _normalize(c.name)
-        return norm_provider in cred_providers or norm_name in cred_providers
+        # no_auth candidates don't need a key.
+        if (getattr(c, "auth_method", "") or "").lower() == "no_auth":
+            return True
+        norm_provider = _normalize(c.provider or "")
+        norm_name = _normalize(c.name or "")
+        # Exact match in provider_credentials (case-insensitive).
+        if cred_providers and (
+            norm_provider in cred_providers or norm_name in cred_providers
+        ):
+            return True
+        # Substring match in registry keys (matches "openai realtime" → "openai").
+        for reg_key in _registry_providers:
+            if (
+                reg_key in norm_provider or norm_provider in reg_key
+                or reg_key in norm_name or norm_name in reg_key
+            ):
+                return True
+        return False
 
-    # Sort: credentials first (True > False), then by score descending
-    sorted_candidates = sorted(
-        all_candidates,
-        key=lambda c: (_has_credentials(c), c.relevance_score),
-        reverse=True,
-    )
-    candidates = sorted_candidates[:AGENT5_MAX_CANDIDATES]
+    credentialed = [c for c in all_candidates if _has_credentials(c)]
+    uncredentialed = [c for c in all_candidates if not _has_credentials(c)]
+
+    if credentialed:
+        # Happy path — rank the credentialed pool by relevance_score and
+        # take the top AGENT5_MAX_CANDIDATES.
+        sorted_candidates = sorted(
+            credentialed,
+            key=lambda c: c.relevance_score,
+            reverse=True,
+        )
+        candidates = sorted_candidates[:AGENT5_MAX_CANDIDATES]
+        if uncredentialed:
+            logger.info(
+                "Filtered out %d candidates without credentials — registry "
+                "holds keys for %d / %d candidates. Dropped: %s",
+                len(uncredentialed), len(credentialed), len(all_candidates),
+                [c.name for c in uncredentialed],
+                extra={
+                    "operation": "agent5_credential_filter",
+                    "trace_id": input_data.trace_id,
+                    "dropped_uncredentialed": [c.name for c in uncredentialed],
+                    "kept_credentialed": [c.name for c in credentialed],
+                },
+            )
+    else:
+        # No candidate has credentials. Rather than silently testing
+        # harnesses that are guaranteed to fail auth, surface zero
+        # candidates and let Agent 5's empty-candidates path produce a
+        # clean coverage gap advisory. The frontend's results view
+        # renders this with a "no credentials configured for any
+        # verified candidate — add keys via provider_registry.json"
+        # message.
+        logger.warning(
+            "Zero candidates have registered credentials — skipping Agent 5 "
+            "builds entirely. Candidates: %s",
+            [c.name for c in all_candidates],
+            extra={
+                "operation": "agent5_no_credentials_skip",
+                "trace_id": input_data.trace_id,
+                "all_candidates": [c.name for c in all_candidates],
+                "registry_providers": sorted(_registry_providers),
+            },
+        )
+        candidates = []
 
     # Emit the authoritative selection — this is the ONLY place that decides which candidates get built
     if progress_callback:
@@ -4661,7 +4809,17 @@ def run_implement_test_env_agent(
     # ======================================================================
     # Create sandbox directories
     # ======================================================================
-    harness_base = Path("runs") / input_data.trace_id / "harnesses"
+    # Resolve to an ABSOLUTE path. Downstream: voice/ audio files are stored
+    # with this prefix, threaded through TestCaseResult.audio_paths, and then
+    # served by the backend /runs/audio route. If harness_base is RELATIVE
+    # (e.g., the literal string "runs/..."), Python still creates the dir
+    # correctly from the current cwd, but the serialized path strings go out
+    # to the frontend as `runs\<trace>\...` (Windows backslashes, relative).
+    # The backend audio route's containment check then fails to resolve the
+    # path against its allowed roots — every <audio> tag 404s silently.
+    # Resolving here gives every saved audio artifact an absolute path with
+    # the OS-native separator, so the route works without per-caller fixups.
+    harness_base = (Path("runs") / input_data.trace_id / "harnesses").resolve()
     harness_base.mkdir(parents=True, exist_ok=True)
 
     # ======================================================================
@@ -4714,6 +4872,11 @@ def run_implement_test_env_agent(
             slug = _candidate_slug(candidate.name)
             sandbox_dir = harness_base / slug
             sandbox_dir.mkdir(parents=True, exist_ok=True)
+
+            # Architecture note: Agent 4 no longer writes an atlas. Agent 5
+            # does its own Phase-1 research (web_search + web_fetch) and
+            # writes its own api_spec.txt into the sandbox. See split
+            # decision in CLAUDE.md NEW-AI.
 
             logger.info(f"Submitting build for: {candidate.name}", extra={
                 "operation": "harness_build_submit",

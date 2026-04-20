@@ -65,8 +65,20 @@ def _make_user_understanding() -> UserUnderstandingOutput:
     )
 
 
-def _make_screened_candidate(name: str = "Google Document AI") -> ScreenedCandidate:
-    """Create a fully populated ScreenedCandidate."""
+def _make_screened_candidate(
+    name: str = "Google Document AI",
+    *,
+    auth_method: str = "no_auth",
+) -> ScreenedCandidate:
+    """Create a fully populated ScreenedCandidate.
+
+    ``auth_method`` defaults to ``"no_auth"`` so the Agent 5 credential
+    filter (landed in the "only test providers we have keys for" pass)
+    lets the test candidate through without having to seed a mock
+    provider_registry. Tests that specifically exercise the credential
+    path pass ``auth_method="api_key"`` and either inject
+    ``provider_credentials`` into Agent5Input or add a registry shim.
+    """
     return ScreenedCandidate(
         name=name,
         provider="Google",
@@ -79,7 +91,7 @@ def _make_screened_candidate(name: str = "Google Document AI") -> ScreenedCandid
         relevant_subtasks=["Extract structured data from invoice photos"],
         source="https://cloud.google.com/document-ai",
         verified_api_docs_url="https://cloud.google.com/document-ai/docs/reference/rest",
-        auth_method="api_key",
+        auth_method=auth_method,
         api_access_method="free_tier",
         confirmed_capabilities=["document OCR", "invoice parsing", "table extraction"],
         rate_limit_info="1000 requests per minute",

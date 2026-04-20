@@ -601,6 +601,28 @@ class UserUnderstandingOutput(BaseModel):
     # Each SubTask has its own requires_test_files and test_file_description.
     # This allows mixed evaluations (e.g., OCR needs files + chatbot is text-only).
 
+    # ── Explicit-candidate capture ──
+    # When the user says "compare A vs B" or "I want to test X", we MUST
+    # make sure those exact providers end up in the candidate pool — even
+    # if Agent 2's web search doesn't surface them (brand ambiguity,
+    # different naming, zero-result searches for new/niche APIs). Without
+    # this, the pipeline silently tests random adjacent products instead
+    # of the ones the user asked about. Captured by Agent 1 and
+    # auto-injected into Agent 2's candidate list before the selection
+    # pause, via `inject_explicit_candidates` in research.py.
+    explicit_candidates: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Provider names the user EXPLICITLY mentioned as ones they want "
+            "tested (e.g. 'OpenAI', 'ElevenLabs', 'Stripe'). Parsed from "
+            "phrases like 'compare A vs B', 'test X', 'use Y', 'consider Z'. "
+            "Agent 2 auto-injects these with source='user_explicit' and "
+            "relevance_score=0.95 so they ALWAYS appear in the selection "
+            "pool regardless of whether web search surfaced them. Empty "
+            "list when the user didn't name specific providers."
+        )
+    )
+
 
 class InfoStatus(BaseModel):
     """Tracks what information has been collected vs what's still needed."""

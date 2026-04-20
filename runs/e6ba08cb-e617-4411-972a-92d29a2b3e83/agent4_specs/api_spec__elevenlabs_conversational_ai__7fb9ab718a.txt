@@ -1,0 +1,425 @@
+Now I have sufficient information from the docs, websocket page, pricing, and SDK to build the complete spec. Let me compile everything.
+
+---
+
+## api_spec.txt
+
+```
+SERVICE: ElevenLabs Conversational AI (ElevenAgents)
+BASE_URL: https://api.elevenlabs.io/v1
+AUTH_HEADER: xi-api-key: {api_key}
+
+ENDPOINTS:
+  # ─── Core Conversation (voice agent runtime) ───
+  - method: WSS
+    path: wss://api.elevenlabs.io/v1/convai/conversation?agent_id={agent_id}
+    description: Open a real-time WebSocket voice conversation with a deployed agent. Send audio chunks; receive transcript events, audio responses, and control events.
+    request_format: WebSocket binary/JSON. After open, send {"type":"conversation_initiation_client_data"} then stream user_audio_chunk payloads (base64 PCM).
+    python_request_param: websocket  # Python SDK wraps this via Conversation.start_session()
+    response_format: JSON events: user_transcript, agent_response, audio (base64 audio), interruption, ping/pong
+
+  - method: GET
+    path: /v1/convai/conversation/get-signed-url
+    description: Obtain a short-lived signed WebSocket URL for private/authenticated agents (server-side call, hides API key from client)
+    request_format: query param agent_id={agent_id}
+    python_request_param: params=
+    response_format: JSON {"signed_url": "wss://...?agent_id=...&token=..."}
+
+  # ─── Agent Management (REST) ───
+  - method: POST
+    path: /v1/convai/agents
+    description: Create a new conversational AI agent with configuration (system prompt, voice, LLM, tools, knowledge base)
+    request_format: JSON body with agent configuration
+    python_request_param: json=
+    response_format: JSON with agent_id and full config
+
+  - method: GET
+    path: /v1/convai/agents/{agent_id}
+    description: Retrieve configuration for a specific agent
+    request_format: path parameter agent_id
+    python_request_param: params=  # path param only
+    response_format: JSON agent configuration object
+
+  - method: PATCH
+    path: /v1/convai/agents/{agent_id}
+    description: Update agent configuration (voice, system prompt, LLM, tools, etc.)
+    request_format: JSON body with fields to update
+    python_request_param: json=
+    response_format: JSON updated agent configuration
+
+  - method: DELETE
+    path: /v1/convai/agents/{agent_id}
+    description: Delete an agent
+    request_format: path parameter
+    python_request_param: n/a
+    response_format: 204 No Content
+
+  - method: GET
+    path: /v1/convai/agents
+    description: List all agents in the workspace
+    request_format: optional query params (cursor, page_size)
+    python_request_param: params=
+    response_format: JSON array of agent summary objects with pagination cursor
+
+  # ─── Conversation History ───
+  - method: GET
+    path: /v1/convai/conversations
+    description: List conversations (call history) with optional agent_id filter
+    request_format: query params: agent_id (optional), cursor, page_size
+    python_request_param: params=
+    response_format: JSON array of conversation summaries
+
+  - method: GET
+    path: /v1/convai/conversations/{conversation_id}
+    description: Retrieve full conversation details including transcript, analysis results, and collected data
+    request_format: path parameter conversation_id
+    python_request_param: params=
+    response_format: JSON with transcript, metadata, analysis, data_collection results
+
+  - method: DELETE
+    path: /v1/convai/conversations/{conversation_id}
+    description: Delete a conversation and its associated data
+    request_format: path parameter
+    python_request_param: n/a
+    response_format: 204 No Content
+
+  - method: GET
+    path: /v1/convai/conversations/{conversation_id}/audio
+    description: Download the audio recording of a conversation
+    request_format: path parameter
+    python_request_param: n/a
+    response_format: audio/mpeg binary
+
+  # ─── Knowledge Base ───
+  - method: POST
+    path: /v1/convai/knowledge-base
+    description: Upload documents/URLs to create knowledge base entries for RAG-enabled agents
+    request_format: multipart/form-data or JSON with URL
+    python_request_param: files= or json=
+    response_format: JSON with knowledge base document ID
+
+  - method: GET
+    path: /v1/convai/knowledge-base/{documentation_id}
+    description: Retrieve a knowledge base document
+    request_format: path parameter
+    python_request_param: params=
+    response_format: JSON knowledge base document metadata
+
+  - method: DELETE
+    path: /v1/convai/knowledge-base/{documentation_id}
+    description: Delete a knowledge base document
+    request_format: path parameter
+    python_request_param: n/a
+    response_format: 204 No Content
+
+  # ─── Phone Numbers / Telephony ───
+  - method: POST
+    path: /v1/convai/phone-numbers
+    description: Import/register a phone number (Twilio or SIP) for agent telephony
+    request_format: JSON body with phone number details and Twilio/SIP credentials
+    python_request_param: json=
+    response_format: JSON phone number object with ID
+
+  - method: GET
+    path: /v1/convai/phone-numbers
+    description: List all registered phone numbers
+    request_format: none
+    python_request_param: params=
+    response_format: JSON array of phone number objects
+
+  - method: GET
+    path: /v1/convai/phone-numbers/{phone_number_id}
+    description: Get details of a specific phone number
+    request_format: path parameter
+    python_request_param: params=
+    response_format: JSON phone number object
+
+  - method: DELETE
+    path: /v1/convai/phone-numbers/{phone_number_id}
+    description: Remove a registered phone number
+    request_format: path parameter
+    python_request_param: n/a
+    response_format: 204 No Content
+
+  # ─── Batch Calling ───
+  - method: POST
+    path: /v1/convai/batch-calls
+    description: Trigger a batch of outbound calls from a phone number using a specified agent
+    request_format: JSON body with agent_id, phone_number_id, and list of recipients
+    python_request_param: json=
+    response_format: JSON batch call job object with batch_id
+
+  - method: GET
+    path: /v1/convai/batch-calls/{batch_id}
+    description: Get status/results of a batch calling job
+    request_format: path parameter
+    python_request_param: params=
+    response_format: JSON batch call status and per-call results
+
+  # ─── Tools ───
+  - method: POST
+    path: /v1/convai/tools
+    description: Create a server-side tool definition for agents to call during conversations
+    request_format: JSON body with tool name, description, parameters schema, and endpoint URL
+    python_request_param: json=
+    response_format: JSON tool object with tool_id
+
+  - method: GET
+    path: /v1/convai/tools
+    description: List all tools in the workspace
+    request_format: none
+    python_request_param: params=
+    response_format: JSON array of tool objects
+
+  # ─── Workspace / Users ───
+  - method: GET
+    path: /v1/convai/users
+    description: List end-users who have had conversations, queryable by external_id
+    request_format: query params: external_id, cursor, page_size
+    python_request_param: params=
+    response_format: JSON list of user objects
+
+  # ─── Widget Configuration ───
+  - method: GET
+    path: /v1/convai/widget/{agent_id}
+    description: Get embeddable widget configuration for an agent
+    request_format: path parameter
+    python_request_param: params=
+    response_format: JSON widget configuration
+
+  # ─── Analytics ───
+  - method: GET
+    path: /v1/convai/analytics/aggregate
+    description: Get aggregated conversation analytics for an agent over a time period
+    request_format: query params: agent_id, start_date, end_date
+    python_request_param: params=
+    response_format: JSON aggregated metrics (call volume, duration, success rates)
+
+RESPONSE_FORMAT: JSON. Conversation WebSocket events are JSON messages with a "type" field. REST management endpoints return JSON objects. Pagination uses cursor-based scheme (next_cursor in response body).
+
+SDK_PACKAGE: pip install elevenlabs
+
+ACCEPTED_INPUT_FORMATS: Real-time audio via WebSocket (base64-encoded PCM 16kHz mono); REST management uses JSON body. Phone/telephony accepts standard PSTN audio.
+
+PYTHON_EXAMPLES:
+  # Example 1: Start a real-time voice conversation using the Python SDK
+  from elevenlabs.client import ElevenLabs
+  from elevenlabs.conversational_ai.conversation import Conversation
+  from elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface
+
+  elevenlabs = ElevenLabs(api_key="YOUR_API_KEY")
+  audio_interface = DefaultAudioInterface()
+  conversation = Conversation(
+      client=elevenlabs,
+      agent_id="your-agent-id",
+      requires_auth=True,
+      audio_interface=audio_interface,
+  )
+  conversation.start_session()
+  # Conversation runs in background
+  conversation.end_session()
+
+  # Example 2: Create an agent via REST API
+  import requests
+  url = "https://api.elevenlabs.io/v1/convai/agents"
+  headers = {"xi-api-key": "YOUR_API_KEY", "Content-Type": "application/json"}
+  payload = {
+      "name": "Support Agent",
+      "conversation_config": {
+          "agent": {
+              "prompt": {
+                  "prompt": "You are a helpful support assistant.",
+              },
+              "first_message": "Hi! How can I help you today?",
+              "language": "en"
+          },
+          "tts": {
+              "voice_id": "JBFqnCBsd6RMkjVDRZzb"
+          }
+      }
+  }
+  response = requests.post(url, headers=headers, json=payload)
+  agent_id = response.json()["agent_id"]
+  print(f"Created agent: {agent_id}")
+
+  # Example 3: Get signed URL for browser-side client conversation
+  import requests
+  url = "https://api.elevenlabs.io/v1/convai/conversation/get-signed-url"
+  headers = {"xi-api-key": "YOUR_API_KEY"}
+  params = {"agent_id": "your-agent-id"}
+  response = requests.get(url, headers=headers, params=params)
+  signed_url = response.json()["signed_url"]
+  # Pass signed_url to frontend WebSocket client
+
+  # Example 4: List recent conversations
+  import requests
+  url = "https://api.elevenlabs.io/v1/convai/conversations"
+  headers = {"xi-api-key": "YOUR_API_KEY"}
+  params = {"agent_id": "your-agent-id", "page_size": 20}
+  response = requests.get(url, headers=headers, params=params)
+  print(response.json())
+
+OPENAPI_URL: not_found
+
+ACCESS_METHOD: free_tier
+SIGNUP_URL: https://elevenlabs.io/app/sign-up
+
+ROUTING_TABLE:
+  scope=step_1:
+    - endpoint: WSS wss://api.elevenlabs.io/v1/convai/conversation?agent_id={agent_id}  (primary -- real-time bidirectional voice WebSocket; the purpose-built interface for live voice agent conversations)
+    - endpoint: GET /v1/convai/conversation/get-signed-url  (fallback -- needed server-side to generate auth token for the WebSocket when agent requires_auth=True)
+    - input_channel: audio_content  # real-time PCM audio streamed base64 over WebSocket; Python SDK uses DefaultAudioInterface for mic capture
+
+USER_SELECTABLE_PARAMS:
+  - name: voice_id
+    allowed_values: any ElevenLabs voice ID string (5000+ voices, query GET /v1/voices)
+    affects: output_style, quality
+    default: "none" (must be set in agent config)
+  - name: model_id (TTS model for agent voice)
+    allowed_values: eleven_flash_v2_5 | eleven_flash_v2 | eleven_multilingual_v2 | eleven_v3
+    affects: quality, latency, cost
+    default: "eleven_flash_v2_5" (recommended for agents due to ~75ms latency)
+  - name: llm (language model for agent reasoning)
+    allowed_values: gpt-4o | gpt-4o-mini | claude-3-5-sonnet | gemini-1.5-pro | custom (via custom_llm_extra_body)
+    affects: quality, cost, latency
+    default: "gpt-4o-mini"
+  - name: language
+    allowed_values: ISO-639-1 language code, 70+ languages supported
+    affects: output_style
+    default: "en"
+  - name: stability (voice setting)
+    allowed_values: 0.0–1.0 float
+    affects: output_style (higher = more stable/monotone)
+    default: 0.5
+  - name: similarity_boost (voice setting)
+    allowed_values: 0.0–1.0 float
+    affects: output_style (higher = closer to original voice)
+    default: 0.75
+  - name: requires_auth
+    allowed_values: true | false
+    affects: output_shape (whether signed URL is required to connect)
+    default: false
+
+UPSTREAM_PROVIDER: self
+  # ElevenLabs uses its own TTS/STT models; LLM is user-configurable (GPT-4, Claude, Gemini, etc.)
+  # LLM upstream varies per agent config — not a fixed provider-level dependency
+
+INTERACTION_MODEL:
+  synchronous: false
+  async_polling: false
+  webhook_callback: true   # post-call webhooks deliver conversation summary/transcript when session ends
+  sse_streaming: false
+  batch_file: false
+  event_subscription: true  # WebSocket subscription delivers real-time events (audio, transcript, agent_response, interruption)
+  notes: "Primary interaction is WebSocket (event_subscription) for real-time voice. Post-call webhooks deliver async summaries. Batch Calling uses async_polling pattern (submit batch, poll for status). REST management endpoints are fully synchronous."
+
+SANDBOX:
+  sandbox_available: false
+  sandbox_base_url: n/a
+  sandbox_docs_url: n/a
+  notes: "No separate sandbox environment. Free-tier account IS the de-facto sandbox — create agents and test conversations at no cost up to free quota. No test-mode keys or mock endpoints documented."
+
+PRICING_BREAKDOWN:
+  source_url: https://elevenlabs.io/pricing/api
+  tiers:
+    - name: Free
+      monthly_cost_usd: 0
+      included_units: 10000
+      unit_name: TTS characters (agents consume TTS + STT)
+      overage_cost_per_unit_usd: n/a
+    - name: Starter
+      monthly_cost_usd: 5
+      included_units: 30000
+      unit_name: TTS characters
+      overage_cost_per_unit_usd: 0.30 per 1K chars (Flash)
+    - name: Creator
+      monthly_cost_usd: 22
+      included_units: 100000
+      unit_name: TTS characters
+      overage_cost_per_unit_usd: 0.24 per 1K chars (Flash)
+    - name: Pro
+      monthly_cost_usd: 99
+      included_units: 500000
+      unit_name: TTS characters
+      overage_cost_per_unit_usd: 0.18 per 1K chars (Flash)
+    - name: Scale
+      monthly_cost_usd: 330
+      included_units: 2000000
+      unit_name: TTS characters
+      overage_cost_per_unit_usd: 0.12 per 1K chars (Flash)
+    - name: Business
+      monthly_cost_usd: 1320
+      included_units: 11000000
+      unit_name: TTS characters
+      overage_cost_per_unit_usd: 0.12 per 1K chars (Flash)
+  notes: "Conversational AI agents are billed via TTS character consumption (agent speech output) + STT minute consumption (user audio input). Separate STT rates apply: $0.40/hr (Starter) to $0.22/hr (Business). Burst pricing supplement may apply during peak usage. Enterprise plans available with custom pricing, dedicated SLAs, HIPAA BAAs."
+  confidence: medium
+```
+
+---
+
+## PHASE 4C — SCOPE COVERAGE VERIFICATION
+
+**scope=step_1 (role=voice_agent):**
+- `WSS /v1/convai/conversation` — purpose-built real-time voice conversation endpoint. Directly serves the voice agent role.
+- Python SDK `Conversation` class wraps this WebSocket with mic input/output handling.
+- Status: **verified**
+
+---
+
+<atlas_completeness>
+endpoints_captured: 21
+endpoints_estimated_total: 25-30 (sidebar shows ~17 REST sections × ~2 endpoints avg; WebSocket is 1; some sections like Tests, MCP, Environment Variables, Twilio-specific not individually fetched)
+required_fields_populated: SERVICE, BASE_URL, AUTH_HEADER, ENDPOINTS, RESPONSE_FORMAT, SDK_PACKAGE, ACCEPTED_INPUT_FORMATS, PYTHON_EXAMPLES, ROUTING_TABLE, USER_SELECTABLE_PARAMS, UPSTREAM_PROVIDER, INTERACTION_MODEL, SANDBOX, PRICING_BREAKDOWN, ACCESS_METHOD, SIGNUP_URL
+required_fields_empty: OPENAPI_URL (not found — docs are Fern-generated SPA, no public openapi.json exposed)
+confidence: medium
+known_unknowns:
+  - "Exact per-minute pricing for Conversational AI agents (ElevenAgents tab on pricing page not rendered; pricing inferred from TTS/STT rates)"
+  - "Tests API endpoints (POST /v1/convai/agents/{id}/tests, etc.) — section listed in sidebar but not fetched"
+  - "MCP endpoints — new section in sidebar, details unknown"
+  - "Environment Variables API (/v1/convai/env-vars) — listed in sidebar, not fetched"
+  - "Twilio-specific REST endpoints (beyond WebSocket integration) — not fetched"
+  - "WhatsApp agent REST endpoints — not fetched"
+  - "LLM management endpoints — not fetched"
+  - "Full webhook payload schema for post-call webhooks — not fetched"
+</atlas_completeness>
+
+---
+
+```atlas
+{
+  "provider": "ElevenLabs",
+  "base_urls": ["https://api.elevenlabs.io/v1", "wss://api.elevenlabs.io/v1"],
+  "authentication": [
+    {
+      "mode": "api_key",
+      "header_name": "xi-api-key",
+      "format": "{api_key}",
+      "notes": "All REST endpoints require xi-api-key header. WebSocket for public agents uses ?agent_id= query param; private agents use signed URL from GET /v1/convai/conversation/get-signed-url."
+    }
+  ],
+  "endpoints": [
+    {
+      "method": "WSS",
+      "path": "wss://api.elevenlabs.io/v1/convai/conversation",
+      "purpose": "Real-time bidirectional voice conversation with a deployed conversational AI agent. Send PCM audio chunks, receive transcript events, TTS audio responses, and control events.",
+      "request_shape": "Query param: agent_id (required for public agents) OR use signed URL. After open: send {type:'conversation_initiation_client_data'} then stream {user_audio_chunk: base64_pcm}.",
+      "response_shape": "JSON events: {type:'user_transcript', user_transcription_event:{user_transcript}} | {type:'agent_response', agent_response_event:{agent_response}} | {type:'audio', audio_event:{audio_base_64, event_id, alignment}} | {type:'interruption'} | {type:'ping', ping_event:{event_id, ping_ms}}",
+      "python_example": "from elevenlabs.client import ElevenLabs\nfrom elevenlabs.conversational_ai.conversation import Conversation\nfrom elevenlabs.conversational_ai.default_audio_interface import DefaultAudioInterface\n\nelevenlabs = ElevenLabs(api_key='YOUR_API_KEY')\naudio_interface = DefaultAudioInterface()\nconversation = Conversation(\n    client=elevenlabs,\n    agent_id='your-agent-id',\n    requires_auth=True,\n    audio_interface=audio_interface,\n)\nconversation.start_session()\nconversation.end_session()",
+      "error_codes": [],
+      "auth_required": "api_key (via signed URL for private agents; none for public agents)",
+      "scope_hints": ["voice_agent", "real_time_conversation"],
+      "idempotency_support": "none",
+      "oauth_scopes": [],
+      "deprecated": false,
+      "replaced_by": "",
+      "retryable_errors": ["429", "500", "502", "503", "504"],
+      "doc_url": "https://elevenlabs.io/docs/eleven-agents/libraries/web-sockets"
+    },
+    {
+      "method": "GET",
+      "path": "/v1/convai/conversation/get-signed-url",
+      "purpose": "Generate a signed WebSocket URL for private or authenticated agents; call server-side to avoid exposing API key to browser clients.",
+      "request_shape": "Query param: agent_id (required)",
+      "response_shape": "200 -> {signed_url: 'wss://api.elevenlabs.io/v1/convai/conversation?agent_id=...&token=...'}",
+      "python_example": "import requests\nresp = requests.get('https://api.elevenlabs.io/v1/convai/conversation/get-signed-url', headers={'xi-api-key': 'KEY'},

@@ -1,0 +1,136 @@
+Good — search results confirm real docs at platform.openai.com. Now let me fetch the API reference page and pricing page in parallel.
+I now have comprehensive information from search snippets to compile the full spec. Let me compose the output.
+
+---
+
+## Phase 4A — Discovery ✅
+Real docs confirmed at `platform.openai.com/docs/guides/realtime` and `platform.openai.com/docs/api-reference/realtime`. Platform blocked direct fetches (Cloudflare) but search snippets returned full endpoint signatures, auth patterns, and code examples.
+
+## Phase 4B — Spec Extraction
+
+**REST endpoints (confirmed from snippets):**
+1. `POST /v1/realtime/client_secrets` — generate ephemeral keys (GA interface)
+2. `POST /v1/realtime/calls` — WebRTC SDP exchange
+
+**WebSocket connection (main interaction surface):**
+3. `WSS wss://api.openai.com/v1/realtime?model=<model>` — bidirectional event stream
+
+**Client events over WebSocket/WebRTC data channel:** `session.update`, `conversation.item.create`, `conversation.item.retrieve`, `conversation.item.truncate`, `conversation.item.delete`, `input_audio_buffer.append`, `input_audio_buffer.commit`, `input_audio_buffer.clear`, `response.create`, `response.cancel`
+
+## Phase 4C — Scope Coverage Verification
+
+- `step_1` (voice_agent): ✅ **VERIFIED** — `WSS /v1/realtime` is purpose-built for low-latency bidirectional audio voice agents. Multiple snippets confirm "One of the most common use cases for the Realtime API is building voice agents for speech-to-speech model interactions in the browser."
+
+## Phase 4D — Decision: **PASS**
+
+All PASS criteria met: docs confirmed (multiple endpoint signatures), self-service signup at platform.openai.com, step_1 verified, ROUTING_TABLE populated.
+
+---
+
+```
+SERVICE: OpenAI Realtime API
+BASE_URL: https://api.openai.com/v1 (REST); wss://api.openai.com/v1/realtime (WebSocket)
+AUTH_HEADER: "Authorization: Bearer {api_key}"
+
+ENDPOINTS:
+  - method: POST
+    path: /v1/realtime/client_secrets
+    description: Generate an ephemeral client secret (short-lived API key) to initialize a WebRTC or WebSocket connection from the client side. GA interface only.
+    request_format: application/json body with session config (type, model, audio.output.voice, modalities, instructions, turn_detection, tools, etc.)
+    python_request_param: json=
+    response_format: JSON with client_secret.value (ephemeral token string) and session metadata
+
+  - method: POST
+    path: /v1/realtime/calls
+    description: WebRTC SDP exchange — browser sends its SDP offer; API returns SDP answer to establish WebRTC peer connection. Requires ephemeral token in Authorization header. Response includes Location header with call_id for sideband WebSocket control.
+    request_format: raw SDP text body, Content-Type application/sdp
+    python_request_param: data=
+    response_format: SDP text (answer); Location header = unique call URL
+
+  - method: WSS
+    path: /v1/realtime
+    description: Main bidirectional WebSocket connection for Realtime sessions. Query param ?model= selects the model. All conversation turns, audio streaming, VAD, tool calling, and transcription happen over this connection via JSON events.
+    request_format: WebSocket upgrade; query params: model (required), call_id (optional for sideband sideband control)
+    python_request_param: N/A (WebSocket — use websocket-client or openai SDK)
+    response_format: Streaming JSON events (session.created, response.created, response.done, audio deltas, etc.)
+
+  # CLIENT EVENTS sent over WebSocket / WebRTC data channel (not HTTP methods):
+  # session.update — update session config (model, voice, instructions, modalities, turn_detection, tools)
+  # conversation.item.create — add message/function_call/function_call_output item to conversation
+  # conversation.item.retrieve — retrieve a specific item by ID
+  # conversation.item.truncate — truncate assistant audio at a specific millisecond
+  # conversation.item.delete — remove an item from conversation context
+  # input_audio_buffer.append — stream base64-encoded PCM16/G.711 audio bytes
+  # input_audio_buffer.commit — commit audio buffer to create user message item (manual VAD mode)
+  # input_audio_buffer.clear — clear pending audio bytes from buffer
+  # response.create — trigger model inference (with optional per-response overrides)
+  # response.cancel — cancel an in-progress response
+
+  # SERVER EVENTS received over WebSocket / WebRTC data channel:
+  # error, session.created, session.updated
+  # conversation.item.added, conversation.item.done, conversation.item.retrieved
+  # conversation.item.input_audio_transcription.completed/.delta/.segment/.failed
+  # conversation.item.truncated, conversation.item.deleted
+  # input_audio_buffer.committed, .cleared, .speech_started, .speech_stopped, .timeout_triggered, .dtmf_event_received
+  # output_audio_buffer.started, .stopped
+  # response.created, response.done
+  # response.output_item.added, response.output_item.done
+  # response.output_text.delta, response.output_audio.delta, response.output_audio_transcript.delta
+
+RESPONSE_FORMAT: |
+  REST endpoints: standard JSON.
+  WebSocket: streaming JSON events with "type" field identifying event class.
+  Audio deltas are base64-encoded PCM16 (default) or G.711.
+  response.done event contains full usage object with input_tokens, output_tokens (text and audio).
+
+SDK_PACKAGE: "pip install openai" (official OpenAI Python SDK); "pip install websocket-client" (for low-level WebSocket)
+
+ACCEPTED_INPUT_FORMATS: PCM16 audio (base64-encoded, 16-bit, 24kHz mono default), G.711 μ-law (g711_ulaw), G.711 A-law (g711_alaw), text (JSON events), image (via conversation.item.create with image content)
+
+PYTHON_EXAMPLES:
+  # Example 1: Generate ephemeral client secret (REST)
+  import requests
+  url = "https://api.openai.com/v1/realtime/client_secrets"
+  headers = {"Authorization": "Bearer YOUR_API_KEY", "Content-Type": "application/json"}
+  body = {
+      "session": {
+          "type": "realtime",
+          "model": "gpt-realtime",
+          "audio": {"output": {"voice": "marin"}},
+          "modalities": ["audio", "text"],
+          "instructions": "You are a helpful voice assistant."
+      }
+  }
+  response = requests.post(url, headers=headers, json=body)
+  ephemeral_key = response.json()["client_secret"]["value"]
+  print("Ephemeral key:", ephemeral_key)
+
+  # Example 2: WebSocket server-to-server connection (Python)
+  import os
+  import json
+  import websocket
+
+  OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+  url = "wss://api.openai.com/v1/realtime?model=gpt-realtime"
+  headers = ["Authorization: Bearer " + OPENAI_API_KEY]
+
+  def on_open(ws):
+      print("Connected to server.")
+      ws.send(json.dumps({
+          "type": "session.update",
+          "session": {
+              "type": "realtime",
+              "model": "gpt-realtime",
+              "instructions": "You are a helpful assistant.",
+              "modalities": ["audio", "text"],
+              "voice": "marin",
+              "turn_detection": {"type": "server_vad"}
+          }
+      }))
+      # Send a text input and ask for a response
+      ws.send(json.dumps({
+          "type": "conversation.item.create",
+          "item": {"type": "message", "role": "user",
+                   "content": [{"type": "input_text", "text": "Hello!"}]}
+      }))
+      ws.send(json

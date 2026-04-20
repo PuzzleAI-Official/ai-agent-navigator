@@ -105,6 +105,28 @@ If the user's first message gives you sub-tasks, domain, AND some optional info,
 - All-in-one vs modular preference (we always search both)
 - Anything you can reasonably infer
 
+## Explicit candidate capture
+
+When the user names SPECIFIC products/providers they want compared or tested ("Compare OpenAI's voice stack vs ElevenLabs", "Test Stripe and Square", "I want to use Mindee, Veryfi, and Nanonets"), you MUST capture those exact names in the `explicit_candidates` list.
+
+These names are auto-injected into the candidate pool before the selection pause — they ALWAYS appear alongside web-search results, even if Agent 2's search didn't surface them. Without this, a user who says "compare OpenAI vs ElevenLabs" ends up testing whichever random voice products Google returned first.
+
+Rules:
+- Capture the CANONICAL brand/product name ("OpenAI", "ElevenLabs", "Stripe", "Mindee", "Claude") — not the user's casual phrasing ("OpenAI's voice", "that receipt AI thing").
+- Strip qualifiers: "OpenAI Realtime API" → "OpenAI" is fine (Agent 2 will match on substring); "OpenAI" alone is also fine. Agent 2 canonicalizes.
+- Skip generic words: "the voice API", "that AI tool" → NOT an explicit candidate.
+- Empty list when the user described requirements without naming specific products.
+
+Examples:
+  User: "Compare OpenAI's voice stack vs ElevenLabs for a plumbing receptionist."
+  → explicit_candidates: ["OpenAI", "ElevenLabs"]
+
+  User: "I need invoice OCR, maybe Mindee or Veryfi or one of those."
+  → explicit_candidates: ["Mindee", "Veryfi"]
+
+  User: "Build me a chatbot for customer support."
+  → explicit_candidates: []
+
 ## Test Data Requirements (per sub-task)
 
 For EACH sub-task, set requires_test_files based on its nature:

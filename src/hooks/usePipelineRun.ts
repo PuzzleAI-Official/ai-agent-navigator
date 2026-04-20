@@ -48,6 +48,24 @@ const INITIAL_NODES: PipelineNodeState[] = [
 
 let activityCounter = 0;
 
+// Monotonic counter for message IDs.
+//
+// Earlier the hook used ``id: Date.now()`` as the React key for every
+// chat message it appended. With the new broadcast-history SSE bus, a
+// fresh subscriber receives multiple state-setting events (pipeline_started,
+// workflow_blueprint, test_data_sufficiency, coverage_gap, evaluation_report)
+// in the same tick — all Date.now() calls collide on the same ms. React
+// 18 then fires "Encountered two children with the same key" and SILENTLY
+// omits one of the duplicates, which was the root cause of
+// SelectionPanel never rendering: the stage-setting event landed in a
+// duplicate-key branch and React dropped it.
+//
+// A monotonic counter is O(1) and collision-free forever.
+let messageIdCounter = 1;
+function nextMessageId(): number {
+  return messageIdCounter++;
+}
+
 function makeActivity(
   agentId: string,
   type: ActivityEntry["type"],
@@ -273,7 +291,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           setMessages((prev) => [
             ...prev,
             {
-              id: Date.now(),
+              id: nextMessageId(),
               role: "assistant" as const,
               content: lines.join("\n\n"),
             },
@@ -295,7 +313,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
             setMessages((prev) => [
               ...prev,
               {
-                id: Date.now(),
+                id: nextMessageId(),
                 role: "assistant" as const,
                 content: `**Evaluation report ready.** ${candidateCount} candidate(s) tested, winner: **${winner}**. Open the results panel for the full breakdown.`,
               },
@@ -336,7 +354,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
             setMessages((prev) => [
               ...prev,
               {
-                id: Date.now(),
+                id: nextMessageId(),
                 role: "assistant" as const,
                 content: `**Test data sufficiency check:**\n${lines.join("\n")}${tail}`,
               },
@@ -369,7 +387,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
             setMessages((prev) => [
               ...prev,
               {
-                id: Date.now(),
+                id: nextMessageId(),
                 role: "assistant" as const,
                 content: `I've designed a ${bp.steps.length}-scope workflow:\n\n${stepSummary}${planNote}\n\nNow searching for the best AI solutions for each scope...`,
               },
@@ -700,7 +718,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           setMessages((prev) => [
             ...prev,
             {
-              id: Date.now(),
+              id: nextMessageId(),
               role: "assistant" as const,
               content: `Evaluation complete! ${(data.summary as string) || "Check the results panel for detailed scores."}`,
             },
@@ -713,7 +731,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           setMessages((prev) => [
             ...prev,
             {
-              id: Date.now(),
+              id: nextMessageId(),
               role: "assistant" as const,
               content: "Run cancelled. Partial results are shown in the panel.",
             },
@@ -728,7 +746,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           setMessages((prev) => [
             ...prev,
             {
-              id: Date.now(),
+              id: nextMessageId(),
               role: "assistant" as const,
               content: `Pipeline failed: ${(data.error as string) || "Unknown error"}`,
             },
@@ -736,6 +754,16 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           break;
 
         case "done":
+          // Terminal event — backend has closed the event bus. Call the
+          // subscribe cleanup so the EventSource shuts down cleanly
+          // instead of firing onerror → reconnect → onerror → reconnect
+          // in an infinite loop against a closed stream. That loop is
+          // what produces the persistent "Reconnecting to backend…"
+          // banner after the run completes (pipeline was done, but the
+          // EventSource kept flapping).
+          unsubscribeRef.current?.();
+          unsubscribeRef.current = null;
+          setSseStatus("closed");
           break;
       }
     },
@@ -764,7 +792,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
         }
 
         const userMessage: Message = {
-          id: Date.now(),
+          id: nextMessageId(),
           role: "user",
           content: text || `Uploaded ${pendingFiles.length} file(s)`,
           attachments: pendingFiles.map((f) => ({
@@ -801,7 +829,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
         setMessages((prev) => [
           ...prev,
           {
-            id: Date.now(),
+            id: nextMessageId(),
             role: "assistant",
             content: `Error: ${err instanceof Error ? err.message : "Something went wrong"}`,
           },
@@ -850,7 +878,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
         setMessages((prev) => [
           ...prev,
           {
-            id: Date.now(),
+            id: nextMessageId(),
             role: "assistant" as const,
             content: `Selection failed: ${err instanceof Error ? err.message : "Unknown error"}. Please try again.`,
           },

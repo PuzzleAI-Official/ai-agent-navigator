@@ -628,102 +628,24 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
     })
 
     # ──────────────────────────────────────────────────────────────────
-    # Phase 6.5 deep-verify path (Q1+Q2+Q3 closure):
-    #   - Provider-URL deduplication (multi-scope candidates share one verify)
-    #   - Cross-run memdir cache (skip re-research of recently-verified providers)
-    #   - Scope-aware coverage_confidence (per-candidate verified scopes)
-    #   - Populates new ScreenedCandidate fields (interaction_model,
-    #     user_selectable_params, upstream_provider, sandbox_*, api_spec_path)
+    # Agent 4's job (as of this pass): verify API existence. Fast.
     #
-    # When PUZZLEEVAL_AGENT4_DEEP_VERIFY_ENABLED=0 falls through to the
-    # legacy shallow per-candidate verification path below.
+    # Produces a ScreenedCandidate per candidate with the minimum Agent 5
+    # needs to start its own Phase-1 research:
+    #   - verified_api_docs_url (starting point)
+    #   - auth_method, api_access_method
+    #   - screening_notes
+    #
+    # NO atlas extraction, NO endpoint enumeration, NO cross-run caching.
+    # Agent 5 does its own research from scratch against these verified
+    # docs — which is the separation of concerns the user asked for:
+    # Agent 4 verifies, Agent 5 researches + builds. The earlier attempt
+    # to fit both jobs into Agent 4's deep-verify produced rich atlases
+    # that Agent 5 couldn't consume efficiently (wrong shape, too much
+    # context, missed the specific build-oriented details the builder
+    # needed). See the removed ``deep_verify_runner.py`` / ``provider_atlas.py``
+    # / ``deep_verify_prompt.py`` modules for the prior architecture.
     # ──────────────────────────────────────────────────────────────────
-    from puzzleeval.config import AGENT4_DEEP_VERIFY_ENABLED
-    if AGENT4_DEEP_VERIFY_ENABLED:
-        try:
-            from pathlib import Path as _DVPath
-            from puzzleeval.deep_verify_runner import run_deep_verify_pass
-            from puzzleeval.schemas import RejectedCandidate
-            scope_roles: dict[str, str] = {}
-            workflow = getattr(input_data.user_understanding, "workflow", None)
-            if workflow and getattr(workflow, "steps", None):
-                scope_roles = {s.id: s.role for s in workflow.steps}
-            sandbox_root = _DVPath("runs") / input_data.trace_id / "agent4_specs"
-            verified, rejected_candidates, telem = run_deep_verify_pass(
-                client=client,
-                candidates=candidates,
-                scope_roles=scope_roles,
-                trace_id=input_data.trace_id,
-                sandbox_root=sandbox_root,
-            )
-            logger.info("deep_verify pass complete", extra={
-                "operation": "agent4_deep_verify_complete",
-                "trace_id": input_data.trace_id,
-                **telem,
-            })
-            # Build the Agent4Result directly without going through the
-            # legacy structuring call. The deep-verify path produces
-            # ScreenedCandidate instances with all enrichment fields populated;
-            # we just need to assemble RejectedCandidate / FailedToVerify lists.
-            #
-            # Rejection details preserved from Phase 4D: telemetry["rejection_details"]
-            # maps candidate_name → {category, notes} parsed from the model's own
-            # REJECT_REASON + NOTES lines. Previously every rejection surfaced as
-            # a generic "docs_inaccessible" boilerplate — now the user sees
-            # enterprise_only / deprecated / no_api_access / no_public_docs as
-            # appropriate, with the model's actual notes.
-            rejection_details = telem.get("rejection_details", {}) if isinstance(telem, dict) else {}
-            rejected_list: list[RejectedCandidate] = []
-            for c in rejected_candidates:
-                detail = rejection_details.get(c.name, {})
-                category = detail.get("category", "no_public_docs")
-                notes = detail.get("notes", (
-                    "Deep-verify directed loop did not produce a PASS decision. "
-                    "The spec extraction did not emit a REJECT_REASON line, so the "
-                    "category defaults to no_public_docs. See agent4_specs/ for any "
-                    "partial spec emitted before rejection."
-                ))
-                rejected_list.append(RejectedCandidate(
-                    name=c.name,
-                    provider=c.provider,
-                    rejection_reason=f"Deep-verify REJECT: {category}",
-                    rejection_category=category,
-                    investigation_notes=notes,
-                ))
-            scope_selections: dict[str, list[str]] = {}
-            for sc in verified:
-                for sid in sc.covers_step_ids:
-                    scope_selections.setdefault(sid, []).append(sc.name)
-            return Agent4Result(
-                validated_candidates=verified,
-                rejected_candidates=rejected_list,
-                screening_summary=(
-                    f"Deep-verify: {len(verified)} candidates passed across "
-                    f"{telem['groups']} URL group(s) "
-                    f"({telem['cache_hits']} cache hits, "
-                    f"{telem['cache_misses']} fresh). "
-                    f"Cost: ${telem['total_cost_usd']:.2f}."
-                ),
-                total_candidates_screened=len(candidates),
-                cost_usd=round(telem["total_cost_usd"], 4),
-                web_fetch_blocks=telem["total_web_fetch_blocks"],
-                failed_to_verify=[],
-                scope_selections=scope_selections,
-            )
-        except Exception as exc:
-            # Defensive: if anything in the deep-verify path crashes, fall
-            # back to the legacy shallow verification rather than failing
-            # the whole pipeline. The frontend still gets results; the
-            # warning surfaces in logs for follow-up.
-            logger.warning(
-                "deep_verify pass failed; falling back to shallow verification",
-                extra={
-                    "operation": "agent4_deep_verify_fallback",
-                    "trace_id": input_data.trace_id,
-                    "error": str(exc),
-                    "error_type": type(exc).__name__,
-                },
-            )
 
     # ======================================================================
     # STEP 1: Per-Candidate Verification (N PARALLEL isolated API calls)

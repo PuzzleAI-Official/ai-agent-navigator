@@ -408,10 +408,10 @@ def _build_research_message(user_understanding: UserUnderstandingOutput) -> str:
     blueprint_section = _format_blueprint_section(user_understanding.workflow)
     scope_pool_instruction = _scope_pool_instruction(user_understanding.workflow)
 
-    # Atlas-cache hints: previously deep-verified providers for these
-    # capabilities. Empty string when the cache is cold or memory is disabled.
-    cached_hints = _preload_cached_provider_hints(user_understanding)
-    cached_hints_block = (cached_hints + "\n\n---\n\n") if cached_hints else ""
+    # Architecture note: atlas-cache hints removed. Agent 4 no longer
+    # produces an atlas; we don't preload provider hints from memdir.
+    # Agent 2 does its own web_search each run.
+    cached_hints_block = ""
 
     # ── CORE: Assemble the full message ──
     message = f"""## What the User Needs
@@ -465,76 +465,6 @@ def _format_blueprint_section(workflow: WorkflowBlueprint | None) -> str:
         f"Total scopes: {len(workflow.steps)}. Architecture options Agent 1 considered: "
         f"{', '.join(workflow.architecture_options) or 'all_in_one, best_per_step'}."
     )
-
-
-def _preload_cached_provider_hints(
-    user_understanding: UserUnderstandingOutput, max_per_capability: int = 3,
-) -> str:
-    """Pull previously-researched providers from the atlas cache as hints.
-
-    Agent 4's Phase 6.5 deep-verify populates `memdir/provider_atlases/`
-    after every successful candidate run. Those atlases carry provider name,
-    openapi_url, endpoints, and auth — exactly the fields Agent 2 would
-    rediscover via web_search at significant token + wall-clock cost.
-
-    This function returns a prompt-ready string of "known-good candidates
-    you can reuse without re-researching — include them in your output with
-    coverage_confidence set based on prior runs." Claude still decides
-    whether to keep, demote, or drop each hint based on the current user's
-    needs (domain / technical_level / constraints) — hints are not a
-    guarantee, they're a shortcut.
-
-    Returns an empty string when memory is disabled, no atlases match, or
-    the user's sub_tasks are too niche for any prior atlas to match.
-    """
-    try:
-        from puzzleeval.memdir import memory_enabled, find_relevant_memories
-        if not memory_enabled():
-            return ""
-    except Exception:  # noqa: BLE001 — keep Agent 2 resilient if memdir breaks
-        return ""
-
-    seen: dict[str, list[str]] = {}
-    for st in user_understanding.sub_tasks:
-        # Query the atlas category for each sub_task's capability + keywords
-        query_parts = [st.capability]
-        query_parts.extend(st.search_keywords or [])
-        query = " ".join(query_parts)
-        try:
-            memos = find_relevant_memories(
-                query=query,
-                categories=["provider_atlases"],
-                limit=max_per_capability,
-            )
-        except Exception:  # noqa: BLE001
-            continue
-        if not memos:
-            continue
-        for memo in memos:
-            name = memo.name or ""
-            if not name:
-                continue
-            bucket = seen.setdefault(st.capability, [])
-            if name not in bucket:
-                bucket.append(name)
-
-    if not seen:
-        return ""
-
-    lines = [
-        "## Known providers from prior runs (atlas cache hints)",
-        "",
-        "These providers were deep-verified in a previous pipeline run for this",
-        "capability. Treat them as PRE-SCREENED candidates — include them in your",
-        "output IF they still fit this user's domain / technical_level / constraints.",
-        "Set `source='memdir_atlas'` and `coverage_confidence='claimed'` on each.",
-        "When a listed provider is clearly wrong for this user, OMIT it rather",
-        "than re-score it — freshness and user-fit beat cache-hit counts.",
-        "",
-    ]
-    for cap, names in seen.items():
-        lines.append(f"- {cap}: {', '.join(names)}")
-    return "\n".join(lines)
 
 
 def _scope_pool_instruction(workflow: WorkflowBlueprint | None) -> str:
@@ -1138,6 +1068,107 @@ def _normalize_coverage(
 # Both helpers are pure functions operating on `Agent2Result` — no I/O,
 # no logging side effects. All the async/state plumbing lives upstream.
 # ============================================================================
+
+
+def inject_explicit_candidates(
+    agent2_result: Agent2Result,
+    explicit_names: list[str],
+    blueprint_step_ids: list[str] | None = None,
+) -> Agent2Result:
+    """Auto-inject candidates the user EXPLICITLY mentioned at Agent 1.
+
+    When a user says "compare OpenAI vs ElevenLabs" or "I want to test
+    Stripe", Agent 1 writes those names into ``explicit_candidates``.
+    Web search is non-deterministic and a brand the user explicitly
+    named can easily land outside the top 7 Agent 2 returns — at which
+    point the pipeline silently tests random adjacent products and
+    the user sees "why didn't you test what I asked for?"
+
+    This helper guarantees every explicit name appears in the candidate
+    pool BEFORE the Selection pause, so the user's intent is always
+    surfaced. Name matching is case-insensitive substring in both
+    directions so "OpenAI" matches both "OpenAI Realtime API" (already
+    found by search) and vice versa — we only inject when truly missing.
+
+    Behaviour:
+      * If the explicit name is already present (exact or substring) in
+        an existing Agent 2 candidate's name/provider — no-op for that
+        name. The selection pool already has a representative.
+      * If truly missing, inject a synthetic ``Candidate`` with
+        ``source="user_explicit"``, ``relevance_score=0.95`` (puts it
+        ahead of most Agent 2 finds but behind true user-added via the
+        SelectionPanel's "+ Add provider" which uses 0.99), and
+        coverage over every blueprint step (we don't know which scope
+        the user had in mind, so claim all of them — Phase 6.5's
+        deep-verify will narrow it).
+
+    Returns a NEW Agent2Result. Never mutates the input.
+    """
+    if not explicit_names:
+        return agent2_result
+
+    existing: list[str] = []
+    for c in agent2_result.candidates:
+        existing.append(c.name.strip().lower())
+        existing.append((c.provider or "").strip().lower())
+
+    step_ids = sorted(blueprint_step_ids or [])
+    # When there's no blueprint, we still inject but leave covers empty
+    # so Phase 6.5 / Phase 9 fall back to flat-flow behavior.
+    covers = step_ids
+    confidence = {sid: "claimed" for sid in covers}
+
+    new_candidates: list[Candidate] = []
+    seen_injections: set[str] = set()
+    for raw_name in explicit_names:
+        norm = raw_name.strip().lower()
+        if not norm:
+            continue
+        # Substring in either direction: user might say "OpenAI" and
+        # Agent 2 found "OpenAI Realtime API", or user says "Stripe
+        # Billing" and Agent 2 found just "Stripe" — both count as
+        # "already covered".
+        already_present = any(
+            norm in e or e in norm
+            for e in existing if e
+        )
+        if already_present or norm in seen_injections:
+            continue
+        seen_injections.add(norm)
+
+        new_candidates.append(Candidate(
+            name=raw_name.strip(),
+            provider=raw_name.strip(),
+            description=(
+                f"{raw_name.strip()} — auto-injected because the user "
+                "explicitly mentioned this provider in their request. "
+                "Phase 6.5 will deep-verify the public API surface."
+            ),
+            api_available=True,
+            api_docs_url=None,
+            pricing_model="unknown",
+            pricing_details=None,
+            claimed_capabilities=[],
+            relevance_score=0.95,
+            adoption_difficulty="medium",
+            relevant_subtasks=[],
+            source="user_explicit",
+            covers_step_ids=covers,
+            coverage_confidence=confidence,
+        ))
+
+    if not new_candidates:
+        return agent2_result
+
+    return Agent2Result(
+        candidates=agent2_result.candidates + new_candidates,
+        search_approach=(
+            agent2_result.search_approach
+            + f" [+{len(new_candidates)} user-explicit]"
+        ),
+        coverage_notes=agent2_result.coverage_notes,
+        cost_usd=agent2_result.cost_usd,
+    )
 
 
 def inject_user_candidates(

@@ -26,6 +26,124 @@ async def create_run(req: CreateRunRequest):
     return CreateRunResponse(run_id=state.run_id, trace_id=state.trace_id)
 
 
+# IMPORTANT route-order note: FastAPI matches routes in registration
+# order, so static paths under ``/runs/`` MUST be registered BEFORE
+# ``/runs/{run_id}`` — otherwise ``GET /runs/audio?path=...`` matches
+# the run-by-id route with ``run_id="audio"``, returns 404 "Run not
+# found", and the frontend's <audio src=".../runs/audio?path=..."/>
+# tags silently fail to play. This tripped every playback render for
+# completed voice runs until the fix.
+@router.get("/runs/audio")
+async def serve_run_audio(path: str):
+    """Serve a captured audio artifact saved under a run's sandbox.
+
+    The frontend receives absolute filesystem paths in
+    ``EvaluationReport.candidate_reports[*].failure_evidence[*].audio_paths``
+    (or ``success_evidence`` / ``TestCaseResult.audio_paths``). Those are
+    absolute so the evaluation report stays self-contained on disk; the
+    browser can't read a filesystem path directly, so it calls this endpoint
+    to stream the file back.
+
+    Security: we only serve files inside an allowed runs directory tree.
+    Multiple roots are permitted so both (a) backend-driven pipeline runs
+    (``puzzleeval-api/runs``) and (b) CLI-driven runs
+    (``PuzzleEval-local/runs``) can render audio through the same UI.
+    The operator can extend the allowlist via the
+    ``PUZZLEEVAL_EXTRA_RUNS_ROOTS`` env var (comma-separated absolute
+    paths). Any resolved path OUTSIDE every allowed root is rejected
+    with 403.
+    """
+    import os
+    from fastapi.responses import FileResponse
+    from pathlib import Path
+    backend_root = Path(__file__).resolve().parent.parent
+    allowed_roots: list[Path] = [(backend_root / "runs").resolve()]
+    cli_dev_root = (backend_root.parent / "PuzzleEval-local" / "runs").resolve()
+    if cli_dev_root.exists() and cli_dev_root not in allowed_roots:
+        allowed_roots.append(cli_dev_root)
+    # Also include the project-root `runs/` (where backend cwd happens
+    # to land when uvicorn runs with --app-dir). Without this, Agent 4
+    # atlases + voice harness artifacts written relative to the project
+    # root sit outside the allowlist and the frontend <audio> 403s.
+    project_root_runs = (backend_root.parent / "runs").resolve()
+    if project_root_runs.exists() and project_root_runs not in allowed_roots:
+        allowed_roots.append(project_root_runs)
+    extras_env = os.environ.get("PUZZLEEVAL_EXTRA_RUNS_ROOTS", "").strip()
+    if extras_env:
+        for entry in extras_env.split(","):
+            entry = entry.strip()
+            if not entry:
+                continue
+            try:
+                resolved = Path(entry).resolve()
+            except (OSError, RuntimeError):
+                continue
+            if resolved.exists() and resolved not in allowed_roots:
+                allowed_roots.append(resolved)
+    # Defensive normalization — paths written by older runs may be stored
+    # as RELATIVE with Windows backslashes (e.g., ``runs\<trace>\harnesses
+    # \...\voice\foo.mp3``). A naive ``Path(path).resolve()`` here is
+    # cwd-sensitive AND mis-parses backslashes on non-Windows hosts.
+    # Normalize separators to forward slash first, then try each allowed
+    # root as a parent before falling back to plain resolve(). This makes
+    # the route work with both absolute-forward and relative-backslash
+    # inputs so the frontend never has to pre-process.
+    normalized = path.replace("\\", "/")
+    as_path = Path(normalized)
+    if as_path.is_absolute():
+        requested = as_path.resolve()
+    else:
+        requested = None
+        for root in allowed_roots:
+            candidate = (root.parent / as_path).resolve()
+            if candidate.exists() and candidate.is_file():
+                requested = candidate
+                break
+            # Also try: candidate relative to root itself (e.g., the stored
+            # path already begins with "runs/..." and root ends with "runs").
+            parts = as_path.parts
+            if parts and parts[0] == root.name:
+                trimmed = Path(*parts[1:])
+                candidate2 = (root / trimmed).resolve()
+                if candidate2.exists() and candidate2.is_file():
+                    requested = candidate2
+                    break
+        if requested is None:
+            requested = as_path.resolve()
+    contained = False
+    for root in allowed_roots:
+        try:
+            requested.relative_to(root)
+            contained = True
+            break
+        except ValueError:
+            continue
+    if not contained:
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f"path is outside every allowed runs directory "
+                f"(configured roots: {[str(r) for r in allowed_roots]})"
+            ),
+        )
+    if not requested.exists() or not requested.is_file():
+        raise HTTPException(status_code=404, detail="audio file not found")
+    ext = requested.suffix.lower()
+    media_type = {
+        ".wav": "audio/wav",
+        ".mp3": "audio/mpeg",
+        ".m4a": "audio/mp4",
+        ".ogg": "audio/ogg",
+        ".webm": "audio/webm",
+        ".flac": "audio/flac",
+    }.get(ext, "application/octet-stream")
+    return FileResponse(
+        path=str(requested),
+        media_type=media_type,
+        filename=requested.name,
+    )
+
+
 @router.get("/runs/{run_id}", response_model=RunStateOut)
 async def get_run(run_id: str):
     state = run_manager.get_run(run_id)
@@ -224,80 +342,9 @@ async def get_report(run_id: str):
         )
 
 
-@router.get("/runs/audio")
-async def serve_run_audio(path: str):
-    """Serve a captured audio artifact saved under a run's sandbox.
-
-    The frontend receives absolute filesystem paths in
-    ``EvaluationReport.candidate_reports[*].failure_evidence[*].audio_paths``
-    (or ``success_evidence`` / ``TestCaseResult.audio_paths``). Those are
-    absolute so the evaluation report stays self-contained on disk; the
-    browser can't read a filesystem path directly, so it calls this endpoint
-    to stream the file back.
-
-    Security: we only serve files inside an allowed runs directory tree.
-    Multiple roots are permitted so both (a) backend-driven pipeline runs
-    (``puzzleeval-api/runs``) and (b) CLI-driven runs
-    (``PuzzleEval-local/runs``) can render audio through the same UI.
-    The operator can extend the allowlist via the
-    ``PUZZLEEVAL_EXTRA_RUNS_ROOTS`` env var (comma-separated absolute
-    paths). Any resolved path OUTSIDE every allowed root is rejected
-    with 403.
-    """
-    import os
-    from fastapi.responses import FileResponse
-    from pathlib import Path
-    backend_root = Path(__file__).resolve().parent.parent
-    allowed_roots: list[Path] = [(backend_root / "runs").resolve()]
-    # Sibling CLI runs dir — same project layout used in dev + CI.
-    cli_dev_root = (backend_root.parent / "PuzzleEval-local" / "runs").resolve()
-    if cli_dev_root.exists() and cli_dev_root not in allowed_roots:
-        allowed_roots.append(cli_dev_root)
-    # Operator-supplied extras.
-    extras_env = os.environ.get("PUZZLEEVAL_EXTRA_RUNS_ROOTS", "").strip()
-    if extras_env:
-        for entry in extras_env.split(","):
-            entry = entry.strip()
-            if not entry:
-                continue
-            try:
-                resolved = Path(entry).resolve()
-            except (OSError, RuntimeError):
-                continue
-            if resolved.exists() and resolved not in allowed_roots:
-                allowed_roots.append(resolved)
-    requested = Path(path).resolve()
-    # Containment check — requested must live under at least one root.
-    contained = False
-    for root in allowed_roots:
-        try:
-            requested.relative_to(root)
-            contained = True
-            break
-        except ValueError:
-            continue
-    if not contained:
-        raise HTTPException(
-            status_code=403,
-            detail=(
-                f"path is outside every allowed runs directory "
-                f"(configured roots: {[str(r) for r in allowed_roots]})"
-            ),
-        )
-    if not requested.exists() or not requested.is_file():
-        raise HTTPException(status_code=404, detail="audio file not found")
-    # Best-effort MIME detection; default to audio/wav.
-    ext = requested.suffix.lower()
-    media_type = {
-        ".wav": "audio/wav",
-        ".mp3": "audio/mpeg",
-        ".m4a": "audio/mp4",
-        ".ogg": "audio/ogg",
-        ".webm": "audio/webm",
-        ".flac": "audio/flac",
-    }.get(ext, "application/octet-stream")
-    return FileResponse(
-        path=str(requested),
-        media_type=media_type,
-        filename=requested.name,
-    )
+# NB: the ``/runs/audio`` handler has been moved UP near the top of this
+# file so it registers BEFORE ``/runs/{run_id}``. Without that order,
+# FastAPI's router treated ``/runs/audio?path=...`` as a run-by-id
+# lookup with run_id="audio" and returned 404 "Run not found", which
+# made every voice audio clip unplayable in the UI. Keeping this tombstone
+# comment here so future refactors don't reintroduce the duplicate.

@@ -391,16 +391,12 @@ class TestScreeningAgent:
         mock_response.usage.cache_read_input_tokens = 0
         return mock_response
 
-    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_valid_input_produces_result(self, mock_anthropic_class):
         """Valid input should produce a valid Agent4Result.
 
-        Forces the shallow per-candidate verification path via
-        `AGENT4_DEEP_VERIFY_ENABLED=False` — these tests exercise the
-        shallow path's pause_turn / per-candidate-error handling, not the
-        deep-verify runner (which has its own tests in
-        `tests/test_deep_verify_and_fallback.py`).
+        Agent 4 is the shallow per-candidate verification path — deep-
+        verify was removed; Agent 5 does its own Phase-1 research.
         """
         expected_result = _make_agent4_result()
 
@@ -444,7 +440,6 @@ class TestScreeningAgent:
         assert "web_fetch_20250910" in tool_types
         assert "web_search_20250305" in tool_types
 
-    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_single_candidate_api_error_doesnt_kill_pipeline(self, mock_anthropic_class):
         """If one candidate's verification fails, others should still proceed."""
@@ -489,7 +484,6 @@ class TestScreeningAgent:
         result = run_screening_agent(input_data)
         assert result is not None
 
-    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_structure_step_none_output_raises_error(self, mock_anthropic_class):
         """If structuring returns None, should raise AgentOutputError."""
@@ -520,7 +514,6 @@ class TestScreeningAgent:
         with pytest.raises(AgentOutputError, match="no parsed output"):
             run_screening_agent(input_data)
 
-    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_pause_turn_handled_per_candidate(self, mock_anthropic_class):
         """pause_turn during per-candidate verification should continue."""
@@ -564,7 +557,6 @@ class TestScreeningAgent:
         # 6 create calls: candidate 0 (2 calls: pause + continue) + candidates 1-4 (4 calls)
         assert mock_client.beta.messages.create.call_count == 6
 
-    @patch("puzzleeval.config.AGENT4_DEEP_VERIFY_ENABLED", False)
     @patch("puzzleeval.agents.screening.anthropic.Anthropic")
     def test_structure_step_api_error_raises(self, mock_anthropic_class):
         """API error in the structuring step should raise AgentAPIError."""

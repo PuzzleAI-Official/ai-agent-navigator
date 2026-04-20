@@ -333,6 +333,56 @@ async def run_pipeline(state: RunState):
                 emit("agent_activity", {"agent": "agent_2", "message": "Searching for AI solutions..."})
                 state.agent2_result, state._agent2_model = await _run_real_agent2(state, user_understanding)
 
+            # ── Auto-inject candidates the user explicitly named ──
+            # Agent 1 captures names mentioned in the user's prompt
+            # ("compare OpenAI vs ElevenLabs" → ["OpenAI", "ElevenLabs"])
+            # in `explicit_candidates`. Web search is non-deterministic
+            # and a user-named brand can easily land outside the top 7
+            # Agent 2 returns. Injecting them here guarantees the
+            # Selection pool always surfaces what the user explicitly
+            # asked for. Source-tagged "user_explicit" with
+            # relevance_score=0.95 so they surface at the top of Phase 7's
+            # ranker but still behind user-added via the + button.
+            explicit_names = list(getattr(user_understanding, "explicit_candidates", []) or [])
+            if explicit_names:
+                try:
+                    from puzzleeval.agents.research import inject_explicit_candidates
+                    from puzzleeval.schemas import Agent2Result as _A2R
+                    bp_step_ids: list[str] = []
+                    try:
+                        _wf = getattr(user_understanding, "workflow", None)
+                        if _wf and getattr(_wf, "steps", None):
+                            bp_step_ids = [s.id for s in _wf.steps]
+                    except Exception:
+                        pass
+                    a2_model_now = _A2R(**state.agent2_result)
+                    injected_model = inject_explicit_candidates(
+                        a2_model_now,
+                        explicit_names=explicit_names,
+                        blueprint_step_ids=bp_step_ids,
+                    )
+                    if len(injected_model.candidates) > len(a2_model_now.candidates):
+                        state.agent2_result = injected_model.model_dump()
+                        state._agent2_model = injected_model
+                        emit("agent_activity", {
+                            "agent": "agent_2",
+                            "message": (
+                                f"Auto-added {len(injected_model.candidates) - len(a2_model_now.candidates)} "
+                                f"provider(s) you explicitly mentioned: "
+                                f"{', '.join(explicit_names)}"
+                            ),
+                            "status": "info",
+                        })
+                except Exception as exc:  # noqa: BLE001
+                    # Non-fatal — log and proceed with Agent 2's pool as-is.
+                    # The worst case is the user sees selection without their
+                    # explicit mentions, which they can still "Add provider"
+                    # manually at the SelectionPanel.
+                    import logging as _logging
+                    _logging.getLogger(__name__).warning(
+                        "inject_explicit_candidates failed: %s", exc
+                    )
+
             # Emit Agent 2 completion
             candidates = state.agent2_result.get("candidates", [])
             # Phase 4: dual-search coverage fields travel with every
@@ -566,6 +616,15 @@ async def run_pipeline(state: RunState):
                     user_added=user_added,
                 )
                 state.agent2_result = a2_model.model_dump()
+                # CRITICAL — keep both views of Agent 2's result in sync.
+                # `_run_real_agent4` below prefers `state._agent2_model`
+                # if it exists (set when Agent 2 originally ran against
+                # the full pool). Without this line, Agent 4 reads the
+                # STALE 7-candidate model instead of the filtered 2 the
+                # user picked — which is exactly the bug that made Agent 5
+                # build harnesses for Smith.ai + Dialzara after the user
+                # explicitly picked only OpenAI + ElevenLabs.
+                state._agent2_model = a2_model
                 state.user_selection_applied = True
                 state.status = "pipeline_running"
                 # Clear the cached selection payload — we're past the
@@ -602,6 +661,10 @@ async def run_pipeline(state: RunState):
                 a2_model = A2R(**state.agent2_result)
                 a2_model = apply_scope_picks(a2_model, scope_picks=programmatic_picks)
                 state.agent2_result = a2_model.model_dump()
+                # Keep the cached Pydantic model aligned with the dict —
+                # Agent 4 reads `_agent2_model` first. Same fix as the
+                # user-selection branch above.
+                state._agent2_model = a2_model
                 emit("agent_activity", {
                     "agent": "pipeline",
                     "message": f"Phase 7 auto-selection — {len(a2_model.candidates)} candidates proceeding",
@@ -680,51 +743,48 @@ async def run_pipeline(state: RunState):
             _record_agent_cost_and_emit("agent_4", state.agent4_result.get("cost_usd", 0))
             _save_json("agent_4_output.json", state.agent4_result)
 
-            # ── Phase 6.5: emit per-candidate deep-verify results ──
-            # These SSE events are consumed by the frontend's
-            # RejectionSummary (candidate_rejected) and CoverageBadge
-            # upgrade (candidate_verified). The events carry per-scope
-            # detail so the UI can render precisely which scopes passed
-            # and which were dropped.
-            from puzzleeval.config import AGENT4_DEEP_VERIFY_ENABLED
-            if AGENT4_DEEP_VERIFY_ENABLED:
-                for vc in validated:
-                    verified_scopes = list(vc.get("covers_step_ids", []))
-                    for sid in verified_scopes:
-                        emit("candidate_verified", {
-                            "candidate_name": vc.get("name", ""),
-                            "scope_id": sid,
-                            "provider": vc.get("provider", ""),
-                            "pricing_breakdown": vc.get("pricing_breakdown"),
-                        })
-
-                failed_list = state.agent4_result.get("failed_to_verify", [])
-                for ftv in failed_list:
-                    emit("candidate_rejected", {
-                        "candidate_name": ftv.get("name", ""),
-                        "scope_id": ftv.get("scope_id", ""),
-                        "reason": ftv.get("reason", "verify_error"),
-                        "provider": ftv.get("provider", ""),
-                        "attempt_notes": ftv.get("attempt_notes", ""),
-                    })
-
-                # Scope-level summary
-                scope_verified: dict[str, int] = {}
-                scope_rejected: dict[str, int] = {}
-                for vc in validated:
-                    for sid in vc.get("covers_step_ids", []):
-                        scope_verified[sid] = scope_verified.get(sid, 0) + 1
-                for ftv in failed_list:
-                    sid = ftv.get("scope_id", "")
-                    if sid:
-                        scope_rejected[sid] = scope_rejected.get(sid, 0) + 1
-                all_scope_ids = set(scope_verified) | set(scope_rejected)
-                for sid in sorted(all_scope_ids):
-                    emit("scope_verified_complete", {
+            # ── Per-candidate verify/reject SSE events ──
+            # Agent 4 does shallow verify (exists / blocked). These events
+            # are consumed by the frontend's RejectionSummary
+            # (candidate_rejected) and CoverageBadge upgrade
+            # (candidate_verified).
+            for vc in validated:
+                verified_scopes = list(vc.get("covers_step_ids", []))
+                for sid in verified_scopes:
+                    emit("candidate_verified", {
+                        "candidate_name": vc.get("name", ""),
                         "scope_id": sid,
-                        "verified_count": scope_verified.get(sid, 0),
-                        "rejected_count": scope_rejected.get(sid, 0),
+                        "provider": vc.get("provider", ""),
+                        "pricing_breakdown": vc.get("pricing_breakdown"),
                     })
+
+            failed_list = state.agent4_result.get("failed_to_verify", [])
+            for ftv in failed_list:
+                emit("candidate_rejected", {
+                    "candidate_name": ftv.get("name", ""),
+                    "scope_id": ftv.get("scope_id", ""),
+                    "reason": ftv.get("reason", "verify_error"),
+                    "provider": ftv.get("provider", ""),
+                    "attempt_notes": ftv.get("attempt_notes", ""),
+                })
+
+            # Scope-level summary
+            scope_verified: dict[str, int] = {}
+            scope_rejected: dict[str, int] = {}
+            for vc in validated:
+                for sid in vc.get("covers_step_ids", []):
+                    scope_verified[sid] = scope_verified.get(sid, 0) + 1
+            for ftv in failed_list:
+                sid = ftv.get("scope_id", "")
+                if sid:
+                    scope_rejected[sid] = scope_rejected.get(sid, 0) + 1
+            all_scope_ids = set(scope_verified) | set(scope_rejected)
+            for sid in sorted(all_scope_ids):
+                emit("scope_verified_complete", {
+                    "scope_id": sid,
+                    "verified_count": scope_verified.get(sid, 0),
+                    "rejected_count": scope_rejected.get(sid, 0),
+                })
 
         async def _branch_b_test_generation():
             """Agent 3/3F — runs independently of Agent 2→4."""

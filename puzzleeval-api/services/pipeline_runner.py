@@ -361,16 +361,46 @@ async def run_pipeline(state: RunState):
                         explicit_names=explicit_names,
                         blueprint_step_ids=bp_step_ids,
                     )
-                    if len(injected_model.candidates) > len(a2_model_now.candidates):
+                    # inject_explicit_candidates does TWO things:
+                    #   (1) injects synthetic candidates when an explicit
+                    #       name isn't found in the Agent 2 pool, and
+                    #   (2) BOOSTS relevance_score to >=0.95 on already-
+                    #       present candidates whose name substring-
+                    #       matches an explicit entry.
+                    # The prior condition (len increased) only caught case
+                    # (1) — case (2) changes scores without adding rows,
+                    # so the boosted model was silently discarded. Real-
+                    # run trace 4068e872: user said "compare OpenAI and
+                    # ElevenLabs voice stacks", both were found naturally
+                    # by Agent 2 at 0.35 + 0.63, Phase 7 default_picks
+                    # chose the three top packaged products instead. The
+                    # boost ran in memory but never reached state.
+                    # Fix: detect change by either NEW candidates OR
+                    # CHANGED relevance_scores on existing ones.
+                    added = len(injected_model.candidates) - len(a2_model_now.candidates)
+                    before_scores = {c.name: c.relevance_score for c in a2_model_now.candidates}
+                    boosted_names = [
+                        c.name for c in injected_model.candidates
+                        if c.name in before_scores
+                        and c.relevance_score != before_scores[c.name]
+                    ]
+                    if added > 0 or boosted_names:
                         state.agent2_result = injected_model.model_dump()
                         state._agent2_model = injected_model
+                        parts = []
+                        if added > 0:
+                            parts.append(
+                                f"auto-added {added} provider(s) you explicitly "
+                                f"mentioned: {', '.join(explicit_names)}"
+                            )
+                        if boosted_names:
+                            parts.append(
+                                f"boosted relevance for {len(boosted_names)} "
+                                f"user-named provider(s): {', '.join(boosted_names)}"
+                            )
                         emit("agent_activity", {
                             "agent": "agent_2",
-                            "message": (
-                                f"Auto-added {len(injected_model.candidates) - len(a2_model_now.candidates)} "
-                                f"provider(s) you explicitly mentioned: "
-                                f"{', '.join(explicit_names)}"
-                            ),
+                            "message": "; ".join(parts).capitalize(),
                             "status": "info",
                         })
                 except Exception as exc:  # noqa: BLE001

@@ -527,7 +527,7 @@ UserInput (+ optional test files)
 
 # Current module index (beyond the 5 agents)
 
-The agents describe *what the pipeline does*; the modules below describe *how it stays resilient, accurate, and honest* while doing it. Every module listed is production code exercised by the 885-test suite and the FastAPI runner.
+The agents describe *what the pipeline does*; the modules below describe *how it stays resilient, accurate, and honest* while doing it. Every module listed is production code exercised by the 907-test suite (831 core + 37 API + 39 generalizability) and the FastAPI runner.
 
 ## Core infrastructure
 
@@ -612,9 +612,17 @@ Multi-turn tests (voice, chatbot) are owned by a PLUGIN, not by Agent 5 directly
 **Voice audio stack** (`tool_plugins/voice_realtime.py`):
 
 - `synthesize_input()` → TTS caller audio via `tts` plugin chain, serves at `/audio/<token>` on 127.0.0.1:8768.
-- `drive_conversation(script, agent_responder)` → per-turn loop: synth caller → invoke responder → extract agent response (audio_bytes / text / twiml / ncco / json) → score per-turn assertion.
-- `_merge_conversation_audio(session_token, turns)` → stitches caller+agent files in dialogue order into `conversation_<token>.<ext>`. MP3-specific: strips ID3v2 tag from segments 2…N (first segment keeps it for codec init), strips ID3v1 trailers from every segment. Same-extension required; mixed types bail with `None` and per-turn files remain available.
+- `drive_conversation(script, agent_responder)` → per-turn loop: synth caller → invoke responder → extract agent response (audio_bytes / text / twiml / ncco / json / audio_path) → score per-turn assertion.
+- `_merge_conversation_audio(session_token, turns)` → stitches caller+agent files in dialogue order into `conversation_<token>.<ext>`. **Two paths (NEW-AI)**:
+  - **Primary — pydub normalization:** `_try_merge_via_pydub` decodes every segment into `AudioSegment`, resamples to the FIRST segment's `frame_rate + channels` (preserves caller TTS quality), concatenates, exports a uniformly-encoded MP3. Handles the real-world sample-rate mismatch between 44.1 kHz caller TTS and 24 kHz agent PCM16. Required to prevent the "only 4 seconds then pauses" bug we observed in trace 28cb2648.
+  - **Fallback — byte-concat with ID3 tag strip:** when pydub/ffmpeg unavailable. Strips ID3v2 from segments 2…N (first keeps it for codec init), strips ID3v1 trailers from every segment. Works only when all segments share sample rate — degraded playback otherwise.
 - `artifacts_for_token_prefix(session)` → returns all caller + agent + merged files registered under a session token (each turn uses sub-token `<session>-t<idx>`).
+
+**Three harness return shapes supported** (`_responder`, NEW-AI capability fix 3):
+Different Agent-5-generated harnesses pick different valid shapes — all three now handled at the plugin layer:
+- **Shape A (inline bytes)**: `raw_response.audio_bytes: <bytes>` — the canonical path.
+- **Shape A-variant (base64 string)**: `raw_response.audio_bytes: "<b64 str>"` — some harnesses pre-encode for JSON safety. Plugin decodes at the TOP of the pcm16 branch BEFORE pydub/wave touch it (pydub accepts strings at construction but fails at `.export()`; wave raises TypeError immediately).
+- **Shape B (on-disk file path)**: `raw_response.audio_path: "/tmp/x.wav"` — other harnesses save via pydub.export and return the path. Plugin reads the file into bytes, derives content_type from the extension, continues down the bytes path so `_save_audio_blob` sees a uniform contract.
 
 **Audio extension / content-type derivation** (`_responder`): when the harness returns `raw_response = {"audio_bytes": <bytes>, "audio_format": "mp3"}` without an explicit `audio_content_type`, the plugin derives `audio/mpeg` from the format field. Otherwise `_save_audio_blob` would default to `.wav` → corrupted MP3 playback + mixed-extension merge failure.
 
@@ -630,6 +638,57 @@ Paths outside every allowed root → HTTP 403. Containment uses `Path.resolve().
 **Frontend audio rendering** (`src/components/playground/EvaluationReportCard.tsx::AudioPathsBlock`):
 
 Role-based style table (`ROLE_STYLE`): `conversation` → violet "Full call" badge, full-width control; `caller` → blue, compact; `agent` → emerald, compact. The merged `role=conversation` clip always renders first and widest. Adding a new role is a single-entry map update.
+
+---
+
+# Runner-level safety nets (NEW-AI)
+
+Contracts that are safety-critical at runtime live in deterministic code, not in prompts. Prompts teach patterns; runner-level gates enforce contracts. The pattern of chasing prompt-adherence failures across four sessions ended when we moved the fallback into `implement_test_env.py`'s runner closures — code we own, not prompts we hope Claude follows. See AD-007 in `CLAUDE.md` for the governing principle.
+
+### Default `input_context` injection (runner closure, not harness)
+
+| Layer | Function | Responsibility |
+|---|---|---|
+| `_SYSTEM_PROMPT_ALIASES` | constant | Tuple of the 5 accepted keys (`instructions`, `system_prompt`, `system`, `brief`, `agent_prompt`). Both observed voice harnesses walk this list — adding a new alias = 1-line extension. |
+| `_default_input_context(candidate_name, scope_role)` | helper | Returns a dict populating EVERY alias with a candidate-aware default string. Guarantees the harness's `_extract_system_prompt` finds one regardless of which alias it reads first. |
+| `_merge_with_default_input_context(test_case_ctx, default_ctx)` | helper | Handles three real-world test-case patterns observed in the wild: (1) `None` / missing, (2) other keys present but no system-prompt field, (3) user-supplied system prompt under one alias — propagates to all aliases so harnesses reading different names see consistent intent. |
+| Both runner closures in `_build_single_harness` | call site | Inject the merged context into every payload before subprocess invocation. Deterministic; no dependency on prompt-rule adherence. |
+
+### Harness-contract layer (Option A — NEW-AI)
+
+`_VOICE_HARNESS_CONTRACT` constant + `_modality_specific_contract(test_cases)` + `__MODALITY_CONTRACT__` placeholder inject a formalized voice harness return-shape contract into the builder prompt only when test cases include voice/conversation/audio modalities. Non-voice builds don't pay the prompt-token tax. The contract enumerates Shape A + Shape B explicitly, forbids alternate keys, and documents the hard rule "raw_response MUST contain EITHER audio_bytes OR audio_path, never both." Forward-compat: this pattern is the structural predecessor of a skills-style per-modality loader (AD-009).
+
+### Explicit-candidate boost persistence
+
+`inject_explicit_candidates` in `research.py` now boosts `relevance_score` to ≥ 0.95 on already-present candidates whose name substring-matches an explicit mention (not just injecting new synthetic ones). `_branch_a_research_and_screening` in `pipeline_runner.py` saves state on EITHER new candidates OR changed relevance_scores — fixes the bug where pure-boost changes were silently discarded.
+
+### Web-tool version revert-guards
+
+`TestNoContainerThreadingAfterRevert` asserts (1) no `_kwargs_*["container"] =` patterns in active code, (2) no `"type": "web_fetch_20260209"` in active tool definitions. These would fail if someone re-upgraded to 20260209 without re-implementing the full container-threading migration across all sub-agents — see AD-008 for the revisit checklist.
+
+# Planned: Phase 4 — Agent 5 as integration engineer (designed, not yet shipped)
+
+**Problem.** `HARNESS_COMPLETE` today is misleading. Agent 5's builder writes its own `live_test.py` with whatever payload shape it likes. The production evaluator (`voice_realtime.drive_conversation`) calls `harness.run()` with a DIFFERENT payload. Every prior session found a new production-only bug that the builder's happy-path live test didn't catch. See OT-013 for the failure-mode history.
+
+**Plan.** Insert Phase 4 — REAL TEST PROBE — between Phase 3 (live API validation) and `HARNESS_COMPLETE`:
+
+1. **Auto-seed sandbox (deterministic):**
+   - `agent_3_test_cases.json` — this candidate's real test cases, staged alongside the existing `_stage_test_files` flow.
+   - `_production_shape_helper.py` — helper module with `derive_production_payload(test_case, turn_index, session_state)` and `synth_caller_audio_url(text)` that returns the EXACT payload shape the plugin's `drive_conversation` uses.
+
+2. **Builder prompt (new Phase 4 section):**
+   - Mandate: read one real test case, call `harness.run(derive_production_payload(...))`, verify `success=True` with expected audio shape.
+   - If fail: patch the HARNESS (not the test data) and re-run probe.
+   - After pass: write `phase_4_passed.txt` with the probed test_case_id, any harness patches applied, and confirmation of contract adherence.
+
+3. **Verification gate (deterministic enforcement):**
+   - `_run_verification_checks` requires `phase_4_passed.txt` before accepting `HARNESS_COMPLETE`. Bypass impossible — this is the safety net that makes the signal trustworthy regardless of prompt adherence.
+
+**Agent 5's new role:** integration engineer between Agent 3's test data and the candidate API. Previously "harness writer"; now "harness writer + contract verifier + bridge."
+
+**Defense in depth:** the runner-level default `input_context` fallback (above) STAYS in place after Phase 4 ships. If a harness still has a contract gap, the runner injects the default and production works even though the probe might have flagged it. Belt AND braces.
+
+**Not shipped this session** because user prioritized verifying the runner-level default works first (standard "change one thing at a time" debugging). Run 28cb2648 confirmed the runner fix produces agent audio end-to-end; Phase 4 is the architectural layer for the next session to prevent the NEXT class of contract drift.
 
 ---
 
@@ -721,5 +780,22 @@ These are acknowledged gaps from the Claude-Code-parity audit. None are fundamen
 8. **DRY_RUN propagation into harness generation** — `side_effects=creates_records` scopes could leak test data unless the candidate publishes a sandbox URL.
 9. **Provider-quirk registry** — Stripe-Version, OpenAI-Beta, anthropic-version headers aren't in a structured registry; Agent 5 re-discovers from docs each build.
 10. **AWS SigV4 / OAuth2 authorization_code / mTLS auth patterns** — not in `api_patterns.py`; rare auth flows will fall back to generic HTTP patterns and likely fail.
+11. **HARNESS_COMPLETE is misleading (OT-013)** — builder writes its own `live_test.py`, doesn't test production call shape. Planned fix: Phase 4 probe above. Runner-level default `input_context` catches the immediate input_context subclass of this bug.
+12. **Substring assertion scoring (OT-014 / OT-001)** — voice scores understate quality by 20-50% because `expected_agent_contains` is literal string match; agent says "nine" when test expects "9". Planned fix: per-turn semantic-match fallback via LLM judge (~$0.002 per escalation).
+13. **Pydub merger needs ffmpeg on PATH (OT-015)** — when ffmpeg missing, byte-concat fallback fires and may produce sample-rate-mismatched files again. Document as prereq or add startup check.
+14. **Phase 7 selection can still unchecked explicit candidates (OT-016)** — the 0.95 relevance boost ensures they're in the pool but other dimensions can push a packaged product ahead. Fix: hard-override in `selection.py` for `source=user_explicit`.
+15. **Voice plugin `_token_to_audio` is thread-shared (OT-017)** — design smell, no observed impact. Per-thread isolation is a 1-line change if we ever see a collision.
+
+## Tool-version policy (NEW-AI)
+
+| Tool | Version | Why this version |
+|---|---|---|
+| `web_fetch` | `20250910` | Reverted from 20260209 after real-run failures (container_id cascades, sandbox latency, non-beta hangs). See AD-008. |
+| `web_search` | `20250305` | Same revert. |
+| `code_execution` | `20260120` (explicit) | Required in `_build_tools_with_programmatic` — basic web tools don't auto-inject. Enables plugin-chain `allowed_callers`. |
+| `advisor` | `20260301` | Latest. Opus-backed advisor called by Sonnet executor. |
+| `tool_search_tool_bm25` | `20251119` | Latest. Tool discovery at scale. |
+| `clear_tool_uses` | `20250919` | Server-side context-mgmt edit at 80K tokens. |
+| `compact` | `20260112` | Server-side summarize at 150K tokens. |
 
 These are tracked in `POST_ROADMAP_ENHANCEMENTS.md`.

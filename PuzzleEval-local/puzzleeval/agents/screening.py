@@ -248,6 +248,12 @@ Write a brief overview: how many candidates were screened, how many passed, how 
 # Each call is isolated — one candidate's context doesn't affect another.
 # ============================================================================
 
+# Tool versions: basic 20250910 + 20250305. Real-run experience with
+# the 20260209 dynamic-filtering pair surfaced multiple operational
+# regressions (400 container_id errors, sandbox spin-up latency,
+# cross-agent propagation complexity) that outweighed the filtering
+# benefit for Agent 4's single-call-per-candidate verify pattern.
+# See research.py top-of-file docstring for the full trace evidence.
 WEB_FETCH_TOOL = {
     "type": "web_fetch_20250910",
     "name": "web_fetch",

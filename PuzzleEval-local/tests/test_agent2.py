@@ -392,7 +392,11 @@ class TestResearchAgent:
         assert result.candidates[0].name == "Google Document AI"
         assert all(c.api_available for c in result.candidates)
 
-        # Verify Step 1 was called with web search only (no fetch)
+        # Verify Step 1 was called with web search only (no fetch).
+        # We use basic web_search_20250305 — the 20260209 dynamic-filtering
+        # version caused real-run regressions on Agent 2's non-beta path
+        # (container kwarg hangs, sandbox spin-up latency). See research.py
+        # top-of-file comment for the full trace evidence.
         create_call = mock_client.messages.create.call_args
         tools = create_call.kwargs.get("tools", [])
         tool_types = [t["type"] for t in tools]

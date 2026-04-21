@@ -193,6 +193,104 @@ def _format_atlas_context_for_builder(candidate: ScreenedCandidate) -> str:
     return "\n---\n## ENRICHMENT HINTS FROM AGENT 4\n\n" + "\n".join(sections)
 
 
+# Field names different harnesses use for "the system prompt that tells the
+# agent how to behave". Both the OpenAI Realtime and ElevenLabs Conversational
+# AI harnesses accept this exact list (their `_extract_system_prompt` walks
+# these in order). Documented in the Agent 5 builder prompt's
+# "System-prompt resilience" section as the canonical accepted-key set.
+# Adding a new alias here propagates to every multi-call modality without
+# touching any harness code.
+_SYSTEM_PROMPT_ALIASES = (
+    "instructions", "system_prompt", "system", "brief", "agent_prompt",
+)
+
+
+def _default_input_context(candidate_name: str, scope_role: str | None) -> dict:
+    """Build a minimal default `input_context` for harness calls when the
+    test case omitted one (or omitted the system-prompt field).
+
+    Many agent-style API harnesses (voice, chat, conversation) hard-fail
+    when `run()` is called without a system prompt — Claude legitimately
+    needs to know what role to play. We've shipped TWO prompt-level fixes:
+
+      1. Agent 3's prompt requires `input_context.instructions` on
+         conversation/voice tests.
+      2. Agent 5's builder prompt teaches a DEFAULT_INSTRUCTIONS
+         fallback inside the harness itself.
+
+    Real-run trace f1312253 (post-Option-A): both rules were violated by
+    the model — Agent 3 emitted `input_context: null`, and Agent 5's
+    OpenAI harness contained `if not instructions: return _fail(...)`
+    with no fallback. Every harness call failed, plugin saw empty audio,
+    agent MP3s never landed. ElevenLabs's harness has the same pattern.
+
+    The fix here pushes the default INTO OUR CODE (the runner closure
+    that ALL multi-call plugin invocations route through). The runner
+    is the safety net regardless of prompt-rule adherence by either
+    Agent 3 OR Agent 5's builder.
+
+    **Generality:** the default text is populated under EVERY accepted
+    alias (``instructions``, ``system_prompt``, ``system``, ``brief``,
+    ``agent_prompt``) so harnesses checking any of these names find it.
+    This matches the accepted-key list both observed harnesses use; new
+    providers using one of these conventions work without code changes.
+    Future providers introducing a NEW key name still need to be added
+    to ``_SYSTEM_PROMPT_ALIASES`` — that's a one-line change with global
+    effect.
+
+    Test cases supplying their OWN values for ANY of these aliases keep
+    them — see ``_merge_with_default_input_context`` for the merge rule.
+    """
+    role_phrase = (scope_role or "agent").replace("_", " ").strip() or "agent"
+    text = (
+        f"You are a helpful {role_phrase} for {candidate_name}. "
+        f"Answer the user's questions concisely, stay on-topic, "
+        f"and acknowledge that you can route follow-ups appropriately."
+    )
+    return {alias: text for alias in _SYSTEM_PROMPT_ALIASES}
+
+
+def _merge_with_default_input_context(
+    test_case_ctx: dict | None,
+    default_ctx: dict,
+) -> dict:
+    """Merge the test case's `input_context` with the candidate-aware
+    default so the harness ALWAYS gets a usable system prompt.
+
+    Three cases the runner sees in the wild:
+
+      1. Test case ctx is None / missing entirely (Agent 3 emitted null
+         on every voice test in trace f1312253). Result: the full default.
+      2. Test case ctx has SOME keys but no system-prompt field (e.g.,
+         {"persona_name": "Vera"}). Result: original keys preserved +
+         system-prompt aliases filled from the default. The harness's
+         `_extract_system_prompt` walks the alias list and finds one.
+      3. Test case ctx has its OWN system-prompt value (under any alias).
+         Result: ctx wins for every alias the test set, default fills
+         only the ones it didn't. Test case content is never overwritten.
+
+    This is what makes the runner-level fallback truly general: it
+    doesn't matter which alias the harness happens to read first, and it
+    doesn't matter whether the test case partially populated the dict.
+    """
+    if not isinstance(test_case_ctx, dict):
+        return dict(default_ctx)
+    merged = dict(default_ctx)
+    merged.update(test_case_ctx)  # test case wins on every key it sets
+    # If the test case set ANY system-prompt alias, propagate that value
+    # to every other alias so harnesses checking different names all see
+    # the user's intent (not a stale default for the keys they didn't set).
+    user_value = next(
+        (test_case_ctx[k] for k in _SYSTEM_PROMPT_ALIASES
+         if isinstance(test_case_ctx.get(k), str) and test_case_ctx[k].strip()),
+        None,
+    )
+    if user_value:
+        for alias in _SYSTEM_PROMPT_ALIASES:
+            merged[alias] = user_value
+    return merged
+
+
 def _adaptive_test_timeout(harness) -> int:
     """Pick the right test-case subprocess timeout for this harness.
 
@@ -377,12 +475,69 @@ new information. Don't revisit decisions or rewrite working code.
 
 ## Environment
 You are running in an ISOLATED Python virtual environment. `python` and `pip` point to this venv.
-After writing requirements.txt, ALWAYS run `pip install -r requirements.txt` to install dependencies. Each candidate has its own venv — no package conflicts.
+The following common packages are **pre-installed** and importable NOW —
+do NOT re-verify via pip install or `python -c "import X"`:
+  - `requests` (HTTP client)
+  - `websocket-client` (synchronous WebSocket client, import as `websocket`)
+  - `pydub` (audio format conversion; requires ffmpeg on PATH — assume present)
+  - `soundfile` (PCM16 I/O without ffmpeg)
+  - `numpy` (array math)
+  - `python-dotenv` (import as `dotenv`)
+For ANY OTHER dependency, add to requirements.txt and run
+`pip install -r requirements.txt` — but ONCE. Do not reverify after
+it succeeds.
 OS: __OS_TYPE__. Use `python -c "import os; print(os.listdir('.'))"` to list files (works on any OS). Use `os.path` in Python code, not hardcoded path separators.
 
 **IMPORTANT:** Use only ASCII characters in Python code and comments. Do NOT use unicode
 dashes (—), arrows (→), or special characters. Use -- for dashes, -> for arrows. This
 prevents encoding errors on Windows.
+
+__OS_SPECIFIC_RULES__
+
+__MODALITY_CONTRACT__
+
+## Consolidated env probe — 1 turn, not 5 (OS-agnostic)
+
+When you need to verify multiple dependencies, DO NOT emit one
+`python -c "import X"` command per package. Instead write a single
+`env_check.py` that checks everything and exits non-zero on any
+missing dep:
+
+```python
+# env_check.py — emitted via write_file, run via `python env_check.py`
+import importlib, subprocess, sys
+required_py = ["pydub", "soundfile", "numpy", "scipy", "requests", "websocket"]
+required_bin = ["ffmpeg"]
+missing_py = [m for m in required_py if importlib.util.find_spec(m) is None]
+missing_bin = []
+for b in required_bin:
+    try:
+        subprocess.run([b, "-version"], capture_output=True, check=True, timeout=5)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
+        missing_bin.append(b)
+if missing_py or missing_bin:
+    print(f"MISSING python: {missing_py}, binaries: {missing_bin}", file=sys.stderr)
+    sys.exit(1)
+print("OK")
+```
+
+This collapses 5-7 probe turns to 2 (write + run).
+
+## Parallel tool calls — write all files in ONE turn (OS-agnostic)
+
+When you have written an api_spec.txt AND you know the content of
+requirements.txt + harness.py + smoke_test.py, emit all three
+`write_file` tool uses in a SINGLE response. Sequential writes on
+separate turns waste $0.30 each in Opus input-token replay.
+
+Real-run evidence (trace d3b49875): 3 sequential write turns cost
+$1.04 — could be 1 parallel turn at ~$0.40.
+
+**Explicit rule:** if the NEXT 2+ files to be written are already
+fully specified (content decided), emit ALL their `write_file`
+tool_use blocks in the same assistant response. This is a guideline,
+not a mandate — if file B's content legitimately depends on the outcome
+of writing file A (rare), sequence them.
 
 ## The Harness Interface (EXACT specification)
 
@@ -998,6 +1153,22 @@ If live tests haven't passed, you are NOT done. Go back to Phase 3 and fix.
 # Server tools (web_fetch, web_search) are executed by the Anthropic API.
 # Custom tools (write_file, run_code, read_file) are dispatched locally by
 # _dispatch_tool(). Claude invokes them via tool_use blocks.
+#
+# Tool versions: basic 20250910 + 20250305. We briefly tried the 20260209
+# "dynamic filtering" pair and reverted after real-run evidence (traces
+# d3b49875 + 4068e872) surfaced: (a) 400 "container_id is required"
+# errors cascading through every sub-agent that uses the same tools,
+# (b) 3-5 min sandbox spin-up latency on Agent 2 real research calls,
+# (c) Agent 2's non-beta messages.create silently hangs on the
+# `container` kwarg. The ~24% input-token savings didn't compensate.
+# See research.py top-of-file docstring for the full trace evidence.
+#
+# `code_execution_20260120` is still added explicitly by
+# `_build_tools_with_programmatic` when PROGRAMMATIC_TOOLS_ENABLED=1.
+# The basic 20250910 / 20250305 web tools do NOT auto-inject code_execution,
+# so the explicit declaration doesn't conflict — it's REQUIRED for the
+# `allowed_callers=["direct","code_execution_20260120"]` plugin-chain
+# feature to work.
 # ============================================================================
 
 WEB_FETCH_TOOL = {
@@ -1180,6 +1351,273 @@ ADVISOR_TOOL = {
 ALL_TOOLS = [WEB_FETCH_TOOL, WEB_SEARCH_TOOL, ADVISOR_TOOL, WRITE_FILE_TOOL, PATCH_FILE_TOOL, RUN_CODE_TOOL, READ_FILE_TOOL, ASK_RESEARCH_TOOL]
 
 
+# ============================================================================
+# OS-conditional prompt injection
+# ============================================================================
+# Only the HOST OS'es rules get injected into the builder prompt — Linux
+# runs don't waste context reading Windows translation tables, macOS runs
+# don't pay for Linux-specific hints. Keeps the prompt lean and portable
+# as we move to cloud (Linux) deployments without changing the
+# OS-agnostic bulk of the prompt.
+#
+# The rules below are based on REAL observed waste — each line maps to a
+# real-run trace entry, not speculation.
+# ============================================================================
+
+_OS_RULES_WINDOWS = """\
+## Windows-specific shell caveats (OS: Windows detected)
+
+Real-run evidence (trace d3b49875): ~7 setup turns / $1.36 were burned
+on Unix muscle-memory commands that fail silently on Windows. Your
+training data is Unix-heavy — translate BEFORE emitting the command:
+
+| Unix command | Windows equivalent                                       |
+|--------------|----------------------------------------------------------|
+| `tail -5`    | drop the pipe; write file then read last bytes in Python |
+| `head -3`    | drop the pipe; use `findstr /N "."` or Python slicing    |
+| `grep PAT`   | `findstr PAT`                                            |
+| `A && B`     | `A && B` WORKS in cmd/PowerShell, but `A; B` does NOT    |
+| `A & B`      | DON'T use — Windows `&` is a sequential separator not bg |
+| backticks    | use `$(...)` in PowerShell or pipe to a temp file        |
+| `ls -la`     | `dir` OR `python -c "import os; print(os.listdir('.'))"` |
+| `which foo`  | `where foo`                                              |
+
+Guideline: NEVER emit `| tail`, `| head`, `| wc`, `| grep` on Windows.
+These return exit 255 and waste a turn. Pre-translate instead.
+
+### Known silent-output trap: `python -c "..."` on Windows
+
+`python -c "print(something)"` occasionally returns exit 0 with NO
+visible stdout on Windows (subprocess output capture race). If a
+`python -c` command on Windows produces no visible output, DO NOT
+retry with another `python -c`. Write a `.py` file via `write_file`
+and execute with `python foo.py` — this always captures output.
+"""
+
+_OS_RULES_LINUX = """\
+## POSIX shell notes (OS: Linux detected)
+
+Standard POSIX utilities are available (`tail`, `head`, `grep`, `wc`,
+`find`, `xargs`, etc.). Use them naturally — no Windows translation
+layer needed.
+
+`python -c "..."` captures stdout reliably on Linux. For multi-line
+scripts, still prefer `write_file` + `python foo.py` so the code
+lives on disk for debugging, but inline is fine for one-liners.
+"""
+
+_OS_RULES_MACOS = """\
+## POSIX shell notes (OS: macOS detected)
+
+BSD-style POSIX utilities are available but some flag syntax differs
+from GNU (e.g., `sed -i` requires an empty string arg: `sed -i '' ...`;
+`grep -P` for Perl regex isn't supported — use `grep -E` or `rg`).
+If your command fails with a sed/grep flag issue, pivot to writing
+a Python script instead — faster than debugging BSD vs GNU.
+
+`python -c "..."` captures stdout reliably on macOS.
+"""
+
+
+def _os_specific_rules() -> str:
+    """Return the prompt rules block for the current host OS. Empty-string
+    fallback for unrecognized platforms so the prompt always renders."""
+    platform = sys.platform
+    if platform == "win32":
+        return _OS_RULES_WINDOWS
+    if platform == "darwin":
+        return _OS_RULES_MACOS
+    if platform.startswith("linux"):
+        return _OS_RULES_LINUX
+    # Unknown platforms (FreeBSD, etc.) — strip the placeholder cleanly
+    # rather than error. The OS-agnostic sections still cover most work.
+    return ""
+
+
+def _render_builder_prompt_for_os(prompt_template: str) -> str:
+    """Fill __OS_TYPE__ + __OS_SPECIFIC_RULES__ placeholders based on host."""
+    platform = sys.platform
+    if platform == "win32":
+        os_name = "Windows"
+    elif platform == "darwin":
+        os_name = "macOS"
+    elif platform.startswith("linux"):
+        os_name = "Linux"
+    else:
+        os_name = platform  # honest signal for weird platforms
+    rendered = prompt_template.replace("__OS_TYPE__", os_name)
+    rendered = rendered.replace("__OS_SPECIFIC_RULES__", _os_specific_rules())
+    return rendered
+
+
+# ============================================================================
+# Modality-specific harness contracts
+# ============================================================================
+# Each modality has its own expected `raw_response` shape that downstream
+# plugins consume. When the harness chooses a shape the plugin doesn't
+# recognize, the response silently falls through and the report ends up
+# with zero evidence — the hardest class of bug to debug because no error
+# is raised.
+#
+# The contract below enumerates EVERY return shape the voice plugin
+# actually handles. Claude (writing a harness autonomously) reads this,
+# picks ONE of the listed shapes, and the plugin extracts the audio
+# uniformly. New shapes get added here when the plugin's responder is
+# extended — they cannot diverge silently.
+#
+# Forward-compat note: this block is injected via the same conditional
+# pattern as `__OS_SPECIFIC_RULES__`. When we migrate to skills-style
+# per-modality playbook files (see CLAUDE.md AD-002 revisit trigger),
+# this string becomes `voice.md` in a skills directory, `_modality_
+# specific_contract` becomes a file reader, and no call-site logic
+# changes. Build in the right shape now, migrate layout later.
+# ============================================================================
+
+_VOICE_HARNESS_CONTRACT = """\
+## Voice harness return-shape contract (REQUIRED when test has voice / audio / conversation modality)
+
+The voice plugin (`tool_plugins/voice_realtime.py`) drives multi-turn
+conversations by calling your harness once per turn and extracting the
+agent's audio response from `raw_response`. It understands EXACTLY TWO
+return shapes. Any other shape — `audio_url`, `audio_base64_string`,
+`audio_data`, a custom schema — will silently fall through, zero agent
+audio reaches the report, and every test scores 0.
+
+Pick ONE shape per harness. Do NOT mix. Do NOT invent new keys.
+
+### Shape A — inline audio bytes (preferred for responses under ~5 MB)
+
+```python
+def run(input_data):
+    ...
+    return {
+        "output": "agent transcript (optional)",
+        "latency_ms": elapsed_ms,
+        "tokens_used": None,
+        "cost_usd": None,
+        "raw_response": {
+            "audio_bytes": <bytes>,      # raw audio bytes — the plugin base64-decodes
+                                          # automatically if you pass a b64 STRING instead
+            "audio_format": "mp3",       # "mp3" | "wav" | "ogg" | "m4a" | "webm" | "flac" | "pcm16"
+            "audio_sample_rate": 24000,  # REQUIRED when format="pcm16"; ignored otherwise
+            "audio_channels": 1,         # REQUIRED when format="pcm16"; ignored otherwise
+            "audio_content_type": "audio/mpeg",  # OPTIONAL; inferred from audio_format when absent
+            "transcript": "optional text",
+        },
+        "success": True,
+        "error": None,
+    }
+```
+
+### Shape B — on-disk audio file path (preferred for large responses OR when you transcode via ffmpeg/pydub and it's already on disk)
+
+```python
+def run(input_data):
+    ...
+    # Write audio to a temp file (tempfile.NamedTemporaryFile, AudioSegment.export, ...)
+    temp_path = "/tmp/response_abc.wav"
+    return {
+        "output": "agent transcript (optional)",
+        "latency_ms": elapsed_ms,
+        "raw_response": {
+            "audio_path": temp_path,  # absolute path to a readable audio file
+                                       # Extension determines format: .wav .mp3 .ogg .m4a .webm .flac
+            "transcript": "optional text",
+        },
+        "success": True,
+        "error": None,
+    }
+```
+
+### HARD RULES — the plugin silently breaks otherwise
+
+1. `raw_response` must contain EITHER `audio_bytes` OR `audio_path`. Never both.
+2. When you have raw PCM16 samples (no container header — OpenAI Realtime,
+   ElevenLabs Realtime, most telephony), use Shape A with
+   `audio_format="pcm16"` + sample_rate + channels. The plugin transcodes
+   to MP3 / WAV automatically.
+3. When you have a known audio container (MP3 / WAV / OGG / M4A), either
+   shape works. Shape B is slightly cheaper (no base64 round-trip).
+4. DO NOT return `audio_url`, `audio_b64`, `audio_data`, `audio`,
+   `audio_file`, or any other key name — they will NOT be parsed.
+5. DO NOT put audio under a nested key like `raw_response["data"]["audio"]`.
+   The plugin reads `raw_response.audio_bytes` and `raw_response.audio_path`
+   only at the top level.
+6. When the API returns text-only (no audio — rare but valid for voice
+   APIs that can degrade to text), just omit BOTH audio keys. The plugin
+   falls back to the text path.
+7. For multi-turn sessions, each turn's harness call returns ONE turn's
+   agent audio. The plugin handles session_state threading — you just
+   read `input_data.get("session_state", {})` and mutate it in-place for
+   continuity.
+
+### What the plugin does with each shape (so you can verify your harness output)
+
+Both shapes route through `_save_audio_blob(turn_token, bytes, ctype)`,
+which writes `response_<token>_<hex>.<ext>` to the session dir that
+appears as `runs/<trace_id>/harnesses/<slug>/voice/`. Those files are
+then served by `/pzapi/runs/audio?path=...` for UI playback and fed
+through the transcription plugin for scoring.
+
+If your harness builds correctly but the report shows zero agent audio,
+you violated this contract. Re-read the shapes above.
+"""
+
+
+def _modality_specific_contract(test_cases: list[Any] | None) -> str:
+    """Return the modality-specific harness contract for this candidate's
+    tests. Empty string when no modality needs a custom contract.
+
+    The input/output types we treat as voice signals — any of these in
+    the candidate's test cases injects the voice contract:
+      * input_type:  ``conversation`` / ``voice_conversation`` / ``voice_turn`` / ``audio_content``
+      * output_type: ``voice_conversation`` / ``voice_turn`` / ``audio_content``
+
+    Other capabilities (code_gen, vision, ocr, translation) currently
+    have no custom contract — they fall through to the general harness
+    rules. When a future modality needs its own contract, add another
+    branch here; when the contract set grows past ~6, migrate to per-
+    modality files in a skills/ directory (see CLAUDE.md AD-002).
+    """
+    if not test_cases:
+        return ""
+    voice_modalities = {
+        "conversation", "voice_conversation", "voice_turn", "audio_content",
+    }
+    for tc in test_cases:
+        # TestCase may be Pydantic model or dict — handle both for
+        # flexibility (tests call this with dicts; production with models).
+        input_type = (
+            getattr(tc, "input_type", None)
+            or (tc.get("input_type") if isinstance(tc, dict) else None)
+        )
+        output_type = (
+            getattr(tc, "output_type", None)
+            or (tc.get("output_type") if isinstance(tc, dict) else None)
+        )
+        if input_type in voice_modalities or output_type in voice_modalities:
+            return _VOICE_HARNESS_CONTRACT
+    return ""
+
+
+def _render_builder_prompt(
+    prompt_template: str,
+    test_cases: list[Any] | None = None,
+) -> str:
+    """Render __OS_TYPE__, __OS_SPECIFIC_RULES__, and __MODALITY_CONTRACT__
+    based on host + candidate test cases.
+
+    Thin wrapper over ``_render_builder_prompt_for_os`` that ALSO injects
+    the right modality-specific harness contract. Voice tests get the
+    voice harness contract; other modalities get an empty string so the
+    prompt stays lean.
+    """
+    rendered = _render_builder_prompt_for_os(prompt_template)
+    contract = _modality_specific_contract(test_cases)
+    rendered = rendered.replace("__MODALITY_CONTRACT__", contract)
+    return rendered
+
+
 def _build_tools_with_programmatic(base_tools: list[dict]) -> list[dict]:
     """Adapt the tool list to enable Anthropic programmatic tool calling.
 
@@ -1214,8 +1652,10 @@ def _build_tools_with_programmatic(base_tools: list[dict]) -> list[dict]:
         adapted["allowed_callers"] = ["direct", "code_execution_20260120"]
         out.append(adapted)
 
-    # Add the code_execution tool so Claude can write Python that chains
-    # the custom tools above
+    # Explicit code_execution tool so Claude can write Python that
+    # chains the custom tools above. The basic 20250910 / 20250305
+    # web tools don't auto-inject code_execution (the 20260209 pair
+    # did, which is why this was temporarily removed — reverted now).
     out.append({
         "type": "code_execution_20260120",
         "name": "code_execution",
@@ -2252,6 +2692,10 @@ def _build_single_harness(
         candidate, input_data, credentials=credentials, staged_test_cases=staged_test_cases,
     )
     messages = [{"role": "user", "content": initial_message}]
+    # Exposed to the per-turn builder loop so `_render_builder_prompt` can
+    # inject the right modality-specific contract (voice harness shape,
+    # etc.) based on THIS candidate's test-case modalities.
+    test_cases_for_builder = staged_test_cases
 
     accumulated_cost = 0.0
     total_web_searches = 0
@@ -2401,9 +2845,9 @@ def _build_single_harness(
                         "type": "text",
                         "text": _with_shared_preamble(
                             _with_builder_appendix(
-                                BUILDER_SYSTEM_PROMPT.replace(
-                                    "__OS_TYPE__",
-                                    "Windows" if sys.platform == "win32" else "Linux",
+                                _render_builder_prompt(
+                                    BUILDER_SYSTEM_PROMPT,
+                                    test_cases=test_cases_for_builder,
                                 )
                             )
                         ),
@@ -3619,12 +4063,40 @@ def _categorize_failure(text: str) -> str:
 # _build_sandbox_env() is the only place that knows about the venv path.
 # ============================================================================
 
+# ---------------------------------------------------------------------------
+# Venv pre-install manifest
+# ---------------------------------------------------------------------------
+# Packages 85%+ of harnesses end up installing anyway. Pre-installing them
+# saves 2-3 "pip install X then check import" Agent 5 turns per candidate
+# (real-run trace d3b49875: 7 setup turns = $1.36 wasted largely on these).
+#
+# Criterion for inclusion: (a) used by the mainstream API interaction
+# patterns in api_patterns.py (REST, multipart, async-polling, OAuth, SSE,
+# WebSocket), (b) small wheel (<10 MB), (c) widely stable.
+# Includes NOT the big-ML wheels (torch, transformers, playwright) — those
+# stay candidate-specific in requirements.txt.
+VENV_PREINSTALL_MANIFEST = [
+    "requests>=2.31.0",          # HTTP client — every REST harness
+    "websocket-client>=1.6.0",   # sync WS — OpenAI Realtime, ElevenLabs
+    "pydub>=0.25.1",             # audio format conversion (MP3/WAV/PCM16)
+    "soundfile>=0.12.1",         # PCM16 I/O without ffmpeg dependency
+    "numpy>=1.26.0",             # array math (pydub dep + audio pipelines)
+    "python-dotenv>=1.0.0",      # env loading (common for candidate keys)
+]
+
+
 def _create_venv(sandbox_dir: Path, logger, trace_id: str, candidate_name: str) -> bool:
     """
     Create a Python venv in the sandbox directory. Returns True on success.
 
     The venv is at sandbox_dir/.venv. Commands run via _tool_run_code()
     will automatically use it (via _build_sandbox_env() PATH injection).
+
+    After the venv is created, we pre-install `VENV_PREINSTALL_MANIFEST`
+    (small, widely-used HTTP/audio deps). This is best-effort — pre-install
+    failures do NOT fail venv creation (the builder can install missing
+    packages itself if any slipped through). Controlled by
+    `PUZZLEEVAL_VENV_PREINSTALL=0` to disable (debug / minimal-venv runs).
     """
     venv_dir = sandbox_dir / ".venv"
     try:
@@ -3641,6 +4113,11 @@ def _create_venv(sandbox_dir: Path, logger, trace_id: str, candidate_name: str) 
                 "candidate_name": candidate_name,
                 "venv_dir": str(venv_dir),
             })
+            # Optional pre-install of common deps — cuts ~2-3 Agent 5 turns.
+            if os.environ.get("PUZZLEEVAL_VENV_PREINSTALL", "1") != "0":
+                _preinstall_venv_deps(
+                    venv_dir, logger, trace_id, candidate_name,
+                )
             return True
         else:
             logger.warning(f"Venv creation failed for {candidate_name}: {result.stderr[:500]}", extra={
@@ -3656,6 +4133,69 @@ def _create_venv(sandbox_dir: Path, logger, trace_id: str, candidate_name: str) 
             "candidate_name": candidate_name,
         })
         return False
+
+
+def _preinstall_venv_deps(
+    venv_dir: Path,
+    logger,
+    trace_id: str,
+    candidate_name: str,
+) -> None:
+    """Best-effort pre-install of common harness deps into a fresh venv.
+
+    Runs `python -m pip install --quiet <manifest>` using the venv's
+    interpreter. Timeouts at 180s (accommodates slow networks). Logs
+    success/failure but never raises — the builder is still responsible
+    for writing requirements.txt with any candidate-specific extras, and
+    missing packages would surface in the builder's own env_check turn.
+    """
+    if sys.platform == "win32":
+        venv_python = venv_dir / "Scripts" / "python.exe"
+    else:
+        venv_python = venv_dir / "bin" / "python"
+    if not venv_python.exists():
+        logger.warning(
+            f"venv python not found for pre-install: {venv_python}",
+            extra={"operation": "venv_preinstall_missing_python",
+                   "trace_id": trace_id,
+                   "candidate_name": candidate_name},
+        )
+        return
+    try:
+        result = subprocess.run(
+            [str(venv_python), "-m", "pip", "install", "--quiet",
+             "--disable-pip-version-check", *VENV_PREINSTALL_MANIFEST],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode == 0:
+            logger.info(
+                f"Pre-installed {len(VENV_PREINSTALL_MANIFEST)} deps "
+                f"for {candidate_name}",
+                extra={"operation": "venv_preinstall_ok",
+                       "trace_id": trace_id,
+                       "candidate_name": candidate_name,
+                       "packages": VENV_PREINSTALL_MANIFEST},
+            )
+        else:
+            # Don't fail the build — the builder can install any missing
+            # deps itself. Just log which packages slipped through so we
+            # can see the pattern over time.
+            logger.info(
+                f"Pre-install partial for {candidate_name}: "
+                f"{result.stderr[:400]}",
+                extra={"operation": "venv_preinstall_partial",
+                       "trace_id": trace_id,
+                       "candidate_name": candidate_name},
+            )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.info(
+            f"Pre-install failed for {candidate_name} (non-fatal): {exc}",
+            extra={"operation": "venv_preinstall_error",
+                   "trace_id": trace_id,
+                   "candidate_name": candidate_name},
+        )
 
 
 # ============================================================================
@@ -5397,17 +5937,38 @@ def run_implement_test_env_agent(
                         # for every plugin with requires_harness_runner.
                         tc_ctx = tc_eval.input_context
                         tc_input_type = tc_eval.input_type
+                        # Compute the default once per test case so the
+                        # closure can reuse it. Built from the candidate
+                        # name + scope ref — both already in scope here.
+                        # See `_default_input_context` docstring for why
+                        # this lives in our code, not in a prompt rule.
+                        _default_ctx = _default_input_context(
+                            candidate.name,
+                            getattr(tc_eval, "sub_task_ref", None),
+                        )
                         def _runner(payload,
                                     _sd=sandbox_for_runner,
                                     _c=creds_for_runner,
                                     _t=timeout_for_runner,
                                     _ctx=tc_ctx,
+                                    _default=_default_ctx,
                                     _it=tc_input_type):
                             if not isinstance(payload, dict):
                                 payload = {"payload": payload}
                             merged = dict(payload)
-                            if _ctx is not None and "input_context" not in merged:
-                                merged["input_context"] = _ctx
+                            # Always run input_context through the merge —
+                            # handles all three cases: missing entirely,
+                            # present-but-no-system-prompt, present-with-
+                            # system-prompt-under-some-alias. See
+                            # `_merge_with_default_input_context` for the
+                            # full case analysis. Real-run trace f1312253:
+                            # the simpler "skip if test set anything"
+                            # check would have masked partial-context bugs.
+                            payload_ctx = merged.get("input_context")
+                            merged["input_context"] = _merge_with_default_input_context(
+                                payload_ctx if isinstance(payload_ctx, dict) else _ctx,
+                                _default,
+                            )
                             if "input_type" not in merged and _it:
                                 merged["input_type"] = _it
                             return _execute_single_test(_sd, merged, _c, _t)
@@ -5539,17 +6100,38 @@ def run_implement_test_env_agent(
                     if needs_runner:
                         tc_ctx = tc_eval.input_context
                         tc_input_type = tc_eval.input_type
+                        # Compute the default once per test case so the
+                        # closure can reuse it. Built from the candidate
+                        # name + scope ref — both already in scope here.
+                        # See `_default_input_context` docstring for why
+                        # this lives in our code, not in a prompt rule.
+                        _default_ctx = _default_input_context(
+                            candidate.name,
+                            getattr(tc_eval, "sub_task_ref", None),
+                        )
                         def _runner(payload,
                                     _sd=sandbox_for_runner,
                                     _c=creds_for_runner,
                                     _t=timeout_for_runner,
                                     _ctx=tc_ctx,
+                                    _default=_default_ctx,
                                     _it=tc_input_type):
                             if not isinstance(payload, dict):
                                 payload = {"payload": payload}
                             merged = dict(payload)
-                            if _ctx is not None and "input_context" not in merged:
-                                merged["input_context"] = _ctx
+                            # Always run input_context through the merge —
+                            # handles all three cases: missing entirely,
+                            # present-but-no-system-prompt, present-with-
+                            # system-prompt-under-some-alias. See
+                            # `_merge_with_default_input_context` for the
+                            # full case analysis. Real-run trace f1312253:
+                            # the simpler "skip if test set anything"
+                            # check would have masked partial-context bugs.
+                            payload_ctx = merged.get("input_context")
+                            merged["input_context"] = _merge_with_default_input_context(
+                                payload_ctx if isinstance(payload_ctx, dict) else _ctx,
+                                _default,
+                            )
                             if "input_type" not in merged and _it:
                                 merged["input_type"] = _it
                             return _execute_single_test(_sd, merged, _c, _t)

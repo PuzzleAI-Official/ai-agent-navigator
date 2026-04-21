@@ -433,7 +433,10 @@ class TestScreeningAgent:
         # Verify per-candidate calls were made (5 calls for 5 candidates)
         assert mock_client.beta.messages.create.call_count == 5
 
-        # Verify tools include both web_fetch and web_search
+        # Verify tools include both web_fetch and web_search (basic
+        # 20250910 / 20250305 versions — we reverted from 20260209 after
+        # real-run traces showed the dynamic-filtering pair introduced
+        # container_id errors + sandbox spin-up latency without net gain).
         first_call = mock_client.beta.messages.create.call_args_list[0]
         tools = first_call.kwargs.get("tools", [])
         tool_types = {t["type"] for t in tools}
@@ -589,7 +592,11 @@ class TestScreeningAgent:
             run_screening_agent(input_data)
 
     def test_tool_configuration(self):
-        """Verify web_fetch and web_search tool configs are correct."""
+        """Verify web_fetch and web_search tool configs use the basic
+        20250910 / 20250305 versions. We tried the 20260209 dynamic-
+        filtering pair and reverted — see research.py top-of-file
+        comment for real-run evidence (container_id 400 cascades,
+        3-5 min sandbox spin-up, silent hangs on non-beta endpoint)."""
         from puzzleeval.agents.screening import WEB_FETCH_TOOL, WEB_SEARCH_TOOL
 
         assert WEB_FETCH_TOOL["type"] == "web_fetch_20250910"

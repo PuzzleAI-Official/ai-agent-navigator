@@ -9,12 +9,300 @@ An AI agent evaluation platform. Users describe what they need AI to do in plain
 
 Target users: SMBs (small/medium businesses) who are overwhelmed by AI options and don't have the technical ability to evaluate them.
 
-## Current State (as of 2026-04-18)
+## Current State (as of 2026-04-21)
 
-**Production-ready for local hosting. 1042 tests passing (973 core + 30 API
-+ 39 generalizability bench). Zero regressions. TypeScript + Vite clean.**
+**Production-ready for local hosting. Full voice pipeline verified end-to-end
+on real APIs (OpenAI Realtime + ElevenLabs Conversational AI).
+907 tests passing (831 core + 37 API + 39 generalizability bench).
+Zero regressions. TypeScript + Vite clean.**
 
-> **NEW-AH — Voice merge playback fix + thread-local session isolation + Skills architecture decision** (this session, documented below). Previous passes' sections (NEW-AG, NEW-AF, etc.) are preserved below in chronological reverse order.
+> **NEW-AI — Voice end-to-end success + runner-level safety nets + web-tools revert** (this session, documented below). Previous passes' sections (NEW-AH, NEW-AG, etc.) are preserved below in chronological reverse order.
+
+### NEW-AI — Voice end-to-end success + runner safety nets + web-tools revert (2026-04-21)
+
+Four sessions of "agent audio missing" ended here with real agent MP3 files
+landing on disk for the first time across every test case. The pattern across
+prior sessions was the same symptom (0 agent audio) with shifting root
+causes; each session fixed the surface and the next exposed a new one. This
+session found the REAL blocker (harness rejecting calls without
+`input_context.instructions` — two prompt-level rules that Claude didn't
+reliably follow) and moved the fix into deterministic code at the runner
+layer. Also reverted the 20260209 web-tools upgrade after real-run traces
+exposed multiple failure modes, shipped nine cumulative fixes total, and
+captured an honest architectural plan for Phase 4 (Agent 5 as integration
+engineer — documented below but NOT yet implemented).
+
+**Final real-run evidence (trace 28cb2648):**
+- Both harnesses built ($3.91 OpenAI / $10.55 ElevenLabs)
+- **33 agent MP3 files for OpenAI, 21 for ElevenLabs** (first session with
+  non-zero `response_*` files on disk across every candidate)
+- Per-turn scoring populates `audio_paths` with `role: agent` entries
+- 1/8 tests fully passed ElevenLabs, per-test scores 0.25-0.5 (limited by
+  OT-001 substring-match quality, NOT by pipeline correctness)
+- `conversation_*.mp3` files now play end-to-end with uniform sample rate
+  (fixed mid-session after the user reported "only 4 seconds then pauses")
+
+**Capability fix 1 — 20260209 web-tools REVERT (removed everything we did to make them work).**
+
+Earlier in this session we upgraded `web_fetch_20250910` → `web_fetch_20260209`
+and `web_search_20250305` → `web_search_20260209` to gain dynamic filtering
+(~24% fewer input tokens, code execution free when paired). Real-run traces
+exposed multiple failure modes that outweighed the benefit:
+
+- **400 "container_id is required" cascades.** The 20260209 web tools
+  auto-enable code_execution; once its sandbox has pending tool uses, every
+  subsequent call in the conversation must pass `container=<id>`. Missing it
+  on ANY sub-agent (Agent 5 builder, Agent 4 verify, ask_research) produced
+  hard 400s. ElevenLabs build died this way in trace d3b49875.
+- **Agent 2 silent hang.** Agent 2 uses the non-beta `client.messages.create`
+  entrypoint. Passing `container=<id>` there hung the socket silently (8+
+  min stall with zero logs). Observed: run 31f1af7c.
+- **3-5 min sandbox spin-up latency** per Agent 2 real-research call with
+  dynamic filtering enabled — inflated wall-clock with no corresponding
+  quality gain on our discovery workload.
+
+Reverted everything:
+- `web_fetch` / `web_search` back to `20250910` / `20250305` in
+  `research.py`, `screening.py`, `implement_test_env.py` (main + ask_research
+  sub-agent)
+- Removed `container_id` threading from Agent 5 builder loop, Agent 4
+  verify continuations, Agent 2 research continuations, ask_research
+  sub-agent
+- Restored explicit `code_execution_20260120` declaration in
+  `_build_tools_with_programmatic` (basic web tools don't auto-inject, so
+  the explicit tool is required for plugin-chain `allowed_callers` to work)
+- Regression guard class `TestNoContainerThreadingAfterRevert` asserts NO
+  `_kwargs_*["container"] =` patterns in active code and NO
+  `"type": "web_fetch_20260209"` in active tool definitions
+
+If anyone ever wants to re-try 20260209, the revert-guard tests point them
+at `research.py`'s top-of-file comment block which enumerates the real-run
+failure modes and the full migration checklist required.
+
+**Capability fix 2 — Runner-level default input_context (THE actual multi-session blocker).**
+
+The REAL reason agent audio kept missing across prior sessions: the
+OpenAI Realtime + ElevenLabs Conversational AI harnesses both hard-fail
+when called without `input_context["instructions"]` (or any of the 5
+accepted aliases: `instructions`, `system_prompt`, `system`, `brief`,
+`agent_prompt`). Root cause chain:
+
+1. Agent 3's prompt rule says voice tests MUST populate
+   `input_context.instructions`. In real runs (trace f1312253), Agent 3
+   emitted `input_context: null`. Rule violated.
+2. Agent 5's builder prompt teaches a `DEFAULT_INSTRUCTIONS` fallback
+   inside the harness. In real runs, the OpenAI harness Agent 5 wrote
+   contained literally `if not instructions: return _fail("missing
+   system prompt in input_context", t0)` with NO fallback. Rule violated.
+3. The plugin's `drive_conversation` calls harness.run() with
+   `{audio_url, turn_index, session_state}` — no `input_context`.
+4. The runner closure DID merge `tc.input_context` from the test case,
+   but `tc.input_context` was null → no merge → harness 400s on every turn
+   → plugin sees empty audio → zero response files saved.
+
+Two prompt-level rules that both failed adherence. Fix at the runner
+layer (our code, deterministic, not dependent on Claude):
+
+- `_SYSTEM_PROMPT_ALIASES = ("instructions", "system_prompt", "system",
+  "brief", "agent_prompt")` — mirrors the accepted-key list both
+  observed harnesses use. Adding a new alias = 1-line change.
+- `_default_input_context(candidate_name, scope_role)` returns a dict
+  populating EVERY alias with a candidate-aware default
+  ("You are a helpful {scope_role} for {candidate_name}. …").
+- `_merge_with_default_input_context(test_case_ctx, default_ctx)` —
+  handles three real-world cases cleanly:
+  1. `test_case_ctx is None` → full default
+  2. Test has other keys but no system-prompt field (e.g.,
+     `{"persona_name": "Vera"}`) → preserve original keys + fill all
+     system-prompt aliases from default
+  3. Test has its own system prompt under one alias → propagate that
+     value to every other alias so harnesses reading different names
+     all see the user's intent
+- BOTH runner closures in `_build_single_harness` now route through
+  `_merge_with_default_input_context` — the deterministic gate.
+
+Regression guards: `TestDefaultInputContextFallback` class with 4 tests
+covering the alias list, null case, partial-other-keys case,
+partial-with-prompt case (with propagation across all aliases).
+
+**Capability fix 3 — Voice plugin handles THREE audio return shapes.**
+
+Each prior session, a different harness chose a different valid return
+shape for `raw_response` and the plugin had no handler → silent
+fall-through → 0 agent audio. This session consolidated:
+
+- **Shape A (inline bytes):** `raw_response.audio_bytes: <bytes>` — the
+  pre-existing path, works unchanged.
+- **Shape A-variant (base64 STRING):** `raw_response.audio_bytes: "<b64
+  str>"` — what the OpenAI Realtime harness emits for JSON-safe
+  subprocess marshaling. pydub silently mishandles strings (accepts at
+  construction, fails at `.export()`), wave raises TypeError. Fix:
+  decode at the TOP of the pcm16 branch BEFORE pydub/wave touch the
+  payload.
+- **Shape B (on-disk file path):** `raw_response.audio_path: "/tmp/x.wav"`
+  — what a later OpenAI harness chose, saving audio via pydub/ffmpeg to
+  a temp file first. Fix: plugin responder reads the file into bytes,
+  derives content_type from the extension, continues down the bytes path
+  so `_save_audio_blob` sees a uniform contract.
+
+Regression guards: `TestVoicePCM16StringNormalization` (3 tests) +
+`test_responder_handles_audio_path_harness_return_shape` — cover both
+new shapes with unit-level verification (no real API needed).
+
+**Capability fix 4 — Conversation merger normalizes sample rates via pydub.**
+
+The byte-concat merger (shipped in NEW-AH) produced files that played
+the first segment then paused. Root cause: caller TTS produces MP3 at
+44.1 kHz; OpenAI Realtime PCM16 → pydub MP3 produces agent files at 24
+kHz. Byte-concat writes the FIRST frame's metadata (44.1 kHz) but
+subsequent frames have a different sample rate → players halt at the
+first inconsistency. User reported "only 4 seconds then pauses."
+
+Fix: `_try_merge_via_pydub(ordered_paths, out_path, ext)` new method.
+Decodes each per-turn file into an `AudioSegment`, normalizes every
+segment to the FIRST segment's frame_rate + channel count (preserves
+caller TTS quality), concatenates via `AudioSegment` `+` operator,
+exports as a uniformly-encoded MP3. Byte-concat path stays as fallback
+when pydub/ffmpeg unavailable. Regression guards:
+`TestConversationMergeNormalizesSampleRate` (3 tests).
+
+Also re-merged 16 existing conversation files from run 28cb2648 in
+place to fix the broken playback immediately (no pipeline re-run
+needed). All verified uniformly 44.1 kHz mono after repair.
+
+**Capability fix 5 — Voice harness return-shape contract (Option A).**
+
+Formalized the harness-to-plugin contract in the builder prompt so
+future harnesses pick from the 2 supported shapes instead of inventing
+a 3rd. Injected via the conditional placeholder pattern:
+
+- New constant `_VOICE_HARNESS_CONTRACT` — explicit contract listing
+  Shape A (inline bytes) + Shape B (on-disk file path), required fields,
+  forbidden keys (`audio_url`, `audio_b64`, `audio_data`, etc.), and the
+  hard rule "raw_response MUST contain EITHER audio_bytes OR audio_path,
+  never both."
+- `_modality_specific_contract(test_cases)` returns the voice contract
+  when test cases include voice/conversation/audio modalities, empty
+  string otherwise. Non-voice builds don't pay the prompt-token tax.
+- `__MODALITY_CONTRACT__` placeholder in `BUILDER_SYSTEM_PROMPT` — same
+  injection pattern as `__OS_SPECIFIC_RULES__`.
+- `_render_builder_prompt(template, test_cases)` — unified renderer
+  that fills all three placeholders (`__OS_TYPE__`,
+  `__OS_SPECIFIC_RULES__`, `__MODALITY_CONTRACT__`).
+
+**Forward-compat note:** this injection pattern IS the structural
+predecessor of a skills-style per-modality loader (see AD-002 revisit
+trigger). When modality count crosses ~8, convert
+`_VOICE_HARNESS_CONTRACT` to a `skills/voice.md` file and
+`_modality_specific_contract` to a file-reading router — no call-site
+changes. Written in the shape we want to migrate to.
+
+Regression guards: `TestModalityContractInjection` class (5 tests) —
+contract content, voice-tests inject, non-voice-tests don't,
+unknown-platform safe, OS-and-modality compose independently.
+
+**Capability fix 6 — Explicit-candidate boost actually persists.**
+
+Real-run trace d3b49875: user said "Compare OpenAI and ElevenLabs voice
+stacks", Agent 1 correctly captured `explicit_candidates=["OpenAI",
+"ElevenLabs"]`, Agent 2 found both but scored them low
+(OpenAI=0.445, ElevenLabs=0.61). Default picks chose 3 higher-ranked
+packaged products; user had to manually flip 5 checkboxes to test what
+they asked for.
+
+Root cause: `inject_explicit_candidates` in `research.py` only INJECTED
+new synthetic candidates when an explicit name wasn't found — when
+found, it was a no-op. The function now also BOOSTS existing
+candidates' `relevance_score` to ≥ 0.95 on substring match.
+
+Second-half fix: `pipeline_runner.py::_branch_a_research_and_screening`
+only saved state to `state.agent2_result` when `len(injected) >
+len(original)`. The boost changes SCORES without adding rows, so the
+boost ran in memory but was silently discarded. Fix: track
+`boosted_names` separately, save state on EITHER new candidates OR
+changed relevance_scores.
+
+Regression guards: `TestExplicitCandidateRelevanceBoost` (2 tests) +
+`test_pipeline_saves_boosted_state_even_without_new_candidates`.
+
+**Capability fix 7 — Windows OS-conditional rules + venv pre-install.**
+
+Real-run trace d3b49875 showed 7 Agent 5 env-setup turns ($1.36 wasted)
+on Unix muscle-memory commands failing on Windows (`tail`, `head`,
+piped `grep`, `&`, etc.) plus sequential package-import probes. Two
+general fixes:
+
+- `_OS_RULES_WINDOWS` / `_OS_RULES_LINUX` / `_OS_RULES_MACOS` constants
+  injected via `__OS_SPECIFIC_RULES__` placeholder based on
+  `sys.platform`. Windows gets the full Unix→Windows translation table
+  + `python -c` silent-output trap warning; Linux/macOS get shorter
+  POSIX acknowledgments; unknown platforms get empty block.
+- `VENV_PREINSTALL_MANIFEST = ["requests", "websocket-client", "pydub",
+  "soundfile", "numpy", "python-dotenv"]` — 6 packages 85%+ of harnesses
+  install anyway. `_preinstall_venv_deps` runs `pip install --quiet
+  <manifest>` right after venv creation. Gated behind
+  `PUZZLEEVAL_VENV_PREINSTALL=0` for debug runs.
+- Builder prompt advertises the pre-installed packages explicitly so
+  Claude doesn't redundantly verify them.
+
+Regression guards: `TestEfficiencyHardening_RealRun_d3b49875` class
+(7 tests) — OS translation table, no-`python -c`-retry rule,
+env_check.py pattern, parallel-write rule, venv manifest, env-var
+toggle, prompt advertisement.
+
+**Capability fix 8 — Parallel writes + env_check.py pattern in builder prompt.**
+
+OS-agnostic prompt additions to cut typical build-time sequential writes
+(3 separate `write_file` turns for `requirements.txt` + `harness.py` +
+`smoke_test.py` = $1.04 wasted) down to 1 parallel turn; and to cut
+5-turn package-probe sequences down to 2 (write `env_check.py` + run).
+Included escape hatch language ("guideline, not mandate") so the rule
+doesn't over-constrain builds where sequential writes are genuinely
+needed.
+
+**Architectural decision — Phase 4 / Agent 5 as integration engineer (planned, NOT yet implemented).**
+
+The honest architectural weakness exposed this session: Agent 5's
+`HARNESS_COMPLETE` signal is misleading because the builder writes its
+OWN live_test.py (with whatever payload shape it likes) rather than
+calling the harness with the EXACT payload the plugin's
+`drive_conversation` will send in production. That's why every session
+found a new production-only bug even though the builder reported
+"live test PASSED".
+
+User's proposed fix (agreed as next-session work):
+
+- **Phase 4 — REAL TEST PROBE** inserted between Phase 3 (live API
+  validation) and `HARNESS_COMPLETE`
+- Agent 5's sandbox gets `agent_3_test_cases.json` staged as a file
+- Agent 5's sandbox gets `_production_shape_helper.py` auto-seeded with
+  `derive_production_payload(test_case)` + `synth_caller_audio_url(text)`
+- Builder MUST: read a real Agent 3 test case, build the production-shape
+  payload, call harness, verify success=True with expected audio shape
+- If the probe fails, the builder patches the HARNESS (never the test
+  data) until it passes
+- `_run_verification_checks` gains a deterministic check for
+  `phase_4_passed.txt` written by the successful probe — bypass
+  impossible
+
+The runner-level default (capability fix 2 above) stays in place as
+defense-in-depth even after Phase 4 lands. Belt AND braces.
+
+**Session test growth:** 784 → 831 core tests (+47 regression guards).
+API: 37 tests unchanged. Generalizability: 39 unchanged. Zero
+regressions across the session.
+
+**Real runs this session:**
+- `d3b49875` — first E2E with 20260209, exposed container_id + PCM16 bugs
+- `4068e872` — second E2E, exposed audio_path shape + Agent 2 hang
+- `5a59acbc` — third E2E after revert, exposed input_context blocker
+- `f1312253` — fourth E2E with Option A contract, still 0 audio (revealed
+  the DEEPER input_context issue)
+- `28cb2648` — **FIFTH AND FINAL** — agent MP3s finally land end-to-end
+  after runner-level default + merger fix (total spend ~$60 across the
+  session; this one was $15.54 of that)
+
+
 
 ### NEW-AH — Voice playback fix + thread-local isolation + Agent Skills decision
 
@@ -2690,7 +2978,103 @@ stringified bytes as Python repr — bug surface that cost us a
 real-run cycle before being caught. The sentinel is the stable seam
 for every future modality that ships binary data.
 
-## Open Threads & Known Limitations (2026-04-18)
+### AD-007: Safety-critical contracts live in deterministic code, not prompts
+
+**Decision**: When Claude's adherence to a prompt rule determines
+whether a runtime contract holds (vs. being a soft quality hint),
+push the enforcement into OUR code where adherence is guaranteed.
+Prompts are for teaching patterns; deterministic runtime gates are
+for enforcing contracts.
+
+**Why**: Four sessions chased the same symptom (zero agent audio)
+with different root causes. Session 4 (NEW-AI) landed when we
+stopped trusting prompt-level rules and pushed the default
+`input_context` into the runner closure. Both prompt-level rules
+(Agent 3 must emit `input_context.instructions`; Agent 5's harness
+must have a `DEFAULT_INSTRUCTIONS` fallback) were violated in the
+same real run. Moving the fallback to the runner — code we own,
+not prompts we hope Claude follows — closed the gap in one session.
+
+**Operational consequence**: when you add a contract that the
+product depends on at runtime, ask "can Claude violating the
+prompt-level description of this contract produce a silent
+failure?" If yes, add a deterministic enforcement point
+(verification gate, runner closure, validator). Keep the prompt
+rule too — both layers. Defense in depth.
+
+**Examples already applied**:
+- Runner-level default `input_context` injection (NEW-AI)
+- Pipeline-runner save-on-score-change for explicit-candidate
+  boost (NEW-AI, capability fix 6)
+- Container-threading revert guards that fail a test if anyone
+  silently re-adds the 20260209 patterns (NEW-AI, capability fix 1)
+
+**Examples planned (Phase 4 design)**:
+- `_run_verification_checks` will require `phase_4_passed.txt`
+  written by a real-test probe before accepting `HARNESS_COMPLETE`
+
+### AD-008: Web-tool version selection prioritizes behavioral stability over features
+
+**Decision**: Stay on `web_fetch_20250910` + `web_search_20250305`
+(basic versions) rather than the 20260209 dynamic-filtering pair.
+Revisit only if Anthropic:
+1. Fixes the non-beta `messages.create` hang on `container` kwarg, OR
+2. Documents a clean "use without container threading" mode for
+   read-only tool users, OR
+3. Ships a workload where the 24% input-token savings from dynamic
+   filtering meaningfully outweighs 3-5 min sandbox spin-up latency
+
+**Why**: Real-run evidence (traces d3b49875 + 31f1af7c + 4068e872
+accumulated across NEW-AI) showed the 20260209 pair introduces new
+failure classes that the basic versions don't have:
+- 400 "container_id is required" cascades across every sub-agent
+  using the tools
+- Agent 2's non-beta endpoint silently hangs on `container` kwarg
+- Dynamic filtering's sandbox spin-up adds 3-5 min per real
+  research call
+- The theoretical 24% token savings doesn't materialize on our
+  discovery workload because Agent 2 only runs 2-3 searches per
+  request — not enough content to justify filtering overhead
+
+**Revisit procedure** (when we try again): read the regression
+tests in `TestNoContainerThreadingAfterRevert` first — they
+enumerate every code site that needs container-ID threading if we
+re-upgrade. Then implement the full checklist in one pass:
+- Thread `container_id` through Agent 5 builder, Agent 4 verify
+  continuations, ask_research sub-agent
+- Move Agent 2 to `client.beta.messages.create` (the non-beta
+  path is the hanging one)
+- Audit EVERY new sub-agent added after this for container
+  propagation
+
+### AD-009: The modality-contract injection pattern is a skills-loader predecessor
+
+**Decision**: Modality-specific build rules (voice harness
+contract, future vision/code-gen/translation contracts) live in
+string constants injected via `__MODALITY_CONTRACT__` placeholder
+— the same conditional-injection pattern as
+`__OS_SPECIFIC_RULES__`. When modality count crosses ~8 (AD-002
+revisit trigger), convert to `skills/voice.md` files and
+`_modality_specific_contract` becomes a file-reader router.
+
+**Why**: This is the minimum-work predecessor of the skills-style
+per-modality organization we want eventually. The structural
+shape already matches what a skills loader would look like:
+- Placeholder in the template (equivalent to skill metadata)
+- Function that picks the right content based on input
+  characteristics (equivalent to skill routing)
+- Empty-string fallback for non-matching cases (equivalent to
+  "no skill applies — use general rules")
+
+The migration is purely where the strings come from: constants
+today, disk files tomorrow. Call sites don't change.
+
+**Current reality** (2026-04-21): only voice has a dedicated
+contract (`_VOICE_HARNESS_CONTRACT`). Other modalities use the
+general builder rules. Adding a new modality contract is a 2-line
+change: new constant + branch in `_modality_specific_contract`.
+
+## Open Threads & Known Limitations (2026-04-21)
 
 Honest ledger of what's not fixed, what might need fixing, and what's
 deferred with reasoning. Future sessions: read this first to avoid
@@ -2940,6 +3324,136 @@ reached Agent 5. Voice-specific verification remains OT-002
 `agent_4_output.web_fetch_blocks >= 1` as a leading indicator.
 When blocks > candidate_count × 1.5, the environment is likely
 blocking WebFetch wholesale.
+
+### OT-013: HARNESS_COMPLETE is misleading — builder tests a different code path than production
+
+**Symptom (observed 2026-04-21 across traces f1312253 + 28cb2648)**:
+Agent 5 writes its own `live_test.py` during the build loop, runs
+it, sees it pass, and signs `HARNESS_COMPLETE`. But the live test
+invokes `harness.run()` with the payload shape the builder CHOSE
+— e.g., `{"text": "hello", "input_context": {"instructions": ...},
+"turn_index": 0, "session_state": {}}`. Production's plugin calls
+with `{"audio_url": "...", "turn_index": 0, "session_state": {}}`
+— no `input_context`, different input channel. Every prior session
+found a bug here: the builder's happy-path live test didn't
+exercise the production call shape.
+
+**Impact**: `HARNESS_COMPLETE` doesn't reliably mean "production
+will work." We've been reactive to each new mismatch.
+
+**Current mitigation (NEW-AI capability fix 2)**: the runner-level
+default `input_context` injection catches the input_context subclass
+of this bug regardless. That's belt-and-braces, not a cure.
+
+**Planned cure (documented in NEW-AI's Phase 4 block, NOT yet
+shipped)**: mandate Agent 5 run a "REAL TEST PROBE" — pick one of
+Agent 3's actual test cases, derive the production-shape payload
+via an auto-seeded helper, call harness, verify success. The
+verification gate enforces this deterministically; bypass impossible.
+Design is in CLAUDE.md NEW-AI block; implementation deferred to
+next session.
+
+**Why deferred**: user prioritized verifying the current runner-level
+default before adding more code — standard "change one thing at a
+time" debugging. The real run (trace 28cb2648) verified that fix
+works; now Phase 4 is the next layer.
+
+### OT-014: Substring assertion matching is too brittle for natural-language voice scoring
+
+**Symptom (observed in trace 28cb2648's candidate_runs)**: even when
+agent audio is correctly saved and transcribed, per-turn scoring
+matches against Agent 3's `expected_agent_contains` substrings —
+a literal string check. Voice agents respond in natural language:
+- Test asserts `"150"` → agent says "around one hundred and fifty"
+- Test asserts `"Sarah"` → agent says "Can you confirm your name?"
+  without re-stating "Sarah" verbatim
+- Test asserts `"afternoon"` → agent says "this evening if that works"
+
+**Impact**: per-test scores are 0.25-0.5 even when the agent is
+semantically correct. Pass rate understates voice quality by
+20-50%.
+
+**Current mitigation**: none — this is the OT-001 class, broader
+than just voice.
+
+**Fix direction**: per-turn semantic-match fallback. When substring
+match fails, escalate to a one-shot LLM judge call comparing the
+transcript against the test's intent. ~$0.002 per escalation.
+Estimate ~1 hour of work.
+
+**Why not this session**: structural correctness (agent audio
+actually reaching the report) was the higher priority; scoring
+quality is a separate problem with clear remediation when we're
+ready.
+
+### OT-015: The pydub-merger path requires ffmpeg on PATH — byte-concat fallback is degraded
+
+**Symptom**: if a future run has pydub installed but ffmpeg
+missing, `_try_merge_via_pydub` fails at the MP3 decode/export
+step, falls back to byte-concat. Byte-concat only produces playable
+merged files when all per-turn segments share encoding parameters
+(same sample rate + channel count). Mixed-format inputs produce
+files that pause at the first transition (the exact bug we just
+fixed this session).
+
+**Impact**: only affects environments where ffmpeg isn't installed.
+Our venv pre-install manifest includes pydub but NOT ffmpeg (ffmpeg
+isn't pip-installable — it's a system binary). Windows boxes
+without ffmpeg will hit the degraded path.
+
+**Current mitigation**: the Agent 5 builder prompt recommends
+ffmpeg availability checking in Phase 1. The merger doesn't
+FAIL without ffmpeg — it falls back to byte-concat — but playback
+quality degrades.
+
+**Fix direction**: either document ffmpeg as a hard prerequisite
+in README, OR add a system-level install check in the startup
+script that warns if ffmpeg is missing.
+
+### OT-016: Explicit-candidate relevance boost can still lose against packaged products at 0.95
+
+**Symptom (observed in trace 28cb2648 selection pause)**: after
+the boost, OpenAI and ElevenLabs land at `relevance_score=0.95`
+each. But Phase 7's scope-selection uses weighted scoring with
+multiple dimensions (user_picked_here, credentials, docs_quality,
+pricing_fit) — not just relevance. A packaged product with
+`adoption_difficulty=easy` + higher `docs_quality` can still beat
+a boosted developer-primitive at the default_picks cutoff.
+
+**Impact**: user named providers are ALWAYS in the pool (injection
+works) and ALWAYS above the 0.84 floor, but may still be
+unchecked by default if other candidates score higher on the
+non-relevance dimensions. User has to manually flip 1-2 checkboxes.
+
+**Workaround today**: the SelectionPanel shows all candidates,
+user checks what they want before submit. Friction, not breakage.
+
+**Fix direction**: in `selection.py`, add a hard override — if
+a candidate's source is `user_explicit` OR it's substring-
+matched against `explicit_candidates`, force it into default_picks
+regardless of weighted score. The relevance boost then becomes
+informational (shows "user asked for this") rather than the
+mechanism that forces selection.
+
+### OT-017: Module-level singleton voice plugin — shared _token_to_audio dict
+
+**Symptom (observed during probe of trace 28cb2648)**: the
+`VoiceRealtimePlugin._token_to_audio` dict is a single
+thread-shared mapping, while `_session_dir` is thread-local (per
+AD-004). For PARALLEL candidate runs this happens to work —
+session tokens are unique `secrets.token_hex(16)` per session, so
+there's no collision on keys. But a subtle gotcha: if two
+candidates in the same run generate audio for the same
+turn_token (extremely rare: would require token-hex collision),
+the second write wins.
+
+**Impact**: today, zero observed impact. Design smell for
+correctness-critical scale-up.
+
+**Fix direction**: make `_token_to_audio` thread-local too.
+One-line change (`self._token_to_audio = threading.local()`,
+then `self._tl.token_to_audio.setdefault(token, path)` etc.).
+Not a priority until we see a real collision.
 
 ## Diagnostic Conventions (Phase Fingerprints + Flag Matrix)
 

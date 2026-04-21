@@ -256,7 +256,9 @@
       "Bash(ls /c/Users/Deanh/OneDrive/Desktop/ai-agent-navigator/PuzzleEval-local/real_debug_3*.log)",
       "Bash(ls /c/Users/Deanh/OneDrive/Desktop/ai-agent-navigator/PuzzleEval-local/*.log)",
       "Bash(python -c ' *)",
-      "Bash(ANTHROPIC_API_KEY=dummy python -m pytest tests/test_deep_verify_and_fallback.py tests/test_prod_audit_fixes.py -q --no-header)"
+      "Bash(ANTHROPIC_API_KEY=dummy python -m pytest tests/test_deep_verify_and_fallback.py tests/test_prod_audit_fixes.py -q --no-header)",
+      "Bash(ANTHROPIC_API_KEY=dummy PUZZLEEVAL_WEBHOOK_PORT=18765 PUZZLEEVAL_VOICE_PORT=18766 PUZZLEEVAL_SMTP_PORT=12525 PUZZLEEVAL_SLACK_MOCK_PORT=18777 PUZZLEEVAL_SMS_MOCK_PORT=18778 python -m pytest tests/test_prod_audit_fixes.py -v -k \"PCM16 or ContainerId or ExplicitCandidate\" --tb=short)",
+      "Bash(ANTHROPIC_API_KEY=dummy PUZZLEEVAL_WEBHOOK_PORT=18765 PUZZLEEVAL_VOICE_PORT=18766 PUZZLEEVAL_SMTP_PORT=12525 PUZZLEEVAL_SLACK_MOCK_PORT=18777 PUZZLEEVAL_SMS_MOCK_PORT=18778 python -m pytest tests/ -q --tb=short)"
     ]
   }
 }

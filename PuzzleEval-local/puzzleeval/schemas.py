@@ -406,8 +406,16 @@ class ScopeTestSpec(BaseModel):
         default=7,
         description=(
             "How many test cases to generate for this scope. "
-            "Default 7 (middle of 5-8 range). Agent 1 may increase for "
-            "complex scopes or decrease for simple ones."
+            "Agent 1 DERIVES this from signals — not from a gut-feel "
+            "fixed number. For file-based scopes with user files "
+            "attached: equals the file count (Agent 3F emits one "
+            "TestCase per unique input). For file-based scopes "
+            "without files yet: estimated from the file_description "
+            "midpoint. For text-based scopes: derived from the 6 "
+            "canonical coverage dimensions (natural floor ~6, "
+            "flex up for complex scopes). Schema default 7 is a "
+            "fallback for when derivation is impossible; the Agent "
+            "1 prompt mandates showing derivation in notes."
         )
     )
 
@@ -2342,6 +2350,30 @@ class FailedHarness(BaseModel):
             "failures (SPA shells, auth walls, soft 404s — Phase 1.5). "
             "Aggregated into Agent5Result.web_fetch_blocks for run-level "
             "observability."
+        ),
+    )
+
+    # OBSERVABILITY BUG #2 FIX (2026-04-21): accumulated cost up to the
+    # failure point. Previously this field didn't exist, so every LLM
+    # call made during a build that ultimately failed (rate-limit
+    # retries exhausted, bad request, API errors) had its cost silently
+    # dropped from the run-level total. A rate-limited ElevenLabs-style
+    # build could burn $5-8 in 10 turns before hitting its final
+    # `FailedHarness` — all of that was invisible in reporting. Now
+    # every FailedHarness return site passes the running
+    # `accumulated_cost` and the run-level aggregator sums it alongside
+    # successful `TestHarness.build_cost_usd` for accurate total spend.
+    build_cost_usd: float = Field(
+        default=0.0,
+        description=(
+            "Total USD cost of LLM calls made during this failed build, "
+            "up to and including the turn where the failure was raised. "
+            "Zero if the build failed before any LLM call (e.g. "
+            "missing-credentials early exit, venv setup failure). "
+            "Non-zero if the build made API calls before a terminal "
+            "error (rate-limit retries exhausted, API errors, "
+            "out-of-budget). Aggregated into Agent5Result."
+            "total_build_cost_usd for accurate run-level cost totals."
         ),
     )
 

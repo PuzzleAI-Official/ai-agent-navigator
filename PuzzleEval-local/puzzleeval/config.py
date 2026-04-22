@@ -409,7 +409,20 @@ AGENT6_RATE_LIMIT_BACKOFF = int(
     os.environ.get("PUZZLEEVAL_AGENT6_RATE_LIMIT_BACKOFF", "3")
 )  # Seconds to wait on rate limit before retry
 AGENT6_EVAL_MAX_TOKENS = int(
-    os.environ.get("PUZZLEEVAL_AGENT6_EVAL_MAX_TOKENS", "4096")
+    # Real run 045bbd10 (2026-04-21) exposed that 4096 tokens is too
+    # small when the evaluator batches 8 test cases AND uses adaptive
+    # thinking (thinking tokens are a subset of max_tokens). Adaptive
+    # thinking burns ~1-3K tokens; batch JSON for 8 tests × 3-5
+    # criteria × ~50 tokens each = 1-2K more. Total needed ~3-5K for
+    # JSON alone, which exceeds the remaining budget after thinking.
+    # Real symptom: `EOF while parsing a string at column 5471` (JSON
+    # truncated mid-string) → retry also truncates → terminal fail
+    # → all evaluations return empty → every test scored 0/100.
+    # Bumped to 16000 which matches AGENT5_MAX_OUTPUT_TOKENS and
+    # gives comfortable headroom. max_tokens is a ceiling — actual
+    # usage stays low for small batches, so this has no cost impact
+    # when not needed.
+    os.environ.get("PUZZLEEVAL_AGENT6_EVAL_MAX_TOKENS", "16000")
 )
 AGENT6_PASS_THRESHOLD = float(
     os.environ.get("PUZZLEEVAL_AGENT6_PASS_THRESHOLD", "0.5")
@@ -643,6 +656,48 @@ EVAL_PROGRAMMATIC_CHAINING_ENABLED = os.environ.get(
 PROGRAMMATIC_TOOLS_ENABLED = os.environ.get(
     "PUZZLEEVAL_PROGRAMMATIC_TOOLS", "0"
 ).lower() not in ("0", "false", "no", "")
+
+
+# ---------------------------------------------------------------------------
+# Agent 5 message-level prompt caching (cache-the-growing-conversation)
+# ---------------------------------------------------------------------------
+# When enabled (default), Agent 5's builder loop places a `cache_control`
+# breakpoint on the last content block of the last message before each
+# `client.beta.messages.create()` call. This caches the growing
+# conversation prefix, so turns 2+ read prior messages at 0.1x base cost
+# instead of full price.
+#
+# Docs reference: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+#   "For Multi-Turn Conversations ... use automatic caching" — we use
+#   explicit block-level placement which is equivalent and more
+#   predictable.
+#
+# Combined with the existing system-block cache (10.7K tokens) and the
+# `clear_at_least: 10000` guard on context_management.edits, this gives
+# a 40-60% input-cost reduction on 15-25 turn Agent 5 builds at Opus
+# rates with zero risk of paying more than current baseline — worst
+# case (every cache miss) matches pre-change cost.
+#
+# Flip to 0 if a future Anthropic change makes this regressive, or
+# during bisection if cache-related errors surface in real runs.
+# ---------------------------------------------------------------------------
+CACHE_MESSAGES_ENABLED = os.environ.get(
+    "PUZZLEEVAL_CACHE_MESSAGES_ENABLED", "1"
+).lower() not in ("0", "false", "no", "")
+
+
+# Minimum cleared-tokens threshold for `clear_tool_uses_20250919` to fire.
+# Below this, the cache-invalidation cost from clearing exceeds the
+# cache-read savings on the remaining prefix. Per docs: "clear enough
+# tokens to make the cache invalidation worthwhile. Use the
+# `clear_at_least` parameter." 10K is a conservative breakeven: cache
+# write is 1.25x base, cache read is 0.1x base, so clearing saves
+# roughly 0.9x per cleared token on future reads; 10K cleared ensures
+# we save ~$0.04 at Opus rates which comfortably exceeds the one-time
+# rewrite cost.
+CACHE_CLEAR_AT_LEAST_TOKENS = int(
+    os.environ.get("PUZZLEEVAL_CACHE_CLEAR_AT_LEAST", "10000")
+)
 
 
 MIN_CACHEABLE_TOKENS = {

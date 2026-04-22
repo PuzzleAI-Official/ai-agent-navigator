@@ -420,11 +420,22 @@ os.environ["INTUIT_CLIENT_ID"]
         assert _extract_env_vars_from_code(None) == []
 
     def test_calculate_call_cost_fallback(self):
-        """Test cost calculation without iterations (fallback path)."""
+        """Test cost calculation without iterations (fallback path).
+
+        Updated 2026-04-21: the fallback now also counts top-level
+        cache_creation_input_tokens and cache_read_input_tokens (see
+        OBSERVABILITY BUG #1 fix). Test must explicitly set those to
+        zero (not rely on MagicMock default) otherwise the arithmetic
+        raises TypeError on MagicMock * float.
+        """
         from puzzleeval.agents.implement_test_env import _calculate_call_cost
         mock_response = MagicMock()
         mock_response.usage.input_tokens = 10000
         mock_response.usage.output_tokens = 2000
+        # Explicit zero cache fields so the new fallback path sees
+        # ints (not auto-generated MagicMock attrs).
+        mock_response.usage.cache_creation_input_tokens = 0
+        mock_response.usage.cache_read_input_tokens = 0
         mock_response.usage.iterations = None  # No iterations = fallback
         mock_response.usage.server_tool_use = None
         cost = _calculate_call_cost(mock_response, "claude-sonnet-4-5-20250929")

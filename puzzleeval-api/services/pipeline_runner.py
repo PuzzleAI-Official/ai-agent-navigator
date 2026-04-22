@@ -228,11 +228,32 @@ async def run_pipeline(state: RunState):
         boundaries. Previously cost was only surfaced at agent_completed
         time and the meter appeared frozen during multi-minute agents.
 
+        Also appends an ``AgentRecord`` to ``pipeline_run.agents`` so
+        ``pipeline_summary.json`` shows the per-agent cost breakdown
+        instead of ``agents: []``. Real run e21f6077 (2026-04-21)
+        exposed that the FastAPI backend never populated this list —
+        pipeline_summary.json consistently reported ``total_cost_usd=0``
+        and empty agents despite real spend tracked in
+        ``state.total_cost_usd``. This one helper fixes both.
+
         Raises ``BudgetExceededError`` when the cap is crossed — caller
         catches at the pipeline boundary and surfaces a clear failure.
         """
         if cost_usd and cost_usd > 0:
             state.record_cost(float(cost_usd), reason=agent_name)
+        # Append to pipeline_run.agents for pipeline_summary.json.
+        try:
+            from puzzleeval.pipeline import AgentRecord
+            pipeline_run.agents.append(AgentRecord(
+                name=agent_name,
+                status="success",
+                duration_ms=0.0,  # duration tracked separately in state if needed
+                cost_usd=float(cost_usd or 0),
+                metadata={},
+            ))
+        except Exception:
+            # Summary recording must never break the pipeline.
+            pass
         emit("cost_update", {
             "trace_id": state.trace_id,
             "source": agent_name,
@@ -244,6 +265,24 @@ async def run_pipeline(state: RunState):
     # Save conversation history
     _save_json("agent_1_conversation.json", state.conversation_history)
     _save_json("agent_1_output.json", state.agent1_result)
+    # Record Agent 1 into the summary. Cost lives on the /chat turn
+    # records, not on state.agent1_result — extract from state's
+    # accumulated total minus what later agents will add. For now,
+    # surface Agent 1 as a known-completed agent with its recorded
+    # cost from the conversation phase (state.agent1_cost_usd if
+    # tracked, else 0 — safer than omitting the record entirely).
+    try:
+        from puzzleeval.pipeline import AgentRecord
+        agent_1_cost = getattr(state, "agent1_cost_usd", None) or 0.0
+        pipeline_run.agents.append(AgentRecord(
+            name="agent_1",
+            status="success",
+            duration_ms=0.0,
+            cost_usd=float(agent_1_cost),
+            metadata={},
+        ))
+    except Exception:
+        pass
 
     try:
         emit("pipeline_started", {"trace_id": state.trace_id})

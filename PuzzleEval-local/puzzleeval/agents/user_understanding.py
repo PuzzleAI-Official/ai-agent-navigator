@@ -279,7 +279,11 @@ For each scope (WorkflowStep), specify:
 - `expected_output_description`: describe what ideal output looks like
 - `sample_input`: ONE concrete example input (for downstream steps, this must be a realistic simulation of what the UPSTREAM step would produce)
 - `sample_output`: ONE concrete example of ideal output
-- `test_count_target`: how many test cases (default 7; increase for complex scopes, decrease for trivial ones)
+- `test_count_target`: how many test cases to generate. **DO NOT pick a gut-feel number.** Derive it from signals:
+  - **If `requires_user_files=true` AND user has attached files:** `test_count_target` = len(attached_files). Agent 3F (file-based test generator) emits ONE TestCase per unique input file with multi-dimensional criteria. Asking for more tests than files exist forces Agent 3F to duplicate file copies, producing redundant API calls at test-execution time and no extra information. If near-duplicates or off-topic files are expected, estimate slightly less than file count.
+  - **If `requires_user_files=true` BUT no files attached yet:** estimate from `file_description`. "5-10 sample invoices" → 7. "20-50 receipts" → 15.
+  - **If `requires_user_files=false`:** derive from coverage dimensions to be tested. The canonical 6 dimensions (happy_path, input_variation, edge_case, scale, domain_specific, error_resilience) set a natural floor of ~6 for general coverage. Simple scopes (one-dimensional classification, trivial extraction): 4-5. Moderate scopes: 6-8. Complex scopes (many edge cases, multi-step reasoning): 10-14.
+  - **Never set this from a remembered example number. Always show your derivation in `notes`.**
 - `upstream_output_shape`: for downstream steps (input_from != "user"), describe the JSON/text shape of the upstream step's output. This is CRITICAL — without it, the test agent cannot generate realistic test inputs for this scope.
 - `requires_user_files`: True when the scope ideally tests with real files
 - `file_description`: what files the user should provide (null if requires_user_files is False)
@@ -302,7 +306,7 @@ For each scope (WorkflowStep), specify:
       "expected_output_description": "JSON with vendor_name, line_items[], total, tax, date fields",
       "sample_input": "Invoice from Acme Corp dated 2024-03-15, 3 line items: Widget A ($50), Widget B ($75), Shipping ($10), Total: $135.00, Tax: $12.15",
       "sample_output": "{\"vendor_name\": \"Acme Corp\", \"date\": \"2024-03-15\", \"line_items\": [{\"description\": \"Widget A\", \"amount\": 50.00}, {\"description\": \"Widget B\", \"amount\": 75.00}, {\"description\": \"Shipping\", \"amount\": 10.00}], \"total\": 135.00, \"tax\": 12.15}",
-      "test_count_target": 8,
+      "test_count_target": 7,
       "upstream_output_shape": null,
       "requires_user_files": true,
       "file_description": "5-10 sample invoice photos or PDFs from different vendors",
@@ -324,8 +328,8 @@ For each scope (WorkflowStep), specify:
       "evaluation_focus": ["accuracy", "error_handling", "format_compliance"]
     }
   ],
-  "total_test_target": 14,
-  "notes": "OCR scope gets 8 tests (complex extraction from varied documents). Sync scope gets 6 (structured input, simpler validation). OCR tests need real files; sync tests use synthetic JSON that simulates OCR output."
+  "total_test_target": 13,
+  "notes": "step_1 test_count_target=7 derived from file_description '5-10 sample invoices' midpoint (user hasn't attached files yet; if they attach 3, Agent 3F will emit 3 tests and the validator treats 7 as an aspirational target not a floor). step_2 test_count_target=6 derived from the 6 canonical coverage dimensions (happy_path, input_variation, edge_case, scale, domain_specific, error_resilience) — one test per dimension with synthetic JSON that varies upstream shape."
 }
 ```
 

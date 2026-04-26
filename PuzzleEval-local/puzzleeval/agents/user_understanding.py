@@ -282,7 +282,8 @@ For each scope (WorkflowStep), specify:
 - `test_count_target`: how many test cases to generate. **DO NOT pick a gut-feel number.** Derive it from signals:
   - **If `requires_user_files=true` AND user has attached files:** `test_count_target` = len(attached_files). Agent 3F (file-based test generator) emits ONE TestCase per unique input file with multi-dimensional criteria. Asking for more tests than files exist forces Agent 3F to duplicate file copies, producing redundant API calls at test-execution time and no extra information. If near-duplicates or off-topic files are expected, estimate slightly less than file count.
   - **If `requires_user_files=true` BUT no files attached yet:** estimate from `file_description`. "5-10 sample invoices" → 7. "20-50 receipts" → 15.
-  - **If `requires_user_files=false`:** derive from coverage dimensions to be tested. The canonical 6 dimensions (happy_path, input_variation, edge_case, scale, domain_specific, error_resilience) set a natural floor of ~6 for general coverage. Simple scopes (one-dimensional classification, trivial extraction): 4-5. Moderate scopes: 6-8. Complex scopes (many edge cases, multi-step reasoning): 10-14.
+  - **If `input_type` is `conversation` OR `voice_conversation` OR `voice_turn` (conversational scope):** each test is ONE FULL MULTI-TURN AGENTIC CONVERSATION (an LLM simulates the user reactively; a rubric judge scores the whole transcript). This is NOT "N synthetic scripts" — it's "N scenarios, each a live role-play of 3-8 turns." Depth-over-breadth: 3-5 conversations typically cover more quality surface than 8+ static scripts. Target: **4-6 per conversational scope** covering happy path, frustrated/ambiguous caller, out-of-scope request, context-dependency. Go higher (up to 8) only when the domain has genuinely distinct flows (emergency vs routine vs upsell-decline). NEVER echo the "6 coverage dimensions" rule for conversational scopes — dimensions are scenario designs for agentic runs, not a count multiplier.
+  - **If `requires_user_files=false` AND input_type is NOT conversational:** derive from coverage dimensions to be tested. The canonical 6 dimensions (happy_path, input_variation, edge_case, scale, domain_specific, error_resilience) set a natural floor of ~6 for general coverage. Simple scopes (one-dimensional classification, trivial extraction): 4-5. Moderate scopes: 6-8. Complex scopes (many edge cases, multi-step reasoning): 10-14.
   - **Never set this from a remembered example number. Always show your derivation in `notes`.**
 - `upstream_output_shape`: for downstream steps (input_from != "user"), describe the JSON/text shape of the upstream step's output. This is CRITICAL — without it, the test agent cannot generate realistic test inputs for this scope.
 - `requires_user_files`: True when the scope ideally tests with real files
@@ -333,12 +334,45 @@ For each scope (WorkflowStep), specify:
 }
 ```
 
+### Example test_plan for "Voice agent that handles inbound plumbing calls"
+
+```json
+{
+  "scope_specs": [
+    {
+      "scope_id": "step_1",
+      "test_mode": "synthetic_structured",
+      "input_type": "voice_conversation",
+      "output_type": "voice_turn",
+      "input_description": "Simulated caller in a live multi-turn conversation with the voice agent. NOT a static script — Agent 3 generates a Persona + Goal + Rubric for each test, and an LLM simulates the caller reactively while a rubric judge scores the full transcript.",
+      "expected_output_description": "Agent engages in a natural conversation, collects required information (address, problem, preferred time), and either books an appointment or escalates appropriately.",
+      "sample_input": "Persona: 45yo homeowner, stressed, water heater failing tonight. Goal: book emergency appointment under $300. Constraints: ask price early, decline unrelated upsells.",
+      "sample_output": "Agent greets warmly, asks clarifying questions (location, problem type), offers a price estimate, confirms booking time and address, thanks the caller. Rubric should score goal_completion, accuracy_no_hallucination, info_gathering, appropriate_tone, policy_compliance, scope_adherence.",
+      "test_count_target": 4,
+      "upstream_output_shape": null,
+      "requires_user_files": false,
+      "file_description": null,
+      "evaluation_focus": ["goal_completion", "accuracy", "appropriate_tone", "no_hallucination"],
+      "reference_mode": "exemplar",
+      "side_effects": "read_only",
+      "input_context_hints": {},
+      "agent_instructions": "You are a 24/7 voice agent for Acme Plumbing (Los Angeles metro only). Greet callers warmly, diagnose the problem, collect address + preferred time, quote a fair price from the menu, and confirm the booking — or offer to transfer to a human dispatcher if out of scope. Pricing menu: diagnostic visit $80, water heater replacement $450-$850 depending on capacity, emergency surcharge +$50 after 8pm. Service area: LA metro only. Never quote prices outside this menu. Always ask for the caller's address before committing to a time slot. If the caller is outside LA metro, politely decline and suggest they look locally. If asked about non-plumbing services (AC, electrical), politely redirect."
+    }
+  ],
+  "total_test_target": 4,
+  "notes": "step_1 test_count_target=4 derived from: (1) conversational scope → each test is a FULL agentic conversation, not a static script; (2) 4 distinct scenarios cover the meaningful quality surface — happy path booking, frustrated caller needing empathy, out-of-scope request (AC repair) the agent should redirect, context-dependency test (agent must remember address from turn 2 when confirming in turn 5). Going higher (>6) would cost ~$0.03 per extra conversation for diminishing quality signal."
+}
+```
+
 ### Rules for test plans
 1. `output_type` MUST equal the step's `output_format` — no exceptions.
 2. For downstream steps, `sample_input` MUST look like what the upstream step produces — NOT raw user input.
 3. `upstream_output_shape` is REQUIRED for every step where `input_from` is not "user". Without it, Agent 3 cannot generate realistic downstream test inputs.
 4. When `test_plan` is set, set `total_test_target` to the sum of all `test_count_target` values.
 5. When `workflow` is null (no blueprint), `test_plan` MUST also be null.
+6. **For conversational scopes (`input_type` ∈ `{conversation, voice_conversation, voice_turn}`):** `test_count_target` is the number of LIVE AGENTIC CONVERSATIONS — each a multi-turn role-play driven by an LLM simulator + scored by a rubric judge. NEVER describe these as "synthetic scripts" or "synthetic test cases" in notes — that framing is inaccurate for the agentic path and confuses Agent 3. Use "agentic conversations" / "scenarios" instead.
+7. **For conversational scopes, set `reference_mode="exemplar"`** — conversation quality is subjective (many correct answers), not ground-truth-single-answer.
+8. **For conversational scopes, `agent_instructions` is REQUIRED** — populate with the candidate agent's full system prompt, weaving in EVERY business detail the user mentioned (business name, domain, pricing menu, hours, service area, escalation rules, out-of-scope redirects). Agent 3 copies this string verbatim into every test case's `input_context.instructions` so (a) all candidates compete fairly on the same system prompt, (b) the rubric judge uses it as ground truth for pricing_accuracy / service_area / scope_adherence / policy_compliance scoring. If the user didn't mention a specific detail, use a reasonable default (e.g., "service area: nationwide" if not specified) and note the assumption in TestPlan.notes. NEVER leave `agent_instructions` null for conversational scopes — the downstream system fall-back is a generic "You are a helpful voice agent" that tanks rubric scores. For non-conversational scopes (OCR, vision, code, webhook), leave `agent_instructions` null.
 
 ## Integration and Ambiguous References
 

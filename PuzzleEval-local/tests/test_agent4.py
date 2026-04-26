@@ -380,10 +380,30 @@ class TestScreeningAgent:
         return mock_response
 
     def _make_mock_structure_response(self, parsed_output: Agent4Result) -> MagicMock:
-        """Create a mock response for the structuring call."""
+        """Create a mock response for the structuring call — non-strict tool path.
+
+        Agent 4's structuring step uses ``parse_with_fallback(prefer_non_strict=True)``
+        because Agent4Result reliably overflows Anthropic's compiled-grammar
+        budget (the BuildReadinessChecklist additions made it even bigger).
+        That means the actual API call is ``client.messages.create`` with a
+        forced ``emit_result`` tool, not ``client.messages.parse``. Tests
+        mock the non-strict path: a tool_use block whose ``input``
+        deserializes (via Pydantic) into the expected Agent4Result.
+
+        Pass ``parsed_output=None`` to exercise the "no tool_use block"
+        path — the non-strict helper raises StructuredOutputFallbackError
+        and the agent surfaces it as AgentOutputError.
+        """
         mock_response = MagicMock()
-        mock_response.parsed_output = parsed_output
-        mock_response.stop_reason = "end_turn"
+        if parsed_output is None:
+            mock_response.content = []
+        else:
+            tool_use_block = MagicMock()
+            tool_use_block.type = "tool_use"
+            tool_use_block.name = "emit_result"
+            tool_use_block.input = parsed_output.model_dump()
+            mock_response.content = [tool_use_block]
+        mock_response.stop_reason = "tool_use"
         mock_response.usage = MagicMock()
         mock_response.usage.input_tokens = 2000
         mock_response.usage.output_tokens = 1500
@@ -413,7 +433,7 @@ class TestScreeningAgent:
         mock_client.beta.messages.create.side_effect = verify_responses
 
         # Final structuring call
-        mock_client.messages.parse.return_value = self._make_mock_structure_response(
+        mock_client.messages.create.return_value = self._make_mock_structure_response(
             expected_result
         )
 
@@ -472,7 +492,7 @@ class TestScreeningAgent:
         mock_client.beta.messages.create.side_effect = responses
 
         # Structuring still works
-        mock_client.messages.parse.return_value = self._make_mock_structure_response(
+        mock_client.messages.create.return_value = self._make_mock_structure_response(
             expected_result
         )
 
@@ -505,7 +525,7 @@ class TestScreeningAgent:
         # Structuring returns None
         mock_structure = self._make_mock_structure_response(None)
         mock_structure.parsed_output = None
-        mock_client.messages.parse.return_value = mock_structure
+        mock_client.messages.create.return_value = mock_structure
 
         input_data = Agent4Input(
             candidates=_make_agent2_result(),
@@ -543,7 +563,7 @@ class TestScreeningAgent:
             ))
 
         mock_client.beta.messages.create.side_effect = responses
-        mock_client.messages.parse.return_value = self._make_mock_structure_response(
+        mock_client.messages.create.return_value = self._make_mock_structure_response(
             expected_result
         )
 
@@ -577,7 +597,7 @@ class TestScreeningAgent:
         ]
 
         # Structuring fails
-        mock_client.messages.parse.side_effect = anthropic_module.APIConnectionError(
+        mock_client.messages.create.side_effect = anthropic_module.APIConnectionError(
             request=MagicMock()
         )
 
@@ -631,7 +651,7 @@ class TestScreeningAgent:
             )
             for c in candidates
         ]
-        mock_client.messages.parse.return_value = self._make_mock_structure_response(
+        mock_client.messages.create.return_value = self._make_mock_structure_response(
             expected_result
         )
 
@@ -644,9 +664,19 @@ class TestScreeningAgent:
         from puzzleeval.agents.screening import run_screening_agent
         run_screening_agent(input_data)
 
-        # Must have used the beta endpoint, not the regular one.
+        # Per-candidate VERIFICATION must use the beta endpoint.
+        # (The structuring step legitimately uses non-beta messages.create
+        # via parse_with_fallback's non-strict path — that's a separate
+        # call and not what this test guards against.)
         assert mock_client.beta.messages.create.call_count == len(candidates)
-        assert mock_client.messages.create.call_count == 0
+        # Structuring fires exactly one regular messages.create call;
+        # any MORE calls would mean a verify call leaked to the non-beta
+        # endpoint (the OT-012 regression this test exists to catch).
+        assert mock_client.messages.create.call_count == 1, (
+            "verification must NOT route through non-beta messages.create. "
+            "Exactly 1 call expected (the structuring step); more calls "
+            "indicate verify regressed back to the non-beta endpoint."
+        )
 
         first_call_kwargs = mock_client.beta.messages.create.call_args_list[0].kwargs
 

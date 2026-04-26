@@ -98,6 +98,73 @@ RESEARCH_MODEL = os.environ.get("PUZZLEEVAL_RESEARCH_MODEL", "claude-sonnet-4-6"
 
 
 # ---------------------------------------------------------------------------
+# Agentic Conversational Evaluation (user_simulator + rubric_judge)
+# ---------------------------------------------------------------------------
+# Governs the new persona-driven multi-turn evaluation pipeline that
+# replaces static turn_script + substring matching for conversational
+# tests. See puzzleeval/user_simulator.py and puzzleeval/rubric_judge.py.
+#
+# Global mode override (per-test TestCase.evaluation_mode wins when
+# set — this env var forces a global override across all conversational
+# tests in the run):
+#   "auto"     → per-test evaluation_mode respected (default)
+#   "agentic"  → force agentic path on every conversational test
+#   "scripted" → force legacy static-script path (back-compat only —
+#                multi-turn conversational evaluation needs agentic;
+#                the scripted fallback exists only for legacy tests)
+CONVERSATION_EVAL_MODE = os.environ.get(
+    "PUZZLEEVAL_CONVERSATION_EVAL_MODE", "auto"
+)
+# User simulator runs Haiku 4.5 by default — reactive enough for caller
+# utterances, 10x cheaper than Sonnet. Override to Sonnet when the
+# persona is particularly nuanced (e.g., highly technical customer
+# pushing back on agent claims).
+USER_SIM_MODEL = os.environ.get(
+    "PUZZLEEVAL_USER_SIM_MODEL", "claude-haiku-4-5-20251001"
+)
+# 0.0 = deterministic, 1.0 = chaotic. 0.3 keeps output reactive but
+# stable enough that property-based tests pass across runs.
+USER_SIM_TEMPERATURE = float(
+    os.environ.get("PUZZLEEVAL_USER_SIM_TEMPERATURE", "0.3")
+)
+# Typical caller utterance is 30-150 tokens. 512 is a generous cap
+# that leaves headroom for compound turns without encouraging monologues.
+USER_SIM_MAX_TOKENS = int(
+    os.environ.get("PUZZLEEVAL_USER_SIM_MAX_TOKENS", "512")
+)
+# Rubric judge uses Sonnet 4.6 — quality matters more than cost here;
+# one judge call per test versus N simulator calls per test.
+RUBRIC_JUDGE_MODEL = os.environ.get(
+    "PUZZLEEVAL_RUBRIC_JUDGE_MODEL", "claude-sonnet-4-6"
+)
+# Judge output is structured (RubricVerdict). 4096 suits typical rubric
+# sizes (6 criteria × ~300 tokens reasoning + summary + overhead).
+# Rubric judge max_tokens — bumped from 4096 to 8192 (2026-04-23) after
+# real-run trace 0c7f085f observed 2 judge crashes with:
+#   "Invalid JSON: EOF while parsing a string at line 1 column 2126"
+#   "Invalid JSON: EOF while parsing a string at line 1 column 175"
+# The judge is emitting JSON-shaped RubricVerdicts; when it hits the
+# max_tokens cap mid-string, the partial JSON fails pydantic validation
+# and the whole test case loses its rubric verdict. 8192 is enough for
+# typical 5-criterion rubrics with detailed per-criterion reasoning
+# (~600 chars each × 5 + overhead = ~4KB content, 4KB thinking).
+#
+# Raise this further if you see recurring JSON-truncation errors for
+# a particular rubric shape. Lower to 4096 to measure cost-savings at
+# risk of re-introducing truncation.
+RUBRIC_JUDGE_MAX_TOKENS = int(
+    os.environ.get("PUZZLEEVAL_RUBRIC_JUDGE_MAX_TOKENS", "8192")
+)
+# Hard ceiling on conversation length regardless of what TestCase.max_turns
+# says. Protects worst-case cost envelope: 12 turns × (Haiku + agent call
+# + STT) caps out around $0.50-0.80 per test. Tests that set max_turns
+# above this get silently clamped down.
+CONVERSATION_MAX_TURNS_CEILING = int(
+    os.environ.get("PUZZLEEVAL_CONVERSATION_MAX_TURNS_CEILING", "12")
+)
+
+
+# ---------------------------------------------------------------------------
 # Screening Model (Agent 4)
 # ---------------------------------------------------------------------------
 # Agent 4 uses Sonnet 4.6 for web fetch/search verification (same reasons as
@@ -346,6 +413,23 @@ AGENT5_DIMINISHING_RETURNS_WINDOW = int(
 AGENT5_MAX_REASSESSMENT_TIERS = int(
     os.environ.get("PUZZLEEVAL_AGENT5_MAX_REASSESSMENT_TIERS", "4")
 )
+# Gate C — patch-fragmentation nudge. When the last 2 real turns were BOTH
+# small (<= AGENT5_PATCH_FRAGMENT_TOKEN_CEILING output tokens each) AND BOTH
+# applied a single `patch_file` call to the SAME file, inject a one-time
+# soft nudge suggesting parallel edits for the next bug on that file.
+# Runtime-only (not prompt-static) — fires AT MOST once per file per build
+# so it can't spam the loop. Set the flag to "0" to disable the whole
+# gate; set the ceiling to "0" to effectively disable it while keeping
+# the plumbing hot for A/B tests. Informed by real-run evidence: voice
+# builds regularly show 4-5 serial single-line patches to harness.py
+# that could have been one parallel turn — ~$0.20-0.40 per build
+# lost to round-trip overhead. See plan §4.2.
+AGENT5_PATCH_FRAGMENT_NUDGE_ENABLED = (
+    os.environ.get("PUZZLEEVAL_AGENT5_PATCH_FRAGMENT_NUDGE", "1") == "1"
+)
+AGENT5_PATCH_FRAGMENT_TOKEN_CEILING = int(
+    os.environ.get("PUZZLEEVAL_AGENT5_PATCH_FRAGMENT_TOKEN_CEILING", "600")
+)
 AGENT5_MAX_BUDGET_PER_CANDIDATE = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_PER_CANDIDATE", "3.0")
 )
@@ -432,6 +516,125 @@ AGENT6_ERROR_ABORT_THRESHOLD = float(
 )
 AGENT6_MIN_TESTS_BEFORE_ABORT = int(
     os.environ.get("PUZZLEEVAL_AGENT6_MIN_TESTS_BEFORE_ABORT", "5")
+)
+
+# AGENT6_PER_CANDIDATE_PARALLELISM controls how many SINGLE-TURN test
+# cases for ONE candidate run concurrently. Default 6 — chosen as the
+# CEILING below the ElevenLabs Conversational AI Starter pack's
+# concurrent-session cap (the tightest paid tier we currently exercise).
+# Cloud-migration safe: this is ThreadPoolExecutor INSIDE a single
+# container (no cross-container coordination), so Docker / Cloud Run /
+# managed-sandbox migrations apply the same parallelism per container.
+#
+# Going above 6 on Starter would trigger ElevenLabs's 429 / "session
+# limit exceeded" path on every voice run — the AGENT6_SESSION_RETRY_BACKOFF
+# path catches these gracefully but at the cost of 5-35s of retry
+# backoff per overflow.
+#
+# Why 6 is safe AND productive:
+#   - For Agent 3's typical 7-test batch, this runs 6 in parallel
+#     batch 1 + 1 in batch 2 (plus background audio merge from item 5
+#     overlapping batch 2's conversation). Batch 1 wall-clock = max
+#     conversation in batch (~135s); batch 2 wall-clock = single test
+#     (~135s). Total ≈ 270s vs the prior 390s of 3 sequential batches
+#     of 3 — saves ~2 min on the test phase.
+#   - For ≥7-test batches, the background audio merge (item 5,
+#     voice_realtime._merge_conversation_audio submitted to a daemon
+#     pool) frees workers at conversation-end, not merge-end — so
+#     batch 2 starts ~70s sooner than sync-merge would allow.
+#   - The rate_limiter (puzzleeval/rate_limiter.py) is wired into
+#     _execute_all_tests at implement_test_env.py:7617. Every test
+#     call goes through `rate_limiter.acquire(candidate, upstream)`
+#     BEFORE hitting the provider API. acquire() SLEEPS until a
+#     token is available — pure back-pressure, no errors raised.
+#   - Default DEFAULT_RPS=2 per candidate means the EFFECTIVE
+#     parallelism is capped at ~2 RPS regardless of how many threads
+#     are queued. 6-parallel just means we have 6 threads waiting in
+#     the bucket queue instead of 3.
+#
+# AGENT6_PER_CANDIDATE_SESSION_PARALLELISM controls how many MULTI-TURN
+# tests (conversation, voice_conversation, voice_turn) run concurrently
+# for ONE candidate. Default 6 — same Starter-pack concurrent-session
+# ceiling as single-turn. Each multi-turn test opens a separate provider
+# session (WebSocket connection / conversation_id / session handle) that
+# can run 60-135s. ElevenLabs Starter's concurrent-session cap is 6 per
+# workspace; OpenAI Realtime tier-1 handles 6× concurrent WebSockets
+# fine.
+#
+# If a tighter free-tier provider's session cap proves below 6, the
+# AGENT6_SESSION_RETRY_BACKOFF retry path absorbs the surge — the
+# harness waits for a prior session to release and retries. With
+# backoff base=5s and max=3 retries, worst case is slower wall-clock,
+# never test failure.
+#
+# Cloud-migration safety: both knobs scale cleanly across cloud
+# deployment stages (Docker per candidate, Cloud Run per candidate,
+# managed sandboxes). Each one is ThreadPoolExecutor INSIDE a single
+# container / job. No cross-candidate coordination, no process-level
+# shared state, no filesystem racing. "Lift and shift" to cloud works
+# with no redesign — the same parallelism bounds apply at the
+# per-container level whether we run locally or in the cloud.
+#
+# If you hit "concurrent session exceeded" errors on free-tier voice
+# providers AND the retry path proves insufficient, dial back via env:
+#   PUZZLEEVAL_AGENT6_PER_CANDIDATE_SESSION_PARALLELISM=3 (or 1 for
+#   fully sequential multi-turn). Same env knob exists for single-turn.
+# To raise above 6 on a paid-tier upgrade (Pro / Scale on ElevenLabs,
+# tier-3+ on OpenAI), set PUZZLEEVAL_AGENT6_PER_CANDIDATE_PARALLELISM=N.
+AGENT6_PER_CANDIDATE_PARALLELISM = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_PER_CANDIDATE_PARALLELISM", "6")
+)
+AGENT6_PER_CANDIDATE_SESSION_PARALLELISM = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_PER_CANDIDATE_SESSION_PARALLELISM", "6")
+)
+
+# AGENT6_SESSION_RETRY_BACKOFF_BASE / MAX_RETRIES — wait-and-retry
+# behavior when a provider returns a "concurrent session limit
+# exceeded" error.
+#
+# When per-candidate session parallelism (default 3) runs more tests
+# than the provider allows (free tiers commonly cap at 1), the harness
+# call fails. Instead of marking the test as errored, we wait for a
+# prior session to release and retry. This preserves result quality
+# AT THE COST of wall-clock time — but wall-clock was the whole point
+# of parallelism, so the user-facing behavior is "parallel if the
+# provider supports it, graceful serialization if it doesn't."
+#
+# Backoff shape: exponential — base × 2^(attempt-1). With base=5 and
+# max=3 retries, waits are 5s → 10s → 20s (35s total before giving
+# up). Typical multi-turn conversation takes 15-30s, so by the third
+# retry a prior session has almost certainly released.
+#
+# Rate-limit retries (_is_rate_limit_error path) use shorter backoff
+# (3s, fixed) because rate limits reset faster. Session caps release
+# on conversation-completion timescales, so sleeps are longer.
+AGENT6_SESSION_RETRY_BACKOFF_BASE = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_SESSION_RETRY_BACKOFF_BASE", "5")
+)
+AGENT6_SESSION_MAX_RETRIES = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_SESSION_MAX_RETRIES", "3")
+)
+
+# REPORT_MAX_EVIDENCE_PER_KIND controls how many per-candidate
+# TestEvidence entries (failures + successes, separately) get packed
+# into the final EvaluationReport. The frontend (EvaluationReportCard)
+# renders EVERY entry it receives inside expandable <details> blocks —
+# it does NOT paginate — so this cap is the end-to-end visibility
+# ceiling.
+#
+# Earlier default was 3 "representative" failures + 3 successes, which
+# was fine when typical evals ran 5-10 tests per candidate. With
+# Agent 3 now generating 10-50 tests per run, 3 leaves 70-90% of
+# results invisible. Default bumped to 50 — covers 99% of real runs
+# entirely, and the frontend's <details> accordion keeps the UI tidy
+# even at that size (users expand what they want to inspect).
+#
+# Raise this if your eval runs typically exceed 50 tests per candidate
+# (e.g., for long-running benchmark scenarios). Lower it if payload
+# size in the evaluation_report SSE event becomes a problem (each
+# TestEvidence is a few KB with transcript + audio_paths).
+REPORT_MAX_EVIDENCE_PER_KIND = int(
+    os.environ.get("PUZZLEEVAL_REPORT_MAX_EVIDENCE_PER_KIND", "50")
 )
 
 
@@ -522,14 +725,30 @@ AGENT5_FALLBACK_MAX = int(
 # Levels (from Anthropic docs):
 #   low    - skip thinking on simple queries, prioritize latency
 #   medium - moderate thinking, may skip for very simple cases
-#   high   - default; always think, deep reasoning on complex tasks
+#   high   - always think, deep reasoning on complex tasks
 #   xhigh  - deeper exploration, available on Opus 4.7
 #   max    - no constraint on thinking depth, available on Opus 4.7+
 #
+# Default: medium (lowered from `high` in PLAN_VOICE_RUN_OPTIMIZATIONS.md
+# item 4). Empirical evidence from real run trace 73a9d605
+# (conversation_log.json): Opus build turns under EFFORT=high were
+# spending substantial budget on extended thinking that produced no
+# visible work — e.g., ElevenLabs T2 Opus turn cost $0.97 with 262
+# output tokens, 0 visible text, 0 tools called. Adaptive thinking
+# auto-tunes UPWARD when the model hits a complex decision point, so
+# `medium` is a FLOOR, not a cap — hard decisions still get the
+# reasoning depth they need, routine tool execution doesn't burn
+# budget on it.
+#
+# Saves an estimated 30-60s per slow build (per-turn thinking budget
+# halved on routine turns). Compounds across 8-11 turn ElevenLabs-style
+# builds.
+#
+# Override via env to revert: PUZZLEEVAL_EFFORT=high
 # When unset (empty string), no effort is sent and the API uses its model
-# default (high on adaptive-capable models).
+# default.
 # ---------------------------------------------------------------------------
-EFFORT = os.environ.get("PUZZLEEVAL_EFFORT", "high").lower().strip()
+EFFORT = os.environ.get("PUZZLEEVAL_EFFORT", "medium").lower().strip()
 _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max", ""}
 if EFFORT not in _VALID_EFFORTS:
     # Unknown value — log and reset to default so downstream API calls don't
@@ -537,10 +756,10 @@ if EFFORT not in _VALID_EFFORTS:
     import sys as _sys
     print(
         f"warning: PUZZLEEVAL_EFFORT={EFFORT!r} not in "
-        f"{sorted(_VALID_EFFORTS)} — defaulting to 'high'",
+        f"{sorted(_VALID_EFFORTS)} — defaulting to 'medium'",
         file=_sys.stderr,
     )
-    EFFORT = "high"
+    EFFORT = "medium"
 
 
 def output_config_for_request() -> dict | None:
@@ -697,6 +916,29 @@ CACHE_MESSAGES_ENABLED = os.environ.get(
 # rewrite cost.
 CACHE_CLEAR_AT_LEAST_TOKENS = int(
     os.environ.get("PUZZLEEVAL_CACHE_CLEAR_AT_LEAST", "10000")
+)
+
+
+# Trigger threshold for `clear_tool_uses_20250919` to fire on Agent 5
+# builds. Raised from 80K → 120K based on real-run trace 8ded6706
+# (2026-04-25) analysis: at 80K, the edit fires at turn 7-9 in a
+# typical 12-turn build, costing ~$0.30 per fire in cache_create
+# while only saving ~$0.20 in subsequent cache_reads (only 3-5
+# remaining turns benefit from the smaller prefix). Net loss
+# ~$0.10-0.15 per build × 2 fires per candidate × 2 candidates =
+# ~$0.40-0.60 wasted per voice run.
+#
+# 120K threshold delays the edit to the END of typical builds where
+# it doesn't fire at all (12-turn build's context grows to ~140K so
+# rarely crosses 120K). For pathological 25-turn debug-heavy builds
+# the edit still fires and provides real value (savings horizon long
+# enough to amortize the rewrite cost).
+#
+# Safety: Opus context window is 200K, `compact_20260112` triggers
+# at 150K. 120K → 150K → 200K leaves headroom for both clear_tool_uses
+# and the compact safety net.
+CACHE_CLEAR_TOOL_USES_TRIGGER = int(
+    os.environ.get("PUZZLEEVAL_CACHE_CLEAR_TRIGGER", "120000")
 )
 
 

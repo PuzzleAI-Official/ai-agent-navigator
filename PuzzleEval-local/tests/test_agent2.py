@@ -352,15 +352,40 @@ class TestResearchAgent:
         return mock_response
 
     def _make_mock_structure_response(self, parsed_output: Agent2Result) -> MagicMock:
-        """Create a mock response for Step 2 (structuring)."""
+        """Create a mock response for Step 2 (structuring) — non-strict tool path.
+
+        Agent 2's structuring step uses ``parse_with_fallback(prefer_non_strict=True)``
+        because Agent2Result reliably overflows Anthropic's compiled-grammar
+        budget. That means the actual API call is ``client.messages.create``
+        with a forced ``emit_result`` tool, not ``client.messages.parse``.
+        Tests mock the non-strict path: a tool_use block whose ``input``
+        deserializes (via Pydantic) into the expected Agent2Result.
+        """
         mock_response = MagicMock()
-        mock_response.parsed_output = parsed_output
-        mock_response.stop_reason = "end_turn"
+
+        # Build a tool_use block matching the non-strict tool name
+        # ("emit_result"). The non-strict path reads block.input and
+        # Pydantic-validates it into the output_format. None passed for
+        # parsed_output exercises the "no parseable output" path — emit
+        # an empty content list so the non-strict path raises its own
+        # StructuredOutputFallbackError, which Agent 2's caller wraps
+        # into AgentOutputError.
+        if parsed_output is None:
+            mock_response.content = []
+        else:
+            tool_use_block = MagicMock()
+            tool_use_block.type = "tool_use"
+            tool_use_block.name = "emit_result"
+            tool_use_block.input = parsed_output.model_dump()
+            mock_response.content = [tool_use_block]
+        mock_response.stop_reason = "tool_use"
         mock_response.usage = MagicMock()
         mock_response.usage.input_tokens = 800
         mock_response.usage.output_tokens = 1200
         mock_response.usage.cache_creation_input_tokens = 0
         mock_response.usage.cache_read_input_tokens = 0
+        # Server tool usage absent on the structuring step
+        mock_response.usage.server_tool_use = None
         return mock_response
 
     @patch("puzzleeval.agents.research.anthropic.Anthropic")
@@ -371,14 +396,15 @@ class TestResearchAgent:
         mock_client = MagicMock()
         mock_anthropic_class.return_value = mock_client
 
-        # Step 1: messages.create() returns research findings
-        mock_client.messages.create.return_value = self._make_mock_research_response(
-            "Found 5 candidates: Google Document AI, AWS Textract, Mindee, Rossum, Veryfi..."
-        )
-        # Step 2: messages.parse() returns structured result
-        mock_client.messages.parse.return_value = self._make_mock_structure_response(
-            expected_result
-        )
+        # Both Step 1 (web research) and Step 2 (structuring via prefer_non_strict)
+        # call messages.create(). Side-effect queue dispatches them in order:
+        # research response first, then the tool_use structuring response.
+        mock_client.messages.create.side_effect = [
+            self._make_mock_research_response(
+                "Found 5 candidates: Google Document AI, AWS Textract, Mindee, Rossum, Veryfi..."
+            ),
+            self._make_mock_structure_response(expected_result),
+        ]
 
         input_data = Agent2Input(
             user_understanding=_make_user_understanding(),
@@ -397,8 +423,12 @@ class TestResearchAgent:
         # version caused real-run regressions on Agent 2's non-beta path
         # (container kwarg hangs, sandbox spin-up latency). See research.py
         # top-of-file comment for the full trace evidence.
-        create_call = mock_client.messages.create.call_args
-        tools = create_call.kwargs.get("tools", [])
+        #
+        # Index [0] is Step 1 (web research). Index [1] is Step 2
+        # (structuring via prefer_non_strict, which uses an emit_result
+        # tool — different shape).
+        step1_call = mock_client.messages.create.call_args_list[0]
+        tools = step1_call.kwargs.get("tools", [])
         tool_types = [t["type"] for t in tools]
         assert "web_search_20250305" in tool_types
         assert len(tools) == 1  # Only web search, no fetch
@@ -435,15 +465,15 @@ class TestResearchAgent:
         mock_client = MagicMock()
         mock_anthropic_class.return_value = mock_client
 
-        # Step 1 succeeds
-        mock_client.messages.create.return_value = self._make_mock_research_response(
-            "Found candidates: Google Document AI, AWS Textract..."
-        )
-
-        # Step 2 returns None parsed output
-        mock_structure = self._make_mock_structure_response(None)
-        mock_structure.parsed_output = None
-        mock_client.messages.parse.return_value = mock_structure
+        # Step 1 succeeds; Step 2 (non-strict path) returns no tool_use block,
+        # which `_run_non_strict` raises as StructuredOutputFallbackError —
+        # the agent surfaces this as AgentOutputError.
+        mock_client.messages.create.side_effect = [
+            self._make_mock_research_response(
+                "Found candidates: Google Document AI, AWS Textract..."
+            ),
+            self._make_mock_structure_response(None),
+        ]
 
         input_data = Agent2Input(
             user_understanding=_make_user_understanding(),
@@ -463,19 +493,18 @@ class TestResearchAgent:
         mock_client = MagicMock()
         mock_anthropic_class.return_value = mock_client
 
-        # Step 1: first call returns pause_turn, second call returns end_turn
+        # Step 1: first call returns pause_turn, second call returns end_turn.
+        # Step 2 (non-strict structuring) is the third call to messages.create.
         pause_response = self._make_mock_research_response(
             "Searching for candidates...", stop_reason="pause_turn"
         )
         final_response = self._make_mock_research_response(
             "Found 5 candidates: Google Document AI, AWS Textract..."
         )
-        mock_client.messages.create.side_effect = [pause_response, final_response]
-
-        # Step 2: returns structured result
-        mock_client.messages.parse.return_value = self._make_mock_structure_response(
-            expected_result
-        )
+        structure_response = self._make_mock_structure_response(expected_result)
+        mock_client.messages.create.side_effect = [
+            pause_response, final_response, structure_response,
+        ]
 
         input_data = Agent2Input(
             user_understanding=_make_user_understanding(),
@@ -486,8 +515,9 @@ class TestResearchAgent:
         result = run_research_agent(input_data)
 
         assert len(result.candidates) == 5
-        # Verify messages.create was called twice (initial + 1 continuation)
-        assert mock_client.messages.create.call_count == 2
+        # messages.create called 3 times: Step 1 initial + Step 1 continuation
+        # (after pause_turn) + Step 2 structuring (non-strict path).
+        assert mock_client.messages.create.call_count == 3
 
     @patch("puzzleeval.agents.research.anthropic.Anthropic")
     def test_empty_research_raises_output_error(self, mock_anthropic_class):

@@ -42,6 +42,72 @@ def _load_mock(filename: str) -> dict:
         return json.load(f)
 
 
+def _kick_off_venv_precreate(
+    state: RunState,
+    selected_candidates: list[dict],
+) -> None:
+    """Fire-and-forget background task that pre-creates venvs in
+    parallel with Agent 4 verification.
+
+    Saves 60-120s of Agent 5's slowest-candidate build wall-clock
+    (per PLAN_VOICE_RUN_OPTIMIZATIONS.md item 3): venv create + pip
+    install of `VENV_PREINSTALL_MANIFEST` happens concurrently with
+    Agent 4's web_fetch / web_search loop, so by the time Agent 5
+    starts the build, venvs are ready and `_create_venv` short-circuits
+    via the per-sandbox lock.
+
+    Crucially, runs ONLY for SELECTED candidates — `selected_candidates`
+    is the post-Phase-6 (or Phase-7 auto-pick) filtered list. Non-
+    selected Agent 2 candidates never get venvs. No-op when the list is
+    empty (defensive — selection-applied without picks would mean a
+    bug elsewhere, but the helper handles it gracefully).
+
+    Fire-and-forget design: failures are logged but don't propagate.
+    Agent 5's `_create_venv` falls back to creating the venv
+    synchronously (legacy behavior) when a pre-creation didn't complete
+    in time. Belt + braces.
+    """
+    candidate_names = [c.get("name", "") for c in selected_candidates if c.get("name")]
+    if not candidate_names:
+        return
+    try:
+        from puzzleeval.agents.implement_test_env import (
+            precreate_venvs_for_candidates,
+        )
+    except ImportError as exc:
+        logger.warning(
+            "venv pre-create import failed; Agent 5 will fall back to "
+            "in-build venv creation: %s",
+            exc,
+            extra={
+                "operation": "venv_precreate_import_failed",
+                "trace_id": state.trace_id,
+            },
+        )
+        return
+
+    # Spawn the background task without awaiting it. The task runs in a
+    # separate thread (via asyncio.to_thread) so the event loop stays
+    # free to drive Agent 4 + emit SSE events. We don't track the
+    # returned task handle because the helper logs results internally;
+    # if it fails, Agent 5's _create_venv recovers transparently.
+    asyncio.create_task(asyncio.to_thread(
+        precreate_venvs_for_candidates,
+        candidate_names,
+        state.trace_id,
+        logger,
+    ))
+    logger.info(
+        f"venv pre-create kicked off for {len(candidate_names)} candidate(s) "
+        "in background (running concurrently with Agent 4)",
+        extra={
+            "operation": "venv_precreate_kickoff",
+            "trace_id": state.trace_id,
+            "candidate_count": len(candidate_names),
+        },
+    )
+
+
 # ============================================================================
 # Mock Agent 1 — scripted conversation, no API calls
 # ============================================================================
@@ -722,6 +788,14 @@ async def run_pipeline(state: RunState):
                     "message": f"Selection applied — {len(filtered_candidates)} candidates proceeding to screening",
                     "status": "success",
                 })
+                # Pre-create venvs in parallel with Agent 4 (fire-and-
+                # forget). Saves 60-120s of Agent 5's slowest-candidate
+                # build phase by moving venv create + pip install into
+                # Agent 4's natural slack. Per Plan §item 3:
+                # only runs for SELECTED candidates (the post-Phase-6
+                # filtered list). Agent 5's _create_venv short-circuits
+                # via per-sandbox lock when it sees an existing venv.
+                _kick_off_venv_precreate(state, filtered_candidates)
             elif programmatic_picks and bp_steps_for_selection:
                 # Phase 6 disabled but Phase 7 computed picks → apply
                 # programmatic top-K as the selection (auto-run path).
@@ -739,6 +813,11 @@ async def run_pipeline(state: RunState):
                     "message": f"Phase 7 auto-selection — {len(a2_model.candidates)} candidates proceeding",
                     "status": "info",
                 })
+                # Same venv pre-creation hook as the user-selection branch.
+                # Auto-pick path benefits identically.
+                _kick_off_venv_precreate(
+                    state, state.agent2_result.get("candidates", []),
+                )
 
             # Billing gate: Agent 4 requires the "testing" feature. In default
             # mode (PUZZLEEVAL_BILLING_ENFORCED=0) this is a no-op that just
@@ -967,35 +1046,81 @@ async def run_pipeline(state: RunState):
                     turn_num = data.get("turn", 0)
                     max_turns = data.get("max_turns", 25)
                     phase = data.get("phase", "building")
-                    tools = data.get("tools_used", [])
                     cost = data.get("cost_usd", 0)
+                    cumulative_cost = data.get("cumulative_cost_usd", 0)
+                    latency_ms = data.get("latency_ms", 0)
+                    tool_calls_detail = data.get("tool_calls_detail", [])
+                    text_preview = data.get("text_preview", "")
 
                     phase_labels = {
-                        "researching": "Researching API docs",
-                        "building": "Writing & testing code",
-                        "validating": "Live API validation",
+                        "researching": "Researching",
+                        "building": "Building",
+                        "validating": "Validating",
                     }
                     phase_label = phase_labels.get(phase, phase)
 
-                    # Describe what tools were used
-                    tool_desc = ""
-                    if "web_search" in tools:
-                        tool_desc = " — searching web"
-                    elif "web_fetch" in tools:
-                        tool_desc = " — reading docs"
-                    elif "write_file" in tools:
-                        tool_desc = " — writing code"
-                    elif "run_code" in tools:
-                        tool_desc = " — running tests"
-                    elif "advisor" in tools:
-                        tool_desc = " — consulting advisor"
-                    elif "ask_research" in tools:
-                        tool_desc = " — researching"
+                    # [observability] Surface the actual URL / query / file
+                    # Claude touched this turn instead of a generic
+                    # "searching web" badge. Without this the operator has
+                    # no way to know mid-build whether Claude is making
+                    # progress toward api_spec.txt or just spinning on the
+                    # same docs page repeatedly.
+                    tool_summaries = []
+                    for tc in tool_calls_detail[:3]:  # cap at 3 to keep msg readable
+                        tname = tc.get("tool", "?")
+                        tsum = tc.get("summary", "")
+                        if not tsum:
+                            tool_summaries.append(tname)
+                            continue
+                        if tname == "web_fetch":
+                            tool_summaries.append(f"fetch {tsum}")
+                        elif tname == "web_search":
+                            tool_summaries.append(f"search '{tsum[:80]}'")
+                        elif tname == "write_file":
+                            tool_summaries.append(f"write {tsum}")
+                        elif tname == "patch_file":
+                            tool_summaries.append(f"patch {tsum}")
+                        elif tname == "read_file":
+                            tool_summaries.append(f"read {tsum}")
+                        elif tname == "run_code":
+                            tool_summaries.append(f"run `{tsum[:60]}`")
+                        elif tname == "ask_research":
+                            tool_summaries.append(f"ask_research '{tsum[:60]}'")
+                        else:
+                            tool_summaries.append(f"{tname}: {tsum[:60]}")
+
+                    if len(tool_calls_detail) > 3:
+                        tool_summaries.append(f"+{len(tool_calls_detail) - 3} more")
+
+                    tool_desc = (" — " + " | ".join(tool_summaries)) if tool_summaries else ""
+                    # If Claude only emitted text this turn (no tools), surface
+                    # the first 100 chars as a sign of forward progress (e.g.
+                    # writing the PLAN block or HARNESS_COMPLETE signal).
+                    if not tool_summaries and text_preview:
+                        tool_desc = f" — text: \"{text_preview[:100]}…\""
+
+                    latency_s = latency_ms / 1000.0 if latency_ms else 0.0
 
                     emit("agent_activity", {
                         "agent": "agent_5",
-                        "message": f"{name}: Turn {turn_num}/{max_turns} — {phase_label}{tool_desc} ({cost * 20:.2f} credits)",
+                        "message": (
+                            f"{name}: Turn {turn_num}/{max_turns} — {phase_label}"
+                            f"{tool_desc}"
+                            f" ({cost * 20:.2f}cr/{latency_s:.1f}s, total {cumulative_cost * 20:.1f}cr)"
+                        ),
                         "candidate_name": name,
+                        # Pass structured data through too — frontend can render
+                        # a richer per-turn detail panel if it wants to.
+                        "build_turn_detail": {
+                            "turn": turn_num,
+                            "max_turns": max_turns,
+                            "phase": phase,
+                            "tool_calls": tool_calls_detail,
+                            "text_preview": text_preview,
+                            "cost_usd": cost,
+                            "cumulative_cost_usd": cumulative_cost,
+                            "latency_ms": latency_ms,
+                        },
                     })
                     return
 

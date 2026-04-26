@@ -9,14 +9,1199 @@ An AI agent evaluation platform. Users describe what they need AI to do in plain
 
 Target users: SMBs (small/medium businesses) who are overwhelmed by AI options and don't have the technical ability to evaluate them.
 
-## Current State (as of 2026-04-21)
+## Current State (as of 2026-04-25)
 
-**Production-ready for local hosting. Full voice pipeline verified end-to-end
-on real APIs (OpenAI Realtime + ElevenLabs Conversational AI).
-907 tests passing (831 core + 37 API + 39 generalizability bench).
-Zero regressions. TypeScript + Vite clean.**
+**Production-ready for local hosting. Voice-run wall-clock projected
+~13 min and dropping toward ~7 min once NEW-AM pre-rendered api_spec
+fast path lands on next real run. Per-test cost+latency tracking
+finally accurate (was None/0 across the board). Build-phase observability
+overhauled — every URL/query/file/exit code captured per turn,
+conversation_log saved incrementally, build_phases summary derives
+phase boundaries from turn data.
+1,388 tests passing (core + API + generalizability bench).
+Zero regressions. TypeScript clean.**
 
-> **NEW-AI — Voice end-to-end success + runner-level safety nets + web-tools revert** (this session, documented below). Previous passes' sections (NEW-AH, NEW-AG, etc.) are preserved below in chronological reverse order.
+> **NEW-AM — Per-test tracking + checklist-driven build skip** (this session,
+> documented below). NEW-AL (voice-run wall-clock) + NEW-AK (build-readiness
+> checklist) preserved below.
+
+### NEW-AM — Per-test tracking + checklist-driven build skip (2026-04-25)
+
+Real-run audit (trace 8ded6706 — full voice run on OpenAI Realtime +
+ElevenLabs ConvAI, 2026-04-25) exposed two structural gaps in the
+prior NEW-AL pass:
+
+1. **Test cost+latency invisible.** Every `TestCaseResult` came back
+   with `cost_usd: None` and `latency_ms: 0` despite agentic
+   conversational tests genuinely costing $0.03-0.10/test (user
+   simulator turns + rubric judge call + tool_runner picking).
+   Run summary reported "Test cost: $0.00." — completely false.
+   The eval_cost was being accumulated per-CANDIDATE only; the
+   per-TEST breakdown was lost.
+
+2. **Sonnet research turn re-extracts what Agent 4 already confirmed.**
+   T0 OpenAI Sonnet: 358s, $1.20. T2 ElevenLabs Sonnet: 408s, $1.19.
+   Both candidates' BuildReadinessChecklists had all 4 non-negotiables
+   `confirmed` with evidence URLs (endpoint_path = full wss URL,
+   auth_method = bearer/api_key shape, request_body_shape = full JSON
+   protocol, response_body_shape = full event types). Sonnet ignored
+   it and re-fetched the same docs anyway. Combined: ~12 minutes
+   wall-clock + ~$2.40 wasted per voice run.
+
+Plus a wave of observability gaps surfaced — turn_log dropped server-
+tool inputs, didn't capture exit codes, truncated tool results to 500
+chars (cutting tracebacks mid-line), didn't aggregate build_phases or
+mark phase-boundary turns.
+
+**Capability fix 1 — per-test cost+latency aggregation.**
+
+`_promote_verdict_to_tcr` now takes a new `tool_runner_cost_usd: float`
+parameter and aggregates per-test cost from FOUR components:
+
+  * `tcr_target.cost_usd` — harness-side cost from `harness.run()`
+  * `verdict_detail["simulator_cost_usd"]` — Haiku user simulator turns
+  * `verdict_detail["judge_cost_usd"]` — Sonnet rubric judge call
+  * `tool_runner_cost_usd` — Anthropic spend on tool_runner's plugin
+    picking + chaining (passed through from `verdict.cost_usd` at
+    the call site, was previously dropped on the floor)
+
+Latency: prefers plugin-reported `total_duration_s` (multi-turn
+conversations) over harness `latency_ms` (single-turn). Either way
+each `TestCaseResult.latency_ms` now reflects real wall-clock per test
+instead of 0.
+
+Now reports honest per-test cost (~$0.03-0.10 for agentic conversational
+tests; ~$0.005-0.02 for single-turn). Summary's `test_cost_usd` gives
+the operator real numbers, not "$0.00" placeholder.
+
+**Capability fix 2 — pre-render api_spec.txt with REQUIRES_AUGMENT
+markers (v2 — preserves harness quality).**
+
+THE BIG WIN, refined. New module-level helper
+`_synthesize_api_spec_from_checklist(candidate)` returns a partially-
+formed `api_spec.txt` when ALL 4 non-negotiables (endpoint_path,
+auth_method, request_body_shape, response_body_shape) are `confirmed`
+in the checklist. Renders:
+  * The 4 non-negotiables as AUTHORITATIVE (do not re-research)
+  * Conditional fields tagged `[OK] / [INFERRED] / [UNKNOWN]` per
+    checklist status
+  * provider_surface alternative endpoints
+  * selection_justification
+
+PLUS — and this is the v2 refinement — sections that the checklist
+by design DOES NOT carry, marked `[REQUIRES_AUGMENT]`:
+  * AUXILIARY_ENDPOINTS_REQUEST_BODIES (e.g. `POST /agents`,
+    `DELETE /agents/{id}` — auxiliary to the primary endpoint)
+  * OVERRIDE_OR_SPECIAL_MESSAGE_SHAPES (e.g. mid-stream system
+    prompt injection variant)
+  * INPUT_COMPATIBILITY (per-test-case mapping)
+  * ROUTING_TABLE (per-test-case dispatch logic)
+  * WORKING_EXAMPLE (concrete copy-paste request flow)
+
+**Why v2, not pure-skip:** real-run analysis (trace 8ded6706,
+2026-04-25) compared the checklist against what Sonnet's 6-min
+research turn actually produced. Verdict: ~60% redundant
+re-extraction of confirmed checklist fields, ~40% genuinely
+additive value the checklist doesn't carry by design. A pure-skip
+pre-render would lose that 40% and harness quality would drop
+(the `conversation_initiation_client_data` override variant alone
+is critical for system prompt injection on ElevenLabs ConvAI; no
+pre-render skip would teach Opus that exists). The v2 design
+captures the 60% saving while keeping Sonnet's targeted research
+on the 40%.
+
+Wired in `_build_single_harness` AFTER credential resolution +
+venv pre-create, BEFORE the build loop starts. When pre-render
+fires:
+
+  * `api_spec.txt` lands in sandbox at build start (visible to
+    Phase A inventory via `read_file`)
+  * `api_spec_written` STAYS False (Sonnet still runs Phase 1
+    for the augment work — cheaper than routing to Opus, ~1.7×
+    output token cost difference)
+  * Initial message gains a "⚡ FAST PATH" section telling Sonnet:
+    "the four non-negotiables are AUTHORITATIVE; only augment the
+    `[REQUIRES_AUGMENT]` sections needed for your test cases"
+  * Sonnet does targeted research (web_fetch on per-test-case
+    augment sections only), patches the spec, writes the final
+    `api_spec.txt` — at which point the normal Phase 1→Phase 2
+    write_file trigger flips `api_spec_written = True` and the
+    model switches to Opus (with all the cache_create + Sonnet→
+    Opus compaction logic firing as designed)
+
+**Falls through gracefully when checklist isn't complete:** None /
+sentinel / inferred-only non-negotiables → `_synthesize_*` returns
+None → no pre-render → legacy full-research behavior unchanged.
+Inferred values are NOT trusted to commit (could be wrong) — only
+confirmed-status fields make it into the auto-rendered spec.
+
+**Projected savings (next real voice run, with v2):** Sonnet's
+augment turn drops from ~6 min to ~2-3 min per candidate (skips
+the redundant 60%, does targeted research on the 40%). Per-
+candidate saving: ~3-4 min wall-clock + ~$0.50-0.70 cost. For
+2-candidate parallel build: ~3-4 min wall-clock saved on the
+slowest candidate (parallelism doesn't compound the saving),
+~$1.00-1.40 cost saved (compounds across both candidates).
+Combined with NEW-AL: ~$5.20 → ~$3.80-4.20 expected per voice
+run; ~25 min → ~22 min wall-clock.
+
+**Why this is STRICTLY better than pure pre-render skip:** quality
+preserved (Opus still gets the override message shape it needs
+to inject system prompts mid-conversation; the per-test-case
+INPUT_COMPATIBILITY/ROUTING_TABLE still get researched per the
+actual test cases). Cost saving smaller in absolute terms but the
+quality floor is preserved — no risk of "harness compiled but
+can't actually pass the system prompt" failures that pure-skip
+would introduce.
+
+**Capability fix 3 — build-phase observability overhaul.**
+
+Five sub-fixes under one umbrella, all additive:
+
+  * **Server-tool inputs captured.** Pre-fix the block iteration
+    loop replaced web_fetch URL / web_search query with the literal
+    string "(server tool — handled by API)" and threw the URL away.
+    Now captures the dict and truncates string values at 300 chars
+    so the operator can see WHAT Claude is researching this turn.
+
+  * **Web tool RESULTS captured.** New handlers for
+    `web_fetch_tool_result` (URL + chars_returned + 500-char preview)
+    and `web_search_tool_result` (query + result_count + top 5 hit
+    titles/URLs) blocks. Pre-fix these passed through silently.
+
+  * **Custom tool results: 500 → 2000 chars TAIL.** Pre-fix the tool
+    result was head-truncated at 500 chars — cut tracebacks mid-line.
+    Now uses tail truncation at 2000 chars so the actual error
+    message (always at the end of pip install / smoke_test output)
+    is visible. Plus `exit_code`, `is_error`, `result_length`,
+    `wrote_path`/`wrote_chars`/`wrote_preview` (write_file),
+    `patch_diff_chars`/old/new previews (patch_file), `command`
+    (run_code) — full per-tool diagnostic context.
+
+  * **Per-turn callback fires AFTER block iteration.** Pre-fix the
+    `progress_callback("build_turn", ...)` fired BEFORE the for-loop
+    iterated content blocks, so it could only emit tool NAMES
+    (`tools_used: [web_fetch]`) without inputs. Moved AFTER the loop;
+    payload now includes `tool_calls_detail` (URL/query/file/command
+    per call), `text_preview` (first 300 chars Claude emitted),
+    `cumulative_cost_usd`, `latency_ms`. Pipeline runner SSE
+    formatter consumes this — agent_activity messages now read
+    "OpenAI Realtime: Turn 3/40 — Building — fetch openai.com/docs |
+    write api_spec.txt (3.21cr/15.2s, total 18.4cr)" instead of a
+    generic "Researching API docs" badge.
+
+  * **Incremental conversation_log.json save.** Pre-fix the file
+    only existed AFTER build completed — useless for debugging a
+    stuck build. Now written after EVERY turn so operators can
+    `cat conversation_log.json` mid-build to see exactly what
+    Claude did each turn.
+
+  * **build_phases summary derived from turn data.**
+    `_compute_conversation_summary` now adds `build_phases` (per-phase
+    turn count + cost + latency for research/build/validate/post)
+    and `boundary_turns` (`api_spec_written_at`, `smoke_passed_at`,
+    `harness_complete_at`). Walks turns mirroring the build loop's
+    own trigger logic (api_spec.txt write → research-end, "SMOKE TEST
+    PASSED" in tool results → build-end, "HARNESS_COMPLETE" in text
+    → validate-end). Single block answers "where did Agent 5 spend
+    its time?" without re-tracing the loop.
+
+**Capability fix 7 — streaming-response-collection prompt contract
+(closes prompt-under-specification gap caught by trace 4427591c).**
+
+Real-run trace 4427591c (2026-04-25) caught a structural prompt
+gap: TWO BUILDS of the SAME ElevenLabs ConvAI provider with the
+SAME builder prompt produced 60% (trace 8ded6706) vs 20% (trace
+4427591c) pass rates because the prompt teaches WHAT to return
++ HOW to manage session_state for multi-turn, but says NOTHING
+about HOW to wait for streaming responses. The LLM coin-flips
+between good architectures (background thread + drain + trailing
+silence — worked at 60%) and bad ones (synchronous + 1.5s silence
+threshold — failed at 20%) based on training-data salience.
+
+Diagnostic chain:
+  1. trace 4427591c E11 harness used `silence_after_secs=1.5` in
+     a synchronous response collection loop
+  2. ElevenLabs's LLM + TTS chain takes 2-4 seconds to produce
+     first audio chunk after user audio ends
+  3. Harness gives up after 1.5s "silence" (no messages) thinking
+     agent is done
+  4. Agent's response (still being inferred) leaks into the next
+     turn's collection window → garbled state, hallucinated
+     responses, wrong info collection
+  5. 4/5 tests fail with `info_gathering` critical failure
+
+Root cause: prompt under-specification on response-collection
+patterns. The fix is a new conditional contract that teaches the
+correct abstraction without polluting non-streaming builds.
+
+**The fix — `_STREAMING_RESPONSE_CONTRACT` constant composed through
+the unified `_modality_specific_contract` dispatcher:**
+
+Architectural decision (post-ship refactor): instead of adding a NEW
+placeholder + renderer for the streaming contract, consolidated into
+the existing `__MODALITY_CONTRACT__` injection point. Voice contract +
+streaming contract now flow through the SAME conditional renderer
+(`_modality_specific_contract`) which composes feature-specific
+helpers:
+
+```python
+def _modality_specific_contract(test_cases) -> str:
+    parts = []
+    voice = _voice_harness_contract_for(test_cases)
+    if voice: parts.append(voice)
+    streaming = _streaming_response_contract_for(test_cases)
+    if streaming: parts.append(streaming)
+    return "\n\n".join(parts)
+```
+
+This is **forward-compatible with AD-002's skills/playbook
+architecture**: when modality count crosses ~8 OR independent
+ownership becomes valuable, the helpers migrate to per-skill
+markdown files in `skills/` and the dispatcher reads them. The
+shape doesn't change — one dispatcher, composed content.
+
+**Why composed (not separate placeholders):**
+  * Voice tests need BOTH voice return-shape AND streaming
+    collection — composition is natural
+  * Code-gen streaming tests need streaming only — composition
+    selects per-feature
+  * OCR/REST tests need NEITHER — empty composition = empty injection
+  * One placeholder = one place to look in the prompt template
+
+Teaches the **error-timeout + reset-on-event** pattern as the
+canonical response-collection abstraction for any streaming API:
+
+```python
+def collect_response(connection, error_timeout_s):
+    last_event_at = time.time()
+    while True:
+        idle = time.time() - last_event_at
+        remaining = error_timeout_s - idle
+        if remaining <= 0:
+            break  # extended idle = done OR errored
+        try:
+            event = recv_with_remaining_budget(connection, remaining)
+        except Timeout:
+            break
+        if is_explicit_completion_event(event):
+            process(event); break
+        process(event)
+        last_event_at = time.time()  # ← KEY: reset on every event
+    return collected
+```
+
+Plus principle-based timeout sizing guidance (LLM-backed: 8-15s,
+async polling: max_polls × poll_interval, real-time stream: 3-5s
+between events) and a note about VAD trailing input padding.
+
+**Conditional injection — schema-driven, no contamination:**
+
+```python
+streaming_shapes = {"voice_conversation", "voice_turn",
+                    "audio_content", "conversation", "code"}
+# Returns "" for OCR / vision / structured_json / classification /
+# extraction / inbound webhook / outbound — those see ZERO change.
+```
+
+Mirrors the established `__OS_SPECIFIC_RULES__` +
+`__MODALITY_CONTRACT__` injection pattern. A new
+`__STREAMING_RESPONSE_CONTRACT__` placeholder lands in
+`BUILDER_SYSTEM_PROMPT`, replaced during render via
+`_render_builder_prompt`.
+
+**Anti-bandaid invariants (regression-tested):**
+  * No provider names in the contract (no "ElevenLabs", "OpenAI
+    Realtime", "Vapi", etc.) — locked by `test_streaming_contract_
+    is_principle_based_not_bandaid`
+  * No specific magic timeout numbers from the broken harness
+    (no `silence_after_secs=1.5`, no "1.5 seconds for X")
+  * Contract content uses ranges + principles, not provider quirks
+  * Conditional injection trigger uses test case schema, not
+    candidate name
+
+**Why this is genuinely general (not voice-specific bandaid):**
+
+| Modality | Streaming response? | Gets contract? |
+|---|---|---|
+| OCR (Mindee REST single-call) | No | No (empty injection) |
+| Vision (image classify REST) | No | No |
+| Single-turn chatbot REST | No | No |
+| Inbound webhook | No | No |
+| Outbound message | No | No |
+| Voice conversation (WS) | Yes | **Yes** |
+| Voice turn (WS TTS streaming) | Yes | **Yes** |
+| Multi-turn chat (SSE/WS) | Yes | **Yes** |
+| Code-gen streaming | Yes | **Yes** |
+
+Future modalities (LLM streaming completions, batch processing
+with async polling, etc.) get the rule for free if they declare
+streaming-shape input/output types. No code change required.
+
+**Tests (+4 regression guards):**
+  * `test_streaming_response_contract_injects_for_voice_tests` —
+    voice/conversation/code test cases trigger injection
+  * `test_streaming_response_contract_does_NOT_inject_for_rest_tests`
+    — OCR/vision/REST test cases get empty injection (anti-
+    contamination)
+  * `test_streaming_contract_is_principle_based_not_bandaid` —
+    no provider names + no magic timeout numbers
+  * `test_streaming_contract_wired_into_render_builder_prompt` —
+    placeholder + renderer wiring source-grep guard
+
+**Expected behavior change on next real voice run:**
+  * Builder consistently chooses error-timeout + reset-on-event
+    pattern (no more silence-threshold variance)
+  * ElevenLabs ConvAI pass rate floor lifts to 60%+ consistently
+    (matching trace 8ded6706's good architecture)
+  * No effect on OCR / vision / single-call REST builds
+
+**Capability fix 4 — venv pre-create pip-bootstrap (Windows+anaconda).**
+
+Real-run trace 8ded6706 evidence: ElevenLabs build wasted 4 turns
+(T6-T9, ~30s + ~$0.20) on `python -c sys.executable` + `pip install`
++ `ensurepip` cycle. Root cause:
+`subprocess.run([sys.executable, "-m", "venv", str(venv_dir)])`
+*should* install pip by default, but on Windows with anaconda as the
+base Python the venv created can have python.exe present but pip
+missing. The build agent's first `python -m pip install -r
+requirements.txt` returns "No module named pip" → diagnostic loop.
+
+General fix: after `python -m venv` returns 0, verify pip actually
+landed via `python -m pip --version` (the venv's own python, not
+the system one). If verification fails, run `python -m ensurepip
+--upgrade --default-pip` to bootstrap from cached wheels (~5 sec).
+The build agent then sees a working pip from turn 0, no diagnostic
+loop. Saves ~30s + $0.20 per voice run on Windows+anaconda. No-op
+on systems where `python -m venv` already includes pip (most Linux
++ macOS), so it's a STRICT improvement.
+
+(Note: `--with-pip` is NOT a valid `python -m venv` flag — pip
+inclusion is the default. The fix is post-creation verification +
+fallback bootstrap, not a new flag.)
+
+**Capability fix 5 — context_management trigger raised 80K → 120K
+to stop firing prematurely on short builds.**
+
+Real-run trace 8ded6706 cache analysis (per-turn cache_create cost
+breakdown, 2026-04-25):
+  - OpenAI: cache_create = 48% of total build cost ($1.49 of $3.09)
+  - ElevenLabs: cache_create = 30% of total ($0.98 of $3.23)
+
+Two distinct contributors to that cache_create cost:
+
+1. **Sonnet→Opus model-switch tax** (T1 OpenAI: 91K cache_create,
+   $0.57; T3 ElevenLabs: 52K cache_create, $0.32). Unavoidable per
+   se — Opus has its own cache namespace. NEW-AL's compaction fix
+   reduced this by ~$0.10-0.20 from baseline (~$0.66 projected →
+   ~$0.50-0.62 measured). Real but smaller-than-projected win.
+
+2. **`clear_tool_uses_20250919` edits firing TOO AGGRESSIVELY in
+   short builds.** OpenAI T7 + T9 BOTH fired this edit:
+     - T7: c_write=54K = $0.34 (cache_read dropped 98K → 32K)
+     - T9: c_write=44K = $0.28 (cache_read dropped 86K → 32K)
+   Total cost: $0.62. Each fire saves ~$0.03-0.05/turn on subsequent
+   reads. With only 4 turns remaining after T7, savings = ~$0.20.
+   Net loss per fire: ~$0.10-0.15. **Total waste: ~$0.30-0.40 per
+   voice run.**
+
+The edit was triggering at 80K input_tokens — fires at turn 7-9 in a
+typical 12-turn build, where the savings horizon (3-5 remaining
+turns) doesn't justify the rewrite tax. General fix: bump the
+trigger to 120K. New behavior:
+  - Typical 12-turn builds: context grows to ~140K, edit MAY fire
+    at the very end where it provides little value either way (small
+    fire, small savings, near-net-zero)
+  - Pathological 25-turn debug-heavy builds: edit fires later but
+    earlier in remaining-budget, savings horizon long enough to
+    amortize the rewrite tax — still a win
+  - Safety: `compact_20260112` at 150K is the real overflow safety
+    net; raising clear_tool_uses to 120K leaves headroom
+
+Knob: `PUZZLEEVAL_CACHE_CLEAR_TRIGGER` (default 120000) for
+operators who want to revert or tune further. Skipping the edit
+entirely (set to 200000) would be the most aggressive savings but
+would risk Opus context overflow on truly long builds.
+
+Saves ~$0.30-0.40 per voice run + ~5-10s wall-clock (cache rewrites
+take time too).
+
+**Capability fix 6 — latency_ms persisted on every turn_log + summary
+aggregation.**
+
+Pre-NEW-AM `turn_log` captured cost + cache + tokens but discarded
+per-turn API latency. `log_llm_call` measured it for stderr structured
+logs but never wrote it to the persisted dict. Without it, post-hoc
+analysis couldn't correlate "this turn cost $X" with "this turn took
+Ys".
+
+Now: `call_latency_ms = round((time.time() - call_start) * 1000, 2)`
+captured at line 4461, persisted into `turn_log` at line ~4506.
+`_compute_conversation_summary.aggregate` surfaces total `latency_ms`
++ `latency_min_ms` / `latency_max_ms` / `latency_avg_ms` /
+`turns_with_latency`. Per-model breakdown also includes latency.
+Back-compat verified: missing-field path returns 0.0 +
+`turns_with_latency=0` (distinguishes "old log, no data" from "new
+log, every turn was instant").
+
+**Tests (+11 new regression guards):**
+- `tests/test_prod_audit_fixes.py::TestConversationSummaryTelemetry`
+  +9 cases: latency aggregation roundtrip, back-compat missing-field,
+  build_phases breakdown, unfinished-build phases, web_fetch+search
+  result capture guard, custom-tool exit_code+metadata guard,
+  build_turn callback rich payload, pipeline_runner URL/query
+  formatter, synthesizer-skips-when-incomplete (3 negative cases +
+  full-render positive), pre-rendered-spec skips-Sonnet,
+  promote_verdict aggregates cost from 4 components
+
+Plus 2 pre-existing test fixes (key-set assertion → subset semantics
+since build_phases + boundary_turns are additive).
+
+Net: 1,376 → 1,388 core tests. Zero regressions. The 7 voice_realtime
+tests that fail in CI when uvicorn holds port 8765 (documented
+pre-existing port-contention issue, not a regression) pass cleanly
+when backend is stopped.
+
+**Wall-clock + cost projection (next real voice run after NEW-AM
+ALL fixes — v2 pre-render + venv pip-bootstrap + cache trigger raise):**
+
+| Phase | Today (trace 8ded6706) | Projected | Source of saving |
+|---|---|---|---|
+| Agent 1 | 1:00 | 1:00 | — |
+| Agent 2 + 3 (parallel) | 3:00 | 3:00 | — |
+| Selection pause | user click | user click | — |
+| Agent 4 | 4:00 | 4:00 (+ venv pre-create in parallel) | NEW-AL |
+| Agent 5 build (slowest cand) | 19:00 | **~14:00** | NEW-AM v2 pre-render skips Sonnet redundant 60% (~3-4 min); venv pip-bootstrap eliminates pip-install loop (~30s); cache-trigger raise eliminates 2 wasteful clear_tool_uses fires (~10s) |
+| Agent 5 tests | 3:00 | ~3:00 | NEW-AL bg merge |
+| Final processing | 0:30 | 0:30 | — |
+| **Total wall-clock** | **25:54** | **~21:00** | **~5 min saved (NEW-AM cumulative)** |
+| **Total cost** | **$7.53** | **~$5.00-5.40** | **~$2.10-2.50 saved**: pre-render ~$1.50, cache-trigger raise ~$0.40, venv pip-bootstrap ~$0.20 |
+| **Test cost reporting** | "$0.00" (broken) | accurate per-test | NEW-AM tracking fix |
+| **cache_create cost % of build** | 30-48% | **20-32%** | clear_tool_uses no longer firing wastefully on short builds |
+
+**Honest accounting note:** the prior NEW-AM v1 projection of "12 min
+wall-clock saved + $2.40 cost saved" assumed pure-skip of Sonnet.
+v2 (preserves harness quality) saves less (~3-4 min, ~$1.50-2.00)
+because Sonnet still does targeted augment research on the 40% of
+spec content the checklist by design doesn't carry. The remaining
+build time floor (Opus build + debug iterations on multi-turn voice
+state, the 6 patch turns we observed in trace 8ded6706) is not
+addressed by NEW-AM and is fundamentally about the complexity of
+multi-turn WebSocket protocols — would need a modality-specific
+playbook to reduce further (deferred per AD-001 + AD-002).
+
+Real-run validation deferred to next session (current run's artifacts
+already on disk; backend was killed to free port 8765 so voice tests
+pass clean. Restart with `python -m uvicorn main:app --host 0.0.0.0
+--port 8001` from `puzzleeval-api/`.)
+
+**Phase fingerprint:**
+- `pipeline_summary.json:metadata.checklist_prerender_count` (count of
+  candidates whose api_spec was pre-rendered; appears once
+  pipeline_runner promotes the per-candidate log)
+- Per-candidate `conversation_log.json` exists DURING build (not just
+  after) — tail-able mid-build
+- `conversation_summary.json:build_phases` block populated; `research`
+  phase = 0 turns when pre-render fast path activated
+- `conversation_summary.json:boundary_turns.api_spec_written_at = 0`
+  when pre-rendered (vs 1-3 when Sonnet had to research)
+- Stderr log line `operation: checklist_prerender_skip_sonnet` per
+  candidate that got the fast path
+
+**Diagnostic flags / rollback knobs:**
+- Pre-render: no flag — synthesizer returns None when checklist isn't
+  complete, falls through to legacy full-research path. To force-
+  disable, monkey-patch `_synthesize_api_spec_from_checklist` to
+  return None.
+- Per-test cost aggregation: no flag — additive at the
+  `_promote_verdict_to_tcr` call site. Pre-fix value was None; new
+  value is real cost. No regression risk.
+- Observability fields: all additive on `turn_log` + `conversation_
+  summary.json`. Existing readers unaffected (subset assertion
+  introduced in test_save_writes_summary_alongside_log).
+
+> **NEW-AL — Voice-run wall-clock optimizations** (previous session, documented below). NEW-AK (build-readiness checklist) and earlier passes preserved below.
+
+### NEW-AL — Voice-run wall-clock optimizations (2026-04-25)
+
+After the NEW-AK pass landed and a 25-min real run on OpenAI Realtime +
+ElevenLabs ConvAI completed, a focused timing audit identified ~6-9 min
+of avoidable wall-clock waste. Five fixes shipped this session, with
+honest accounting of which actually moved the needle.
+
+**See `PLAN_VOICE_RUN_OPTIMIZATIONS.md` for full evidence + math.**
+
+**Capability fix 1 — `prefer_non_strict=True` on Agents 2 + 4 structuring.**
+Previously every Agent 2 / Agent 4 run hit the strict-grammar 400 ("compiled
+grammar is too large"), logged the fallback warning, then ran the non-strict
+path successfully. The strict attempt was a doomed-and-known-doomed API
+call eating ~30-60s per agent. New `prefer_non_strict=True` parameter on
+`structured_output.parse_with_fallback` skips the strict attempt entirely
+for schemas the caller knows won't fit. Wired at Agent 2 + Agent 4
+structuring call sites. Saves ~1-2 min per pipeline run.
+
+**Capability fix 2 — Per-candidate parallelism 3 → 6.**
+`AGENT6_PER_CANDIDATE_PARALLELISM` and
+`AGENT6_PER_CANDIDATE_SESSION_PARALLELISM` defaults bumped from 3 to 6
+in `puzzleeval/config.py`. The default 6 is the CEILING below the
+ElevenLabs Conversational AI Starter pack's concurrent-session cap
+(the tightest paid tier we currently exercise) — going above 6 on
+Starter would trigger 429 / "session limit exceeded" on every voice
+run.
+
+For a typical 7-test Agent 3 batch, this runs 6 in batch 1 + 1 in
+batch 2 (instead of 3 sequential batches of 3). Combined with
+capability fix 5 (background audio merge) which frees workers at
+conversation-end rather than merge-end, batch 2 starts ~70s sooner
+than the prior pure-sync architecture allowed.
+
+Safe because `puzzleeval/rate_limiter.py` (the existing
+`TokenBucketLimiter` + `GlobalProviderLimiter`) is wired into Agent 5
+test execution at `implement_test_env.py:7617`. Every test call goes
+through `rate_limiter.acquire(candidate, upstream)` which SLEEPS until
+a token is available — pure back-pressure, no errors. With default
+`DEFAULT_RPS=2` per candidate, 6-parallel just queues 6 threads in the
+bucket instead of 3. On generous-rate providers (OpenAI tier-2+,
+ElevenLabs paid tiers) achieves true 6× concurrency; on tight tiers
+transparently degrades to limiter pace. Free-tier session-cap errors
+caught by the existing `AGENT6_SESSION_RETRY_BACKOFF` retry path
+(5s/10s/20s exponential). Worst case: slower wall-clock, never test
+failure.
+
+Override via `PUZZLEEVAL_AGENT6_PER_CANDIDATE_PARALLELISM=N` env to
+raise on a paid-tier upgrade (Pro / Scale on ElevenLabs, tier-3+ on
+OpenAI).
+
+Saves ~2 min per voice-run test phase (combined with fix 5).
+
+**Capability fix 3 — `PUZZLEEVAL_EFFORT` default high → medium.**
+Empirical evidence from real run trace 73a9d605
+(`conversation_log.json`): Opus build turns under EFFORT=high were
+spending substantial budget on extended thinking that produced no
+visible work — e.g., ElevenLabs T2 Opus turn cost $0.97 with 262
+output tokens, 0 visible text, 0 tools called. Lowering to `medium`
+reduces per-turn thinking budget on routine tool-execution turns.
+Adaptive thinking auto-tunes UPWARD when complex decisions hit, so
+medium is a FLOOR not a cap. Saves 30-60s per slow build. Override
+via `PUZZLEEVAL_EFFORT=high` env to revert.
+
+**Capability fix 4 — venv pre-create in parallel with Agent 4.**
+Real run trace evidence: ElevenLabs venv creation took 129 seconds
+(cand+0 → cand+129s) BEFORE the build loop's first Opus turn fired.
+That's `python -m venv .venv` + `pip install --quiet
+VENV_PREINSTALL_MANIFEST` (6 packages) per candidate, serialized at
+the start of each build's wall-clock budget.
+
+New `precreate_venvs_for_candidates(candidate_names, trace_id, logger)`
+in `implement_test_env.py` runs venv setup in parallel via
+ThreadPoolExecutor. Hooked from
+`puzzleeval-api/services/pipeline_runner.py::_kick_off_venv_precreate`
+as a fire-and-forget `asyncio.create_task(asyncio.to_thread(...))`
+right after Phase 6 selection submission (or Phase 7 auto-pick). Runs
+concurrently with Agent 4 verification — Agent 4 spends ~2-4 min on
+server-side `web_fetch` / `web_search` waits, plenty of slack for
+parallel venv setup.
+
+Race-safe via per-sandbox `threading.Lock` registry
+(`_VENV_CREATE_LOCKS` keyed by sandbox dir absolute path). Both
+pre-create AND Agent 5's later `_create_venv` acquire the lock; the
+second caller sees the venv python already exists and short-circuits.
+Tested with concurrent threads racing the same sandbox — exactly 1
+subprocess invocation regardless of caller count.
+
+Critically: pre-creates ONLY for SELECTED candidates (the post-
+Phase-6 / Phase-7 filtered list). Non-selected Agent 2 candidates
+never get venvs. Failures are logged but never raise — Agent 5's
+`_create_venv` falls back to in-build venv creation (legacy path)
+when a pre-creation didn't complete. Belt + braces.
+
+Saves 60-120s per voice-run on the slowest candidate's build phase.
+
+**Capability fix 6 — Sonnet → Opus boundary research compaction.**
+Real-run measurement (trace 73a9d605): the FIRST Opus turn of every
+build pays a model-switch cache rebuild tax — Opus has a separate
+cache namespace from Sonnet, so it re-caches the entire conversation
+history (including raw web_fetch / web_search blobs ~15-30K chars
+each) into its own namespace. Measured cost:
+  - ElevenLabs T2 cache_create: 69,770 tokens → ~$0.44 wasted
+  - OpenAI T1 cache_create:     35,993 tokens → ~$0.22 wasted
+  - **Combined per-run model-switch tax: ~$0.66**
+
+`_compact_research_tool_results(messages)` walks the conversation
+history at the api_spec_written transition and replaces every
+`web_fetch_tool_result` and `web_search_tool_result` block's content
+with a brief pointer: *"[research artifact COMPACTED — original page
+content available via read_file('fetched_docs_N.txt') in this sandbox;
+the synthesized contract lives in api_spec.txt]"*. Block TYPE and
+`tool_use_id` are preserved (the API requires every server-tool
+tool_use to have a matching tool_result; breaking the pairing → 400).
+
+**Safety verified before ship**:
+  - Every web_fetch_tool_result content blob is ALSO on disk as
+    `fetched_docs_N.txt` (web_doc_cache.save_web_fetches_to_sandbox
+    saves both Agent 4's AND Agent 5/Sonnet's fetches there)
+  - Real-run audit confirmed Agent 5 prefers read_file over web_fetch
+    when files exist (ElevenLabs trace: 2 read_file, 0 web_fetch);
+    the read_file path is the established happy path
+  - Wrapped in try/except — compaction failure is non-fatal (worst
+    case: pay the original tax)
+  - Wired ONCE per build at the api_spec_written transition (not
+    per-turn) — single call site enforced by source-grep guard
+
+Saves ~$0.66 per voice run + ~10-15s wall-clock (smaller cache writes
+are faster).
+
+**Capability fix 7 — rubric judge cache-aware system prompt.**
+Real-run audit found rubric judge = 11.4% of total run cost ($0.704
+across 14 calls). The ~798-token instructional skeleton is identical
+across every rubric judge call within a run, but was being re-sent
+fresh on each call.
+
+Refactored `puzzleeval/rubric_judge.py`:
+  - `_JUDGE_SYSTEM_TEMPLATE` split into `_JUDGE_SYSTEM_STABLE` (the
+    instructional skeleton — YOUR TASK + HOW TO SCORE + OUTPUT FORMAT)
+    and `_JUDGE_SYSTEM_PER_TEST_TEMPLATE` (per-test variable content:
+    persona, goal, agent instructions, rubric, transcript)
+  - New `_build_system_prompt_blocks()` returns a list of two text
+    blocks: `[{stable + cache_control: ephemeral}, {per_test, no
+    cache_control}]`
+  - `judge_conversation` now passes the BLOCKS list to `system=`,
+    enabling Anthropic's prompt cache to write the skeleton once per
+    5-min window then read it cheap on every subsequent call
+  - Legacy `_build_system_prompt` (returning a single string) preserved
+    for back-compat — assembled as `_JUDGE_SYSTEM_STABLE + "\n\n" +
+    per_test_block` so external callers grepping prompt content
+    still see identical text
+
+Saves ~$0.07 per voice run on the rubric judge. Modest, but pure win
+with no quality risk (same content, same model, just cached).
+
+**Capability fix 5 — background audio merge (RESHIPPED after parallelism=6).**
+Originally proposed in PLAN_VOICE_RUN_OPTIMIZATIONS.md item 5, then
+deprioritized when parallelism was bumped to 7 (no next-batch to
+gate). After the user's correct call to drop parallelism to 6 (the
+ElevenLabs Starter ceiling), the optimization is back in scope: with
+parallelism=6 and ≥7 tests, batch 2's start IS gated by sync merge,
+losing ~70s.
+
+Architecture:
+  - Module-level daemon `ThreadPoolExecutor` (`_MERGE_EXECUTOR`)
+    lazy-initialized on first submit. Pool size = 8 (covers
+    parallelism=6 + 2 slack), thread name prefix `voice-merge` so
+    they're easy to spot in profiling.
+  - `VoiceRealtimePlugin.submit_merge_in_background(session_token,
+    turns) -> Future` is the new submit API. Captures the SUBMITTING
+    worker's `self._tl.session_dir` AT SUBMIT TIME and restores it
+    inside the bg thread (so merges write to the right per-candidate
+    voice/ folder, not the bg thread's default %TEMP%).
+  - `wait_for_pending_merges(timeout_per_merge_s=60) -> dict[token,
+    path | None]` blocks at end-of-run for every pending merge with a
+    per-merge timeout. Hung merges resolve to None (per-turn audio
+    still on disk; UI degrades gracefully to playing them
+    individually).
+  - Both call sites (`drive_conversation` scripted path +
+    `_drive_conversation_agentic`) now submit to the bg pool instead
+    of merging synchronously. Returns immediately with
+    `merged_audio_path=None` and audio_paths containing per-turn
+    entries only.
+  - Agent 5's `_execute_all_tests` caller calls
+    `voice_plugin.wait_for_pending_merges()` AFTER `_execute_all_tests`
+    returns and patches each test result's `merged_audio_path` +
+    role-'conversation' audio entry by `session_token`.
+
+Knobs (env-overridable):
+  - `PUZZLEEVAL_VOICE_MERGE_POOL_SIZE` (default 8)
+  - `PUZZLEEVAL_VOICE_MERGE_TIMEOUT_S` (default 60)
+
+Saves ~70s per voice run with ≥7 tests at parallelism=6.
+
+**Tests (+48 new):**
+- `tests/test_structured_output.py`: +7 cases for `prefer_non_strict`
+  + 4 cases for the new Pydantic-ValidationError defense
+  (validation failure → `StructuredOutputFallbackError` with
+  schema-name in error, chained as `__cause__`, well-formed input
+  still parses normally)
+- `tests/test_per_candidate_parallelism.py`: 2 existing cases updated
+  to lock new defaults of 6 (the ElevenLabs Starter pack ceiling)
+- `tests/test_thinking_and_tools.py`: 2 existing cases updated to
+  lock new EFFORT default of `medium`
+- `tests/test_agent1_thinking.py`: 1 existing case updated for new
+  EFFORT default
+- `tests/test_session_cap_retry.py`: 1 existing case updated to
+  use `rfind` for the actual config-line locator
+- `tests/test_venv_precreate.py`: NEW, 13 cases covering selected-
+  only execution, parallel ThreadPoolExecutor, max-workers cap,
+  fail-isolation, short-circuit on existing venv, per-sandbox lock
+  serialization, source-grep guards on pipeline_runner hook
+- `tests/test_voice_merge_background.py`: NEW, 17 cases covering
+  submit-returns-immediately, future tracking, end-of-run join,
+  per-merge timeout, fail-silent contract, lazy module-level
+  executor, source-grep guards on both voice_realtime call sites +
+  Agent 5 patch hook
+- `tests/test_agent2.py`, `tests/test_agent4.py`: mock helpers updated
+  to use tool_use response shape (now that structuring uses non-strict
+  via prefer_non_strict)
+
+Net: 1,308 → 1,376 core tests. API + bench unchanged. TypeScript
+production build clean.
+
+Additional 34 cases for fixes 6 + 7 (deep-dive optimizations):
+- `tests/test_research_compaction.py`: NEW, 16 cases covering Sonnet→Opus
+  boundary compaction (no-op cases, web_fetch / web_search compaction,
+  idempotence, SDK + dict shape support, mixed-block content
+  preservation, source-grep guards on the model-switch wiring +
+  try/except wrapping + single call-site invariant)
+- `tests/test_rubric_judge_cache.py`: NEW, 18 cases covering blocks
+  shape, stable block + cache_control invariant, no per-test data
+  leakage into stable block, back-compat string version preserved,
+  judge_conversation source-grep guard for system=blocks usage
+
+**Defense-in-depth: malformed-JSON handling now comprehensive.**
+Pre-pass coverage:
+  - over-nested model output (`{"input": {...}}`) → unwrapped
+  - Python repr strings for arrays (`"frozenset({'x'})"`) → coerced
+  - no tool_use block at all → `StructuredOutputFallbackError`
+  - Agent 4 BUILD_READINESS_CHECKLIST malformed JSON → sentinel
+    checklist via `_extract_checklist_from_findings`
+
+NEW (this pass): Pydantic ValidationError on the structured-output
+final validation step. `TypeAdapter(...).validate_python()` failures
+are caught, wrapped as `StructuredOutputFallbackError` with the schema
+name + truncated error detail, and chained as `__cause__` for full
+debugging trace. The agents' existing `StructuredOutputFallbackError`
+→ `AgentOutputError` mapping handles it cleanly. Comprehensive
+defense — every known failure mode produces a graceful
+`AgentOutputError` instead of crashing the agent.
+
+**Wall-clock + cost projection (next real voice run):**
+
+| Phase | Today (trace 73a9d605) | Projected | Source of saving |
+|---|---|---|---|
+| Agent 1 | 3:00 | 3:00 | — |
+| Agent 2 + 3 (parallel) | 6:04 | ~5:00 | medium effort + prefer_non_strict |
+| Selection pause | 2:00 (user click) | 0:30 (user click) | UX only |
+| Agent 4 | 2:10 | 2:10 (+ venv pre-create in parallel) | item 3 saves on Agent 5 |
+| Agent 5 build (slowest cand) | 9:30 | **~3:30** | NEW-AK checklist + venv ready + medium effort + **Sonnet→Opus compaction (-15s)** |
+| Agent 5 tests (parallelism=6 + bg merge) | 7:48 | ~3:00 | parallelism 6 + background merge frees workers |
+| Final processing | 1:12 | 0:15 | bg merges already running concurrently |
+| **Total wall-clock** | **25:36** | **~13:25** | **~12 min saved** |
+| **Total cost** | **$5.99** | **~$5.20** | **~$0.79 saved** (model-switch tax + rubric cache + grammar fallback) |
+
+Brings voice-run wall-clock to OCR-comparable territory. Voice's
+intrinsic floor is the longest single 5-turn dialogue (~135s) plus
+its background merge tail (~70s).
+
+**Math footnote on parallelism=6 + bg merge interaction:** for 7
+tests, sync merge would gate batch 2 by `merge_time` per worker
+(adds ~70s); bg merge frees workers at conversation-end so batch 2
+starts ~70s sooner. For 12-test runs (6+6 batching), same ~70s
+saving applies at the batch boundary. For runs with ≤6 tests, bg
+merge produces zero saving — the longest test's `conversation +
+merge` still gates completion. The optimization is precisely
+right-sized for the parallelism=6 + 7-12 typical-test-count regime.
+
+**Phase fingerprint:**
+- `pipeline_summary.json:metadata.venv_precreate_succeeded` count (when
+  pipeline_runner adds the rollup; backend log carries
+  `operation: venv_precreate_complete` per run today)
+- `pipeline_summary.json:metadata.effort` reflects the new default
+- Build conversation logs show fewer turns on slow candidates (5-7 vs
+  the 11 ElevenLabs took at NEW-AK measurement time)
+
+**Diagnostic flags / rollback knobs:**
+- Item 1 (prefer_non_strict): no flag — call-site explicit. To revert,
+  remove `prefer_non_strict=True` at Agent 2/4 structuring sites.
+- Item 2 (parallelism): `PUZZLEEVAL_AGENT6_PER_CANDIDATE_PARALLELISM=3`
+  + `PUZZLEEVAL_AGENT6_PER_CANDIDATE_SESSION_PARALLELISM=3` env vars
+- Item 3 (effort): `PUZZLEEVAL_EFFORT=high` env var
+- Item 4 (venv pre-create): no flag — failures gracefully fall back
+  to Agent 5's in-build venv create (legacy path, unchanged)
+
+> **NEW-AK — Build-readiness checklist + Agent 5 research agency restored** (previous session, documented below). Previous passes' sections (NEW-AJ, NEW-AI, NEW-AH, NEW-AG, etc.) are preserved below in chronological reverse order.
+
+### NEW-AK — Build-readiness checklist + research agency restored (2026-04-25)
+
+The user pushed back on the density-aware prefetch injection landed in
+NEW-AI/AJ: by ranking docs on structural richness (code fences, endpoints,
+auth headers) and inlining the dense ones, we measured a proxy ("does
+this page LOOK useful?") instead of the real question ("does Agent 5
+have what it needs to BUILD?"). Worse, the prompt's `Case A → skip to
+STEP 2` and `you do NOT need to read_file or web_fetch` language gated
+Agent 5 into passive-consumer mode — it stopped researching its own
+gaps once the density signal said "you have enough."
+
+The user's framing: *"are we measuring how dense the fetch is, not
+usefulness to build, so once dense level pass, agent 5 doesn't have
+the motivation to search for what it needs?"* Yes. That was the bug.
+
+This pass replaces density scoring + injection with a **build-readiness
+checklist** — a structured Pydantic artifact that flows Agent 4 →
+Agent 5 with the ten enumerable questions a harness builder must
+answer, each carrying `confirmed | inferred | unknown` status. Plus
+Agent 5's Phase 1 is restructured into five sub-phases (Inventory →
+Gap Analysis → Targeted Research → Spec → Build) with per-test-case
+relevance triggers that prevent both over-research and under-research.
+
+**Architectural change 1 — `BuildReadinessChecklist` schema.**
+New module: `puzzleeval/schemas.py` adds `EndpointSummary`,
+`FieldStatus`, `BuildReadinessChecklist`, plus the constants
+`NON_NEGOTIABLE_FIELDS`, `CONDITIONAL_FIELDS`, `BUILD_READINESS_FIELDS`,
+and the `default_unknown_checklist()` sentinel factory.
+
+Ten build-readiness fields, each with a `FieldStatus`
+(`confirmed | inferred | unknown` + optional `value` / `source_url` /
+`reasoning`):
+
+  *Non-negotiables (Verified Pass requires these `confirmed`):*
+  endpoint_path, auth_method, request_body_shape, response_body_shape
+
+  *Conditional (only required when test case actually exercises them):*
+  auth_refresh, error_response_schema, rate_limit_signal, async_pattern,
+  content_type_quirks, sandbox_availability
+
+Plus `provider_surface: list[EndpointSummary]` (the API surface Agent 4
+considered, with each endpoint tagged primary / alternative / unrelated)
+and `selection_justification` explaining why the chosen endpoint beats
+alternatives. This catches "wrong endpoint matched for the use case"
+failures (the trace `0c7f085f` ElevenLabs TTS-vs-ConvAI bug).
+
+`ScreenedCandidate.checklist: BuildReadinessChecklist | None` — optional
+for back-compat (cached candidates without checklist still parse and
+load; Agent 5 treats None as "do full research"). When present, the
+checklist is the load-bearing artifact for Agent 5's Phase A inventory.
+
+**Architectural change 2 — Agent 4 emits + parses checklist via fenced
+JSON block.** `puzzleeval/agents/screening.py`:
+
+- `VERIFICATION_SYSTEM_PROMPT` extended: per-candidate verification call
+  emits TWO blocks. (1) Findings text (PASS/REJECT + AUTH_METHOD /
+  EVIDENCE / etc — unchanged shape). (2) A fenced
+  ` ```json BUILD_READINESS_CHECKLIST ` block holding the structured
+  handoff. Prompt teaches: provider_surface enumeration with primary/
+  alternative tags, selection_justification, ten fields with status +
+  value + source_url, three-state rejection model.
+- `_extract_checklist_from_findings()` — deterministic parser. Pulls
+  the fenced JSON block via regex, json-loads, Pydantic-validates, and
+  returns the checklist. On any failure (no fence / malformed JSON /
+  schema validation error), returns the `default_unknown_checklist`
+  sentinel with `populated_by="system_failure"` and the failure reason
+  recorded on every field's `reasoning`. Per AD-007: contract
+  enforcement in deterministic code, not prompts. Both layers exist
+  (prompt teaches the format; parser enforces it via regex), defense
+  in depth.
+- `_attach_checklists_to_result()` — post-processes the structuring
+  step's `Agent4Result`, walks every validated candidate, and patches
+  the checklist field deterministically from per-candidate findings.
+  This makes the contract robust against the structuring LLM dropping
+  the nested JSON when output approaches the grammar-budget cap.
+- `STRUCTURE_SYSTEM_PROMPT` updated with checklist-transcription
+  instructions (defense-in-depth — the deterministic parser overwrites
+  whatever the LLM emits, so prompt-level adherence is a quality hint
+  not a contract).
+- New observability metrics in the agent_complete log:
+  `checklist_verified_pass_count`, `checklist_inconclusive_count`,
+  `checklist_sentinel_count`. Aggregate counters surface "did Agent 4
+  deliver real checklists this run, or did it sentinel-out?" without
+  grepping per-candidate logs.
+
+**Architectural change 3 — three-state rejection model.** Agent 4 no
+longer rejects candidates for system failure. Rejection is reserved for
+*evidence of badness*, not *absence of evidence*:
+
+| State | Meaning | Disposition |
+|---|---|---|
+| **Verified Pass** | All four non-negotiables `confirmed` + provider_surface populated + selection_justification written | Pass to Agent 5 with full checklist |
+| **Verified Reject** | Agent 4 found definitive bad evidence (deprecated, no public API, enterprise-only) | Reject with category + reason |
+| **Inconclusive** | Non-negotiables `inferred` or `unknown` but no bad evidence | Pass to Agent 5; runtime test is final arbiter |
+| **System Failure** | Agent 4 crashed / parser failed / timed out | NEVER reject; pass through with sentinel checklist; Agent 5 falls back to full-research mode |
+
+The runtime test is the final arbiter for State 3 + State 4. This is
+the user's principle made explicit: *"we cannot reject one for agent 4
+research failure."*
+
+**Architectural change 4 — Agent 5's Phase 1 restructured into five
+phases with per-test-case relevance triggers.** `puzzleeval/agents/
+implement_test_env.py` Phase 1 prompt rewritten:
+
+  PHASE A — Inventory: read the BuildReadinessChecklist Agent 4 produced,
+    plus the prefetched docs (now background reading material, not
+    inlined content). Agent 5 sees what's known/inferred/unknown across
+    the ten fields.
+  PHASE B — Gap analysis for THIS test case: apply trigger rules to
+    decide which of the ten fields actually matter for the test case
+    being built. Most test cases trigger ZERO additional fields beyond
+    the four non-negotiables Agent 4 already confirmed.
+  PHASE C — Targeted research: fill ONLY the Phase-B-named gaps. Use
+    `web_fetch` for known URLs, `read_file` for prefetched docs,
+    `ask_research` for delegation (with a CANDIDATE/ENDPOINT/KNOWN/
+    FIELD NEEDED/WHY template that makes the call direction-pointing).
+    Soft budget: 2 calls per gap. Stop test: *"Can I write the
+    request-builder, response-parser, and error-handler without TODO,
+    without guessing, without 'might need to'?"*
+  PHASE D — Write the spec (api_spec.txt). The behavioral stop test
+    above is the gate; the structural completion checklist (existing
+    api_spec.txt template) is the secondary gate. Both must pass.
+  PHASE E — Build (Phase 2 begins). harness.py is implemented from
+    the spec, which is the single source of truth.
+
+Phase B trigger rules (the load-bearing per-test-case logic — these
+prevent Agent 5 from researching irrelevant fields out of habit):
+
+  * ALWAYS required: the four non-negotiables (Agent 4 should have
+    already confirmed)
+  * `error_response_schema`, `rate_limit_signal`: required IF test case
+    exercises retry / failure paths
+  * `auth_refresh`: required IF test session is long-running (>10 min)
+  * `async_pattern`: required IF the API is async or streaming
+  * `content_type_quirks`: required IF non-standard content types
+    (multipart, SSE, binary, ndjson)
+  * `sandbox_availability`: required IF candidate has
+    side_effects = creates_records / modifies_records / deletes_records
+
+A typical small read-only sync test triggers ZERO conditional fields →
+Agent 5 makes ZERO research calls beyond reading the inherited
+checklist → spec → build. A retry-on-streaming test triggers 3 → Agent
+5 makes 2-3 targeted research calls. The default mode is *do less
+research*, not more.
+
+**Architectural change 5 — harness.py spec-header injection (Phase D
+output, debugging artifact).** Phase 2's prompt requires harness.py to
+START with a structured `=== API SPEC (Phase D) ===` comment block
+summarizing the checklist contract: endpoint, auth, request/response
+shape, error handling plan, async pattern, side-effect mode, residual
+unknowns. After a real run fails, the maintainer opens harness.py and
+sees exactly which fields were `confirmed` vs `inferred` vs `unknown`
+— the failure becomes diagnosable without re-running the pipeline.
+Lifts directly from the BuildReadinessChecklist when populated.
+
+**Architectural change 6 — soft `ask_research` template adherence
+logger (hybrid per Plan §Q3).** New helper
+`_ask_research_template_adherence()` in implement_test_env.py inspects
+each `ask_research` question for the five template fields (CANDIDATE,
+ENDPOINT, KNOWN, FIELD NEEDED, WHY) and returns a structured report.
+The dispatch path LOGS adherence (warning when partial, info when
+fully adherent) but does NOT reject — Opus follows the template
+reliably enough that hard validation would produce false-rejects on
+benign rephrasings. Telemetry without rigidity. If adherence drifts
+in production, we'll see it in logs and tighten the prompt.
+
+**Architectural change 7 — density scoring deleted.**
+`puzzleeval/web_doc_cache.py::doc_density_score`,
+`classify_doc_density`, `DENSITY_HIGH`, `DENSITY_MEDIUM` are GONE — no
+remaining consumers. The ranking math (code fences, endpoints, auth
+headers, WebSocket mentions, nav-link penalty) survives as
+`_usefulness_signal` in `implement_test_env.py`, applied as a SOFT
+inventory-ordering hint on the prefetched-docs block: pages with code
+samples appear first, but this is purely a triage hint — no tiers, no
+gates, no instructional branching. The checklist replaces the proxy.
+
+`_format_prefetched_docs_block` rewritten: lists every prefetched file
+with its source URL and usefulness signal in descending order, names
+WHEN to read them (Phase A or Phase C), and reminds the builder that
+the checklist is the load-bearing artifact. ~130 LoC simpler than the
+density-tier branching it replaces.
+
+**Architectural change 8 — `_format_checklist_context_for_builder()`
+renders the checklist into Agent 5's initial message.** Three render
+modes: (a) None checklist (cached/legacy candidate) → tell builder to
+do full research from scratch; (b) sentinel checklist (system_failure)
+→ surface the failure reason and route to full-research mode; (c)
+real checklist → render the surface + selection + justification + each
+of the ten fields with status + value + source_url + reasoning, plus
+the Phase B trigger rules as a reminder. The four non-negotiables are
+marked with ★ for visual distinction.
+
+**Files touched:**
+- `puzzleeval/schemas.py` — +320 LoC (3 new models + constants + sentinel
+  factory + ScreenedCandidate.checklist field)
+- `puzzleeval/agents/screening.py` — +220 LoC (extended VERIFICATION +
+  STRUCTURE prompts; new parser + post-processor)
+- `puzzleeval/agents/implement_test_env.py` — five-phase Phase 1
+  rewrite (-90 LoC density branching, +160 LoC checklist context +
+  five-phase teaching), +50 LoC ask_research adherence logger,
+  +30 LoC harness.py spec-header instruction
+- `puzzleeval/web_doc_cache.py` — -100 LoC (density scoring deleted)
+- `tests/test_build_readiness_checklist.py` — NEW (42 cases)
+- `tests/test_agent5_research_agency.py` — NEW (43 cases)
+- `tests/test_agent4_doc_handoff.py` — rewritten (23 cases, +5 new
+  checklist-attachment cases; old "ALREADY IN YOUR CONTEXT" /
+  "skip to STEP 2" assertions removed)
+- `tests/test_density_aware_prefetch_injection.py` — replaced with
+  deprecation marker (1 case pointing at successor)
+- `tests/test_phase1_research_upgrades.py` — 6 cases updated to lock
+  new five-phase wording instead of old STEP-numbered + density-tier
+  structure (25 cases total, all passing)
+
+**Tests:** 1,222 → 1,301 core (+79 net: +85 new cases, -6 obsolete
+cases). API + generalizability bench unchanged (37 + 39, still all
+green).
+
+**What this is NOT:** a behavior change. The pipeline still runs the
+same five agents in the same order. Agent 4 still verifies via
+web_search/web_fetch with the same per-candidate parallelism. Agent 5
+still builds harnesses with the same tool surface. What changed is
+the SHAPE of the handoff between them: structured checklist with
+explicit per-field status, replacing implicit density-based ranking.
+
+**Why this is a pure win:**
+- **Right endpoint chosen.** `provider_surface` + `selection_justification`
+  catches wrong-endpoint failures that density couldn't see.
+- **No silent gaps.** Every field has a status; `unknown` is recorded
+  with reasoning, not silently absent. Mystery test failures become
+  diagnosable from harness.py's spec comment alone.
+- **Per-test-case research focus.** Phase B trigger rules eliminate
+  "research everything just in case" tendency the density-injection
+  prompts had. Cost: down. Quality: up.
+- **Falsifiable stopping criteria** at every stage. Booleans, not
+  proxy judgments.
+- **Less code.** Net smaller surface area than the density era. The
+  checklist is ~60 lines of Pydantic; it replaces ~150 LoC of density
+  scoring + ranking + tier-branching + instructional case A/B/C.
+- **Debuggable.** After a failed run, harness.py's `=== API SPEC ===`
+  header shows exactly which fields were confirmed/inferred/unknown.
+
+**Cost impact (per candidate):** Agent 4 +$0.005 (60-line cached
+prompt extension + ~200 tokens structured output). Agent 5 down by
+~1-3 research calls per candidate on average (Phase B's trigger rules
+prevent re-confirming fields already in the checklist). Net per
+candidate: roughly flat to slightly down. Quality: substantially
+better.
+
+**Phase fingerprint:**
+- `agent_4_output.json.validated_candidates[].checklist` non-null on
+  new runs; null on cached runs predating this pass.
+- `pipeline_summary.json` will surface
+  `checklist_verified_pass_count` / `checklist_inconclusive_count` /
+  `checklist_sentinel_count` once the pipeline runner promotes them
+  via `_AUTO_METADATA_FIELDS`.
+- Agent 5's harness.py files contain `=== API SPEC (Phase D) ===`
+  comment block at the top.
+
+**Diagnostic flag:** None added; the pass is fully additive at the
+schema layer (checklist field optional). Reverting to the density-era
+behavior would require restoring `web_doc_cache.doc_density_score` +
+the Phase 1 STEP-numbered prompt — both committed history, recoverable
+via `git revert`.
+
+See `PLAN_AGENT5_RESEARCH_AGENCY.md` for the full design rationale,
+the five answered design questions (Q1: ten fields right? Q2: four
+non-negotiables? Q3: ask_research enforcement? Q4: rejection
+criteria? Q5: density delete?), and the speed/quality assessment.
+
+### NEW-AJ — Agentic simulated conversations + rubric judge (2026-04-22)
+
+Four sessions ago we finally landed agent audio end-to-end (NEW-AI).
+The scoring quality of those voice tests, however, was still meaningless
+— `expected_agent_contains: "9"` would spuriously fail against "nine"
+and spuriously pass against "closed at 9 but tomorrow at 10 might work".
+The static turn_script pattern ALSO couldn't adapt: simulated user
+turn N+1 was hardcoded regardless of what the agent said in turn N.
+Net effect: voice/chatbot pass rates were near-random with respect to
+actual agent quality (OT-001 + OT-014 in prior ledger).
+
+This session replaces both failure modes with two new modules:
+
+**Capability fix 1 — `puzzleeval/user_simulator.py` — LLM-driven user turns.**
+Haiku 4.5 simulates the caller reactively based on persona + goal +
+constraints + the real conversation so far. Reacts to what the agent
+actually said: answers clarifying questions, pushes back on wrong
+info, thanks and emits `<END_CALL reason="goal_achieved">` when the
+goal lands. AD-007 safety contracts are explicit in the system prompt:
+"NEVER reveal you're a test; NEVER break character; NEVER volunteer
+information unrelated to your goal." Regression tests lock those.
+Cost: ~$0.002/turn. Temperature=0.3 for reactive but low-variance output.
+
+**Capability fix 2 — `puzzleeval/rubric_judge.py` — transcript-level scoring.**
+Sonnet 4.6 scores the full conversation against a weighted rubric of
+4-6 criteria (goal_completion, accuracy_no_hallucination, info_gathering,
+appropriate_tone, policy_compliance, scope_adherence — plus domain-
+specific criteria Agent 3 can add). CRITICAL-GATE SEMANTICS are enforced
+deterministically (AD-007): a critical criterion scoring below its
+threshold vetoes the whole pass regardless of overall score. The
+judge's own self-reported `passed` + `critical_failures` are IGNORED;
+both are re-derived from per-criterion scores + rubric spec in
+`_finalize_verdict`. Cost: ~$0.015/conversation.
+
+**Schema additions** — `Persona`, `RubricCriterion`, `RubricScore`,
+`RubricVerdict`, `ConversationTurn`, `SimulatorTurn` on the Python
+side (with mirrored TypeScript types). `TestCase` gains optional
+`persona`, `goal`, `constraints`, `rubric`, `max_turns`,
+`evaluation_mode` fields. `TestCaseResult` gains `rubric_verdict` +
+`transcript`. ALL back-compat: legacy TestCase without new fields
+still parses + runs unchanged (auto-detects scripted mode).
+
+**Plugin integration — voice_realtime + conversation_simulator.**
+Both plugins' drive loops gain an agentic path that replaces the
+static-script iterator with the simulator. Mode resolution order:
+(1) PUZZLEEVAL_CONVERSATION_EVAL_MODE env override, (2) per-test
+`evaluation_mode` field, (3) auto-detect based on persona+goal+rubric
+presence. Missing-kit fallback: when agentic is requested but any of
+persona/goal/rubric is missing, log a warning + fall back to scripted
+path rather than crash. Hybrid mode runs BOTH paths for diagnostic
+A/B comparison — `result["hybrid_scripted"]` carries the scripted
+verdict alongside the primary agentic one.
+
+**Agent 3 prompt rewrite** — `conversation` + `voice_conversation` +
+`voice_turn` sections rewritten to teach the new contract: emit
+persona + goal + rubric, NOT static turn scripts. Worked examples
+show 4-6-criterion rubrics with explicit `critical=True` on
+accuracy_no_hallucination + policy_compliance. Legacy scripted mode
+documented as the `evaluation_mode="scripted"` fallback for back-compat.
+
+**Validator additions** — `validate_agent3_output` warns (not errors)
+when an agentic-mode test is missing persona/goal/rubric, so the
+migration window is friction-free. Rubric weights sanity-checked:
+sum outside [0.5, 2.0] warns (judge auto-normalizes but it's usually
+an emission bug). Invalid `evaluation_mode` values are errors.
+
+**Frontend — `RubricBreakdownBlock` component** in EvaluationReportCard.
+Renders per-criterion progress bars color-coded by severity (red for
+critical failures, amber/green by score). Expandable transcript view
+with turn-by-turn caller/agent display. Populated from
+TestEvidence.rubric_verdict + transcript — both are optional, component
+returns null when absent (non-conversational tests render exactly as
+before).
+
+**Config knobs (5 new env vars):**
+- `PUZZLEEVAL_CONVERSATION_EVAL_MODE` (default `"auto"`) — global override
+- `PUZZLEEVAL_USER_SIM_MODEL` (default `claude-haiku-4-5-20251001`)
+- `PUZZLEEVAL_USER_SIM_TEMPERATURE` (default `0.3`)
+- `PUZZLEEVAL_USER_SIM_MAX_TOKENS` (default `512`)
+- `PUZZLEEVAL_RUBRIC_JUDGE_MODEL` (default `claude-sonnet-4-6`)
+- `PUZZLEEVAL_RUBRIC_JUDGE_MAX_TOKENS` (default `4096`)
+- `PUZZLEEVAL_CONVERSATION_MAX_TURNS_CEILING` (default `12`) — hard cap
+
+**Cost envelope**: ~$0.025-0.03/conversational test added (simulator +
+judge). For typical runs (3 conversational tests × 3 candidates = 9
+tests) that's ~$0.27/run — negligible vs the ~$5-15/run Agent 5 spend
+on harness building.
+
+**Tests (+56 regression guards):**
+- `tests/test_user_simulator.py` — 17 cases
+- `tests/test_rubric_judge.py` — 15 cases
+- `tests/test_voice_realtime_agentic.py` — 6 cases
+- `tests/test_conversation_simulator_agentic.py` — 5 cases
+- `tests/test_agent3_conversation_schema.py` — 13 cases
+
+Net: 917 → 973 core tests. API + generalizability bench unchanged.
+TypeScript + Vite production build clean. Backend restarted cleanly
+on :8001.
+
+**Phase fingerprint:** `metadata.conversation_eval_mode` on the run
+(values: `agentic` / `scripted` / `hybrid`). Per-test:
+`TestCaseResult.rubric_verdict` non-null ⇒ agentic path ran.
+Frontend fingerprint: presence of the "Rubric breakdown" expandable
+card on a candidate's evidence row.
+
+**Diagnostic flag:** `PUZZLEEVAL_CONVERSATION_EVAL_MODE=scripted`
+reverts to the old static-script + substring-match behavior across
+the entire run.
+
+**Closes OT-001 (substring match too brittle) + OT-014 (single-turn
+voice scoring too brittle).** Real-run verification pass deferred to
+next session per user's "just get the sim conversation done now"
+scope carve — infrastructure is in place; first real agentic run
+will ship with `hybrid` mode enabled for A/B comparison.
 
 ### NEW-AI — Voice end-to-end success + runner safety nets + web-tools revert (2026-04-21)
 
@@ -4262,7 +5447,7 @@ for harness in successful_harnesses:
 
 ### The 4-Phase System Prompt
 
-1. **PHASE 1: RESEARCH** — Use server-side web_search and web_fetch to find API docs. Follow search→navigate→fetch→synthesize pattern. Write api_spec.txt with INPUT_COMPATIBILITY, ROUTING_TABLE, PYTHON_EXAMPLES, DOC_MAP, DOC_REFERENCES, API_LIMITATIONS. The agent knows ALL test case input forms upfront and researches whether each is compatible. Note: ask_research is for Phase 2+ debugging only, NOT for initial research.
+1. **PHASE 1: RESEARCH** — Use server-side web_search and web_fetch to find API docs. Follow search→navigate→fetch→synthesize pattern. Write api_spec.txt with INPUT_COMPATIBILITY, ROUTING_TABLE, WORKING_EXAMPLE (any language — Python / curl / JS / Go), DOC_MAP, DOC_REFERENCES, API_LIMITATIONS. The agent knows ALL test case input forms upfront and researches whether each is compatible. Note: ask_research is for Phase 2+ debugging only, NOT for initial research.
 2. **PHASE 2: BUILD** — Write harness.py as a THIN API CLIENT. Sends files/data, returns raw API response. No parsing, no formatting, no field extraction. Incompatible forms return `success=False, error="INCOMPATIBLE: reason"`. Smoke test verifies structure.
 3. **PHASE 3: VALIDATE** — Run live API calls with real test files (credentials injected via `_dispatch_tool`). Requires real API success (`success=True`, `output_len > 100`) for EACH file type before HARNESS_COMPLETE. Smoke test alone is NOT sufficient. Milestone message injected when smoke test passes to signal Phase 3 transition.
 4. **PHASE 4: COMPLETION CHECKLIST** — Verify all compatible forms work with live API, all incompatible forms return clean errors, signal HARNESS_COMPLETE.
@@ -4333,7 +5518,7 @@ The system prompt uses behavioral tags that shape how the model works:
 Phase 1 research produces a structured spec with these sections:
 - `SERVICE`, `BASE_URL`, `ENDPOINTS`, `AUTH_HEADER`, `REQUEST_FORMAT`, `RESPONSE_FORMAT`
 - `SDK_PACKAGE`, `ACCEPTED_INPUT_FORMATS`, `SAMPLE_TEST_URL`
-- `PYTHON_EXAMPLES` — code snippets from docs (multiple, for builder to copy)
+- `WORKING_EXAMPLE` — ≥1 complete runnable request example from docs, in ANY language (Python / curl / JS / Go / raw HTTP). Builder translates non-Python examples mechanically via the curl→requests cheat-sheet (`-H` → `headers=`, `-d` → `data=`/`json=`, `-F` → `files=`). Forcing Python-only (old `PYTHON_EXAMPLES` name) made the builder fabricate from training data when docs were curl-first.
 - `DOC_REFERENCES` — bookmark URLs for debugging (grows during build)
 - `DOC_MAP` — all doc pages discovered (even unfetched ones)
 - `INPUT_COMPATIBILITY` — YES/NO per input type (file, URL, text, base64)

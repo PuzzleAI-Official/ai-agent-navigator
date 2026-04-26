@@ -10,7 +10,7 @@
 # structured output. Good descriptions = better results.
 # ============================================================================
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -496,6 +496,31 @@ class ScopeTestSpec(BaseModel):
             "every generated test case's input_context so the harness can "
             "route/parameterize the API call correctly. Empty dict for "
             "single-scope workflows or scopes without parameterization."
+        )
+    )
+
+    agent_instructions: str | None = Field(
+        default=None,
+        description=(
+            "The AGENT's system prompt for this scope — the string the "
+            "candidate provider (OpenAI Realtime / ElevenLabs ConvAI / "
+            "any chat API) receives as its `system`/`instructions` "
+            "message when tested against. REQUIRED for conversational "
+            "scopes (input_type in {conversation, voice_conversation, "
+            "voice_turn, chat}) — without it, the candidate agent "
+            "can't possibly pass domain-specific rubric criteria "
+            "(pricing_accuracy, policy_compliance, service_area) "
+            "because it was never told the scope rules. MUST include "
+            "concrete business details the rubric will score against: "
+            "persona/role, domain, pricing menu, hours, service area, "
+            "escalation policy, out-of-scope redirect behavior. "
+            "Derived from the user's original request + workflow step "
+            "description — encoded here so Agent 3 propagates the "
+            "SAME string to every test case in the scope (fair "
+            "comparison), and the rubric judge uses it as ground "
+            "truth for scope/policy scoring. Null for "
+            "non-conversational scopes (OCR, vision, code, webhook, "
+            "outbound) — no agent being instructed."
         )
     )
 
@@ -1436,6 +1461,326 @@ class JudgementCriterion(BaseModel):
     )
 
 
+# ============================================================================
+# Agentic conversational evaluation — Persona + Goal + Rubric
+# ============================================================================
+# These models back the agentic simulated-user + rubric-judge evaluation
+# path for multi-turn conversations (`voice_conversation`, `conversation`,
+# and the single-turn rubric path for `voice_turn`).
+#
+# WHY NEW MODELS (NOT REUSING JudgementCriterion / CriterionScore)?
+# Conversational evaluation is STRUCTURALLY different from single-shot
+# output judging:
+#   - Judgement applies to a FULL transcript, not a single response
+#   - Criteria are domain-specific (goal_completion, no_hallucination,
+#     policy_compliance) vs mechanical (exact_match, format_compliance)
+#   - A "critical gate" on accuracy must veto overall pass regardless of
+#     other criteria scoring high — JudgementCriterion has no such concept
+#   - Transcripts carry turn-level evidence the judge cites by index
+# Keeping the models separate lets each evolve on its own arc. Both
+# coexist on TestCase: `judgement_criteria` (legacy / single-shot) and
+# `rubric` (conversational) populate based on the test's evaluation mode.
+
+
+class Persona(BaseModel):
+    """
+    Who the simulated user IS for one conversational test case.
+
+    Populated by Agent 3 at generation time, consumed by user_simulator
+    at evaluation time. Grounds the simulator in a plausible real user
+    whose responses react to the agent's actual turns.
+
+    Keep demographics + emotional_state CONCRETE enough that the model
+    generates distinctive voice — not generic "a user". Fluffy personas
+    produce fluffy conversations that don't stress the agent.
+    """
+
+    name: str = Field(
+        description="Caller's first name or first+last. Anchors the simulator's voice."
+    )
+
+    demographics: str = Field(
+        description=(
+            "One-line background relevant to the scope: age, role/profession, "
+            "location archetype, familiarity with the domain. Example: "
+            "'45-year-old homeowner, urban, non-technical' or "
+            "'senior ICU nurse, 3am shift, urgent'."
+        )
+    )
+
+    emotional_state: str = Field(
+        description=(
+            "Current emotional tone the simulator embodies. Examples: "
+            "'stressed — water heater failed with guests arriving tonight', "
+            "'skeptical — been burned by a previous vendor', "
+            "'neutral — routine inquiry'. Drives tone of user utterances."
+        )
+    )
+
+    tech_level: Literal["non_technical", "moderate", "technical"] = Field(
+        default="non_technical",
+        description=(
+            "How savvy the user is with the domain/product. Non-technical "
+            "users don't know jargon; technical users push back on "
+            "oversimplified answers."
+        ),
+    )
+
+    speaking_style: str = Field(
+        default="",
+        description=(
+            "Short hint on register: 'direct, prone to interrupting', "
+            "'polite but persistent', 'asks price upfront'. Optional — "
+            "empty string is fine; simulator falls back to neutral."
+        ),
+    )
+
+
+class RubricCriterion(BaseModel):
+    """
+    One weighted dimension the rubric judge scores for a conversational test.
+
+    CORE CRITERIA (populated by Agent 3 for most conversational tests):
+      - goal_completion       (weight ~0.35)
+      - accuracy_no_hallucination (weight ~0.25, often critical=True)
+      - info_gathering        (weight ~0.15)
+      - appropriate_tone      (weight ~0.10)
+      - policy_compliance     (weight ~0.10)
+      - scope_adherence       (weight ~0.05)
+
+    Not a hard schema — Agent 3 can add domain-specific criteria
+    (e.g. 'bedside_manner' for medical scopes, 'price_transparency'
+    for sales-adjacent scopes). The judge scores whatever is given.
+    """
+
+    name: str = Field(
+        description=(
+            "Snake_case identifier. Used as dict key in RubricVerdict and "
+            "for programmatic consumption. Examples: 'goal_completion', "
+            "'accuracy_no_hallucination', 'policy_compliance'."
+        )
+    )
+
+    description: str = Field(
+        description=(
+            "1-2 sentences telling the judge WHAT to look for. Written "
+            "in judge's perspective: 'Did the agent actually help Maria "
+            "book the appointment? Score 1.0 if a concrete booking was "
+            "confirmed; 0 if no resolution.'"
+        )
+    )
+
+    weight: float = Field(
+        description=(
+            "Importance 0.0-1.0. Weights across rubric should sum ~1.0; "
+            "the judge is instructed to normalize, but Agent 3 SHOULD emit "
+            "balanced weights that reflect what matters for this scope."
+        )
+    )
+
+    critical: bool = Field(
+        default=False,
+        description=(
+            "When True AND the criterion scores below min_passing_score, "
+            "the WHOLE test fails regardless of overall weighted score. "
+            "Use for safety-critical dimensions like accuracy_no_hallucination "
+            "or policy_compliance — no amount of friendly tone rescues a "
+            "hallucinated price."
+        ),
+    )
+
+    min_passing_score: float | None = Field(
+        default=None,
+        description=(
+            "Only consulted when critical=True. Score below this triggers "
+            "a critical-failure veto. Default 0.5 when None and critical=True; "
+            "ignored when critical=False. In [0.0, 1.0]."
+        ),
+    )
+
+
+class RubricScore(BaseModel):
+    """
+    The judge's evaluation of ONE rubric criterion for ONE conversation.
+
+    Named RubricScore (not CriterionScore) to disambiguate from the
+    legacy single-shot CriterionScore model that's shaped around
+    JudgementCriterion. Shape differences:
+      - No `eval_type` (rubric judging is always subjective)
+      - No `passed` field on individual criteria (pass/fail is a
+        whole-conversation verdict, not per-criterion)
+      - `evidence_turn_indices` grounds the score in specific turns
+        so the user can audit the judge's reasoning
+    """
+
+    criterion_name: str = Field(
+        description="Name from RubricCriterion.name — the key linking score back to spec"
+    )
+
+    score: float = Field(
+        description="Judge's score from 0.0 (completely fails this criterion) to 1.0 (fully satisfies)"
+    )
+
+    reasoning: str = Field(
+        description=(
+            "1-3 sentences explaining the score, citing specific turn "
+            "indices where possible. Example: 'Agent collected the "
+            "appointment type (turn 1) and confirmed availability (turn 3) "
+            "but never verified the caller's address before booking.'"
+        )
+    )
+
+    evidence_turn_indices: list[int] = Field(
+        default_factory=list,
+        description=(
+            "0-based turn indices the judge drew evidence from. Empty when "
+            "the judgment applies holistically. Used by the UI to highlight "
+            "transcript turns when the user inspects the rubric breakdown."
+        ),
+    )
+
+
+class ConversationTurn(BaseModel):
+    """
+    One turn in a conversation transcript.
+
+    Populated by voice_realtime + conversation_simulator plugins during
+    the drive loop, consumed by rubric_judge at evaluation time, and
+    surfaced in the UI for transcript display. Unified shape whether
+    the underlying medium was text or voice (voice turns carry the
+    transcribed text, not audio — audio paths live separately on
+    TestCaseResult.audio_paths).
+    """
+
+    turn_index: int = Field(description="0-based turn order in the conversation")
+
+    role: Literal["user", "agent"] = Field(
+        description="Which side produced this turn. 'user' = simulator, 'agent' = candidate under test"
+    )
+
+    text: str = Field(
+        description=(
+            "The utterance as text. For voice turns, this is the "
+            "transcribed content (caller-side from simulator's input to "
+            "TTS; agent-side from STT of the agent's audio response OR "
+            "extracted from TwiML/NCCO/JSON shapes)."
+        )
+    )
+
+    meta: dict[str, Any] = Field(
+        default_factory=dict,
+        description=(
+            "Optional per-turn metadata: latency_ms, tokens_used, "
+            "simulator_end_reason ('goal_achieved'|'max_turns'|'frustrated_abort'), "
+            "audio_path for voice turns. Non-canonical — UI reads when "
+            "present, ignores when absent."
+        ),
+    )
+
+
+class RubricVerdict(BaseModel):
+    """
+    Full output of rubric_judge on one conversation.
+
+    Return value of puzzleeval.rubric_judge.judge_conversation. Attached
+    to TestCaseResult.rubric_verdict for downstream consumption (report
+    assembler, frontend breakdown display, cross-candidate analysis).
+    """
+
+    overall_score: float = Field(
+        description=(
+            "Weighted mean of criterion_scores, using the weights from "
+            "the RubricCriterion spec. In [0.0, 1.0]. This is the primary "
+            "score attached to TestCaseResult.weighted_score for "
+            "conversational tests."
+        )
+    )
+
+    passed: bool = Field(
+        description=(
+            "True iff (overall_score >= 0.5 AND no critical-gate failure). "
+            "Critical-gate: any criterion with critical=True scoring below "
+            "its min_passing_score vetoes the pass regardless of overall."
+        )
+    )
+
+    criterion_scores: list[RubricScore] = Field(
+        description="Per-criterion scores with reasoning. One RubricScore per RubricCriterion in the test's rubric."
+    )
+
+    conversation_summary: str = Field(
+        description=(
+            "2-3 sentence neutral summary of the exchange — what the user "
+            "wanted, what the agent did, whether it landed. The primary "
+            "headline for the frontend expandable rubric card."
+        )
+    )
+
+    critical_failures: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Names of criteria (from RubricCriterion.name) that triggered "
+            "a critical-gate failure. Empty when none. Renders in the UI "
+            "as red warning chips."
+        ),
+    )
+
+    cost_usd: float = Field(
+        default=0.0,
+        description="Cost of the judge call itself, tracked separately from simulator cost"
+    )
+
+
+class SimulatorTurn(BaseModel):
+    """
+    Output of user_simulator.generate_next_user_turn for ONE turn.
+
+    Return type of puzzleeval.user_simulator.generate_next_user_turn.
+    The plugin turn loop decides whether to continue based on
+    `end_conversation`.
+    """
+
+    text: str = Field(
+        description=(
+            "The user's next utterance. Empty string is valid when "
+            "end_conversation=True and the simulator intentionally hangs up "
+            "without a final message."
+        )
+    )
+
+    end_conversation: bool = Field(
+        default=False,
+        description=(
+            "True when the simulator emitted `<END_CALL>` sentinel, signaling "
+            "goal achieved, abandonment, or max-turns-reached self-halt. "
+            "Plugin loop breaks when True."
+        )
+    )
+
+    end_reason: Literal["goal_achieved", "abandoned", "agent_failed", "max_turns", "ongoing"] = Field(
+        default="ongoing",
+        description=(
+            "Why the simulator ended (or 'ongoing' when end_conversation=False). "
+            "'goal_achieved' = agent solved it; 'abandoned' = user gave up from "
+            "frustration; 'agent_failed' = agent repeatedly wrong/unhelpful; "
+            "'max_turns' = hit ceiling; 'ongoing' = continue to next turn."
+        )
+    )
+
+    reasoning: str = Field(
+        default="",
+        description=(
+            "Internal reasoning from simulator about why it chose this "
+            "response. Mostly for debugging — not shown to UI by default."
+        ),
+    )
+
+    cost_usd: float = Field(
+        default=0.0,
+        description="Cost of this single simulator API call (accumulated across turns by caller)"
+    )
+
+
 class TestCase(BaseModel):
     """
     A single test case specification.
@@ -1448,6 +1793,10 @@ class TestCase(BaseModel):
        tell downstream agents how to adapt the data, not what service to use.
     3. TAGGED FOR COVERAGE — tags mark which testing dimension this case
        covers (happy_path, edge_case, etc.) so we can verify completeness.
+    4. CONVERSATIONAL TESTS carry a `persona` + `goal` + `rubric` instead
+       of a scripted `turns` array, enabling agentic simulation + rubric
+       judging. Legacy scripted mode still works via evaluation_mode=
+       "scripted" + input_data carrying the static script.
     """
 
     id: str = Field(
@@ -1574,6 +1923,89 @@ class TestCase(BaseModel):
         )
     )
 
+    # ── Conversational-eval fields (populated for multi-turn tests) ──
+    #
+    # These fields are OPTIONAL and default to None/empty so existing
+    # non-conversational test cases (OCR, classification, chat single-shot)
+    # are unaffected. Resolved at evaluation time by the plugin:
+    #
+    #   - If `evaluation_mode` is "agentic" AND persona+goal+rubric are
+    #     populated → run user_simulator + rubric_judge
+    #   - If `evaluation_mode` is "scripted" → use legacy input_data
+    #     static-script path (preserves today's behavior)
+    #   - If unset, plugin AUTO-DETECTS: persona+goal+rubric present →
+    #     agentic; static-script present → scripted; else substring-match
+    #     fallback on expected_output
+
+    persona: Persona | None = Field(
+        default=None,
+        description=(
+            "Who the simulated user IS for this test. Populated by Agent 3 "
+            "for conversational tests (conversation / voice_conversation / "
+            "voice_turn) when evaluation_mode is 'agentic' or unset. Null "
+            "for non-conversational tests."
+        ),
+    )
+
+    goal: str | None = Field(
+        default=None,
+        description=(
+            "ONE concrete achievable outcome the simulated user wants from "
+            "the conversation. Example: 'book an emergency appointment for "
+            "tonight, under $300'. Null for non-conversational tests. The "
+            "rubric judge uses this to score goal_completion."
+        ),
+    )
+
+    constraints: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Simulator-side behavior rules: 'don't reveal you're a test', "
+            "'ask price within the first 2 turns', 'decline unrelated "
+            "upsells politely'. Empty for non-conversational tests. Keeps "
+            "the simulator from going off-script (e.g., volunteering info "
+            "a real user wouldn't have)."
+        ),
+    )
+
+    rubric: list[RubricCriterion] = Field(
+        default_factory=list,
+        description=(
+            "Weighted criteria the judge scores the full transcript against. "
+            "Populated by Agent 3 for conversational tests with "
+            "evaluation_mode='agentic'. Empty for non-conversational "
+            "tests. Typically 4-6 criteria covering goal_completion / "
+            "accuracy / info_gathering / tone / policy."
+        ),
+    )
+
+    max_turns: int = Field(
+        default=6,
+        description=(
+            "Hard cap on conversation length. Plugin breaks loop when "
+            "turn_index reaches this, forcing a max_turns end_reason. "
+            "Tuning: shorter scopes (info requests) use 3-4; complex "
+            "scopes (booking flows) use 6-8. Clamped by "
+            "CONVERSATION_MAX_TURNS_CEILING config (default 12)."
+        ),
+    )
+
+    evaluation_mode: Literal["agentic", "scripted", "auto"] = Field(
+        default="auto",
+        description=(
+            "Which evaluation path the plugin uses for this test. 'agentic' "
+            "= user_simulator + rubric_judge (REQUIRED for multi-turn "
+            "conversational tests — the static-script approach can't "
+            "evaluate conversation quality). 'scripted' = legacy back-"
+            "compat only, for existing test fixtures that pre-date the "
+            "agentic pipeline. 'auto' (default) = plugin picks based on "
+            "which fields are populated: persona+goal+rubric → agentic; "
+            "static script → scripted; neither → legacy substring on "
+            "expected_output. Overridden by "
+            "PUZZLEEVAL_CONVERSATION_EVAL_MODE env when set."
+        ),
+    )
+
 
 class Agent3Result(BaseModel):
     """
@@ -1640,6 +2072,413 @@ class Agent4Input(BaseModel):
 
     trace_id: str = Field(
         description="UUID for correlating logs across the entire pipeline"
+    )
+
+
+# ============================================================================
+# Build-Readiness Checklist (Agent 4 → Agent 5 handoff contract)
+# ============================================================================
+# The checklist is the structured artifact that flows from Agent 4 to
+# Agent 5 alongside (and eventually replacing) the unstructured doc dump.
+# It answers the only question that matters at the handoff: "do we have
+# what a HARNESS BUILDER needs?"
+#
+# Design principles:
+#   - Enumerable. Ten fields cover every question a builder must answer
+#     to write working code. New questions = new fields, not new
+#     branching logic.
+#   - Status is first-class. Each field carries `confirmed | inferred |
+#     unknown`; "we don't know" is a legitimate, recorded answer (not a
+#     silent gap that surfaces later as a mystery test failure).
+#   - Source-anchored. Every `confirmed` field MUST carry a source_url
+#     pointing at the doc that confirms it; Agent 5 can cross-check.
+#   - Per-test-case relevance. Agent 5 doesn't need every field for
+#     every test — a 2-second sync read needs four; an async streaming
+#     test with retry needs more. The checklist enumerates what's
+#     POSSIBLE; Phase B in Agent 5 enumerates what's NEEDED here-and-now.
+#   - Sentinel-friendly. When Agent 4 fails (parse error / crash /
+#     timeout), `default_unknown_checklist()` returns an all-`unknown`
+#     fallback so Agent 5 can still proceed in full-research mode.
+#     Rejecting candidates for system failure is forbidden.
+#
+# See PLAN_AGENT5_RESEARCH_AGENCY.md for the full design rationale.
+# ============================================================================
+
+
+class EndpointSummary(BaseModel):
+    """One endpoint in a provider's API surface, as seen by Agent 4."""
+
+    name: str = Field(
+        description=(
+            "Short identifier of the endpoint, e.g., 'POST /v1/audio/speech', "
+            "'WebSocket /v1/realtime', 'sdk.transcribe.start()'. Use the "
+            "form the docs use; this is for reading, not parsing."
+        ),
+    )
+
+    purpose: str = Field(
+        description=(
+            "One-sentence description of what this endpoint does. "
+            "Example: 'Synthesize speech from text input, returns audio bytes.'"
+        ),
+    )
+
+    relevance_to_use_case: Literal["primary", "alternative", "unrelated"] = Field(
+        description=(
+            "How this endpoint relates to the workflow step we're verifying. "
+            "'primary' = best fit and the one we selected. "
+            "'alternative' = could plausibly cover the same step but we picked "
+            "another. 'unrelated' = exists in this provider's surface but "
+            "doesn't cover the step (still listed for reviewer transparency)."
+        ),
+    )
+
+    selection_note: str | None = Field(
+        default=None,
+        description=(
+            "Optional one-line note on WHY this endpoint was chosen / "
+            "rejected. For 'primary': 'matches use case best because X'. "
+            "For 'alternative': 'rejected because X'. For 'unrelated': "
+            "may be omitted or note 'unrelated, listed for completeness'."
+        ),
+    )
+
+
+class FieldStatus(BaseModel):
+    """One build-readiness field's value and provenance.
+
+    The status enum is first-class. `unknown` is a legitimate, recorded
+    answer that flows downstream — not a silent gap.
+    """
+
+    status: Literal["confirmed", "inferred", "unknown"] = Field(
+        description=(
+            "How well this field is known. "
+            "'confirmed' = answered from authoritative docs with source_url. "
+            "'inferred' = best guess from available context, with reasoning. "
+            "'unknown' = explicitly flagged; docs didn't cover it."
+        ),
+    )
+
+    value: str | None = Field(
+        default=None,
+        description=(
+            "The actual content when known (status='confirmed' or 'inferred'). "
+            "May be a short string ('Bearer token in Authorization header') or "
+            "a longer JSON skeleton ('{\"model\":\"...\",\"messages\":[...]}'). "
+            "Null when status='unknown'."
+        ),
+    )
+
+    source_url: str | None = Field(
+        default=None,
+        description=(
+            "Authoritative doc URL backing this field when status='confirmed'. "
+            "Optional for 'inferred' (where reasoning matters more than source). "
+            "Null for 'unknown'. Agent 5 can cross-check the URL contents "
+            "against `value` to spot stale or hallucinated confirmations."
+        ),
+    )
+
+    reasoning: str | None = Field(
+        default=None,
+        description=(
+            "Why this field is 'inferred' or 'unknown'. For 'inferred': what "
+            "evidence supported the guess. For 'unknown': why the docs didn't "
+            "answer ('docs paywalled', 'not documented in any reference page', "
+            "'sparse SDK-only docs without HTTP-level detail'). Optional but "
+            "strongly encouraged for non-confirmed states."
+        ),
+    )
+
+
+class BuildReadinessChecklist(BaseModel):
+    """The Agent 4 → Agent 5 contract: provider surface + ten build-readiness fields.
+
+    Populated incrementally:
+      - Agent 4 fills `provider_surface`, `selection_justification`, and as
+        many of the ten fields as it can from authoritative docs.
+      - Agent 5 inherits the checklist, identifies which fields its specific
+        test case needs (Phase B trigger rules), researches gaps to flip
+        `unknown` → `confirmed`, and updates the checklist in place.
+
+    Field ordering reflects the natural authoring flow: surface first
+    (what can this provider do at all?), then the four non-negotiables
+    (the four checks that determine "can we make a successful call at
+    all?"), then the conditional six (only matter for some test cases).
+    """
+
+    # ── Provider capability surface (Agent 4 fills) ─────────────────────────
+
+    provider_surface: list[EndpointSummary] = Field(
+        default_factory=list,
+        description=(
+            "All endpoints in this provider's API surface that plausibly relate "
+            "to the user's use case, with `relevance_to_use_case` tagging which "
+            "is primary, which are alternatives, which are unrelated. At least "
+            "one entry SHOULD be tagged 'primary'. Empty list signals Agent 4 "
+            "couldn't survey the surface (rare; usually means docs were "
+            "completely inaccessible)."
+        ),
+    )
+
+    selected_endpoint: str = Field(
+        default="",
+        description=(
+            "The endpoint name (matching one entry in `provider_surface`) "
+            "Agent 4 picked as the primary candidate for this workflow step. "
+            "Empty string when no primary endpoint could be selected."
+        ),
+    )
+
+    selection_justification: str = Field(
+        default="",
+        description=(
+            "One-paragraph explanation of WHY `selected_endpoint` was chosen "
+            "over the alternatives in `provider_surface`. Should reference "
+            "the workflow step's role and any relevant alternatives. Empty "
+            "when no selection was possible."
+        ),
+    )
+
+    # ── Build-readiness fields (Agent 4 best-effort; Agent 5 closes gaps) ──
+    # The first four are NON-NEGOTIABLE for Agent 4: a candidate must
+    # have these `confirmed` to be passed to Agent 5 as a Verified Pass.
+    # If they can't be confirmed, the candidate routes to Inconclusive
+    # (still passed through; Agent 5 attempts its own research).
+
+    endpoint_path: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "Where to send the request. Concrete URL or URL template "
+            "('https://api.example.com/v1/foo' or 'wss://stream.example.com'). "
+            "NON-NEGOTIABLE: must be 'confirmed' for Verified Pass."
+        ),
+    )
+
+    auth_method: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "How to authenticate the request. Examples: 'Bearer token in "
+            "Authorization header', 'X-API-Key header', 'OAuth2 client_credentials "
+            "with scope X'. NON-NEGOTIABLE: must be 'confirmed' for Verified Pass."
+        ),
+    )
+
+    request_body_shape: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "JSON skeleton of a valid request body (or multipart form-field "
+            "list, or query-param list, depending on the API). NON-NEGOTIABLE: "
+            "must be 'confirmed' for Verified Pass."
+        ),
+    )
+
+    response_body_shape: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "JSON skeleton of a successful response, including the path to "
+            "the primary output field. NON-NEGOTIABLE: must be 'confirmed' "
+            "for Verified Pass."
+        ),
+    )
+
+    # ── Conditional fields (only required when the test case exercises them) ──
+    # See Agent 5 Phase B trigger rules in implement_test_env.py.
+
+    auth_refresh: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "How to refresh / rotate auth if the test runs long. Examples: "
+            "'OAuth refresh_token at /oauth/token', 'API key static (no refresh)'. "
+            "Required only when test sessions exceed ~10 min."
+        ),
+    )
+
+    error_response_schema: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "Shape of common 4xx / 5xx error responses, at minimum the auth "
+            "401 and rate-limit 429 cases. Required when the test case "
+            "exercises retry or failure paths."
+        ),
+    )
+
+    rate_limit_signal: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "How the API signals rate limiting: header name (X-RateLimit-Remaining, "
+            "Retry-After), 429 status, custom error code. Required when the test "
+            "case exercises retry behavior or runs at non-trivial throughput."
+        ),
+    )
+
+    async_pattern: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "Sync, polling, streaming, or webhook? Plus the protocol details: "
+            "for polling, the status endpoint and poll cadence; for streaming, "
+            "the chunk format (SSE 'data:' lines, JSON-per-line, WebSocket "
+            "frames); for webhook, the callback URL convention. Required when "
+            "the API is async or streaming."
+        ),
+    )
+
+    content_type_quirks: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "Non-standard content-type details: multipart/form-data field names, "
+            "SSE framing, binary content boundaries, application/x-ndjson "
+            "expectations. Required when the API uses non-JSON content types or "
+            "has framing quirks."
+        ),
+    )
+
+    sandbox_availability: FieldStatus = Field(
+        default_factory=lambda: FieldStatus(status="unknown"),
+        description=(
+            "Sandbox / test base URL when the candidate has side-effects "
+            "(creates / modifies / deletes records). Examples: 'sandbox.api.com', "
+            "'dashboard test mode'. Required when the candidate's matched "
+            "workflow step has side_effects != 'read_only'."
+        ),
+    )
+
+    # ── Meta ────────────────────────────────────────────────────────────────
+
+    populated_by: Literal[
+        "agent_4",
+        "agent_5",
+        "agent_5_after_research",
+        "system_failure",
+    ] = Field(
+        default="agent_4",
+        description=(
+            "Provenance: which agent wrote this checklist last. "
+            "'agent_4' = initial population from screening. "
+            "'agent_5' = inherited unchanged. "
+            "'agent_5_after_research' = Agent 5 researched gaps and updated. "
+            "'system_failure' = Agent 4 sentinel after parse/crash/timeout; "
+            "Agent 5 should treat as full-research starting state."
+        ),
+    )
+
+    last_updated_at: str = Field(
+        default="",
+        description=(
+            "ISO 8601 timestamp of the last update to this checklist. Empty "
+            "string allowed for cached / pre-checklist runs."
+        ),
+    )
+
+    # ── Helpers (not serialized; not Pydantic Fields) ───────────────────────
+
+    def is_verified_pass(self) -> bool:
+        """True when the four non-negotiables are all `confirmed`."""
+        return all(
+            getattr(self, name).status == "confirmed"
+            for name in (
+                "endpoint_path",
+                "auth_method",
+                "request_body_shape",
+                "response_body_shape",
+            )
+        )
+
+    def has_provider_surface(self) -> bool:
+        """True when `provider_surface` has at least one 'primary' entry
+        AND `selection_justification` is non-empty."""
+        if not self.selection_justification.strip():
+            return False
+        return any(
+            ep.relevance_to_use_case == "primary"
+            for ep in self.provider_surface
+        )
+
+    def fields_with_status(self, status: str) -> list[str]:
+        """Return the names of build-readiness fields with a given status.
+        Used by Agent 5 Phase B to identify which fields are gaps for THIS
+        test case."""
+        names = (
+            "endpoint_path",
+            "auth_method",
+            "auth_refresh",
+            "request_body_shape",
+            "response_body_shape",
+            "error_response_schema",
+            "rate_limit_signal",
+            "async_pattern",
+            "content_type_quirks",
+            "sandbox_availability",
+        )
+        return [n for n in names if getattr(self, n).status == status]
+
+
+# Names of the four non-negotiable build-readiness fields. Centralized
+# so prompts, validators, and Agent 5 trigger rules all read the same
+# truth (no drift across consumers).
+NON_NEGOTIABLE_FIELDS: tuple[str, ...] = (
+    "endpoint_path",
+    "auth_method",
+    "request_body_shape",
+    "response_body_shape",
+)
+
+# Names of the conditional fields (the six that only matter for some
+# test cases). Phase B trigger rules in Agent 5 decide when each fires.
+CONDITIONAL_FIELDS: tuple[str, ...] = (
+    "auth_refresh",
+    "error_response_schema",
+    "rate_limit_signal",
+    "async_pattern",
+    "content_type_quirks",
+    "sandbox_availability",
+)
+
+# All ten build-readiness field names in canonical order. The order is
+# load-bearing for prompts and tests — non-negotiables first, then the
+# conditionals.
+BUILD_READINESS_FIELDS: tuple[str, ...] = NON_NEGOTIABLE_FIELDS + CONDITIONAL_FIELDS
+
+
+def default_unknown_checklist(
+    reason: str = "agent 4 produced no parseable checklist",
+    populated_by: Literal[
+        "agent_4",
+        "agent_5",
+        "agent_5_after_research",
+        "system_failure",
+    ] = "system_failure",
+) -> BuildReadinessChecklist:
+    """Build an all-`unknown` sentinel checklist.
+
+    Used when Agent 4's structured output couldn't be parsed (malformed
+    JSON, missing fields), when Agent 4 crashed, or when Agent 4 timed
+    out. The candidate is NEVER rejected for system failure (per the
+    three-state rejection model in PLAN_AGENT5_RESEARCH_AGENCY.md §Q4):
+    instead, this sentinel checklist propagates and Agent 5 falls back
+    to full-research mode.
+
+    `reason` is recorded as the `reasoning` on every field so Agent 5
+    can see why the checklist is empty.
+    """
+    fs = lambda: FieldStatus(status="unknown", reasoning=reason)  # noqa: E731
+    return BuildReadinessChecklist(
+        provider_surface=[],
+        selected_endpoint="",
+        selection_justification="",
+        endpoint_path=fs(),
+        auth_method=fs(),
+        auth_refresh=fs(),
+        request_body_shape=fs(),
+        response_body_shape=fs(),
+        error_response_schema=fs(),
+        rate_limit_signal=fs(),
+        async_pattern=fs(),
+        content_type_quirks=fs(),
+        sandbox_availability=fs(),
+        populated_by=populated_by,
+        last_updated_at="",
     )
 
 
@@ -1891,6 +2730,29 @@ class ScreenedCandidate(BaseModel):
             "acquisition, differences from prod). Used by Agent 5 harness "
             "builder to read sandbox-specific auth instructions. None when "
             "sandbox_available=False or when docs weren't discoverable."
+        ),
+    )
+
+    # ── Build-readiness checklist (Agent 4 → Agent 5 contract) ──────────
+    # Populated by Agent 4's verification call. Optional for back-compat:
+    # cached candidates from runs predating this schema parse fine. When
+    # None, Agent 5 treats the candidate as "Agent 4 didn't run" and
+    # falls back to full-research mode (same behavior as the prior
+    # density-injection era). When present, Agent 5 reads it during
+    # Phase A (Inventory) and uses Phase B trigger rules to identify
+    # which `unknown` / `inferred` fields actually matter for the test
+    # case being built. See PLAN_AGENT5_RESEARCH_AGENCY.md.
+    checklist: BuildReadinessChecklist | None = Field(
+        default=None,
+        description=(
+            "Structured handoff to Agent 5: provider surface + ten "
+            "build-readiness fields (each with confirmed/inferred/unknown "
+            "status). Populated by Agent 4 during verification. None for "
+            "candidates from runs predating the checklist schema; Agent 5 "
+            "treats None as 'do full research'. When present, Agent 5 "
+            "reads it during Phase A and updates `unknown` fields it "
+            "researches in Phase C (setting populated_by to "
+            "'agent_5_after_research')."
         ),
     )
 
@@ -2696,6 +3558,32 @@ class TestCaseResult(BaseModel):
         )
     )
 
+    # ── Conversational-eval fields (populated for agentic path) ──
+
+    rubric_verdict: RubricVerdict | None = Field(
+        default=None,
+        description=(
+            "Judge's evaluation of a multi-turn conversation. Populated by "
+            "voice_realtime + conversation_simulator plugins when "
+            "evaluation_mode resolves to 'agentic'. Null for "
+            "non-conversational tests and for scripted-path conversations. "
+            "Drives the 'Rubric breakdown' UI card on conversational "
+            "result rows — per-criterion scores + reasoning + "
+            "conversation_summary."
+        ),
+    )
+
+    transcript: list[ConversationTurn] = Field(
+        default_factory=list,
+        description=(
+            "Full turn-by-turn transcript for conversational tests. "
+            "Populated by the drive loop in voice_realtime / "
+            "conversation_simulator. Empty for non-conversational tests. "
+            "Surfaces in the expandable conversation view in the UI, and "
+            "feeds the judge's evidence-turn-index citations."
+        ),
+    )
+
 
 class CandidateTestRun(BaseModel):
     """
@@ -2763,6 +3651,24 @@ class CandidateTestRun(BaseModel):
         description=(
             "Fraction of successful tests that met quality threshold: "
             "tests_passed / (total - errored). 0.0 if all errored."
+        )
+    )
+
+    overall_score: float = Field(
+        default=0.0,
+        description=(
+            "Quality score across all tests, in [0.0, 1.0]. Computed as the "
+            "mean of per-test `weighted_score` values (each weighted_score "
+            "is itself the sum of criteria scores × weights within that "
+            "test). Differs from `pass_rate` in that overall_score captures "
+            "DEGREE of correctness across criteria; pass_rate is binary per "
+            "test. The frontend reads this field directly for the top-line "
+            "candidate score display; report.py builds the final "
+            "EvaluationReport around it. Real run 3eb3196a (2026-04-22) "
+            "exposed that the backend computed this in the SSE "
+            "`candidate_results_ready` event but never persisted it onto "
+            "the model — causing the live UI to show the correct score "
+            "but the persisted/reopened view to show 0 for everyone."
         )
     )
 

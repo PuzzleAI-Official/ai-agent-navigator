@@ -109,6 +109,147 @@ function AudioPathsBlock({ paths }: { paths?: AudioPath[] }) {
   );
 }
 
+// Per-criterion rubric score + reasoning, rendered as a progress bar with
+// evidence turn indices highlighted. `critical` indicates this criterion
+// tripped a critical-gate failure — rendered in red to match the backend's
+// RubricVerdict.critical_failures signal.
+function RubricScoreBar({
+  name,
+  score,
+  reasoning,
+  critical,
+  evidenceIndices,
+}: {
+  name: string;
+  score: number;
+  reasoning: string;
+  critical: boolean;
+  evidenceIndices: number[];
+}) {
+  const pct = Math.max(0, Math.min(100, score * 100));
+  const barColor = critical
+    ? "bg-rose-500"
+    : score >= 0.75
+    ? "bg-emerald-500"
+    : score >= 0.5
+    ? "bg-amber-500"
+    : "bg-zinc-600";
+  return (
+    <div className="mb-2">
+      <div className="flex items-baseline justify-between text-[11px]">
+        <span className={critical ? "text-rose-400 font-medium" : "text-zinc-300"}>
+          {name}
+          {critical && (
+            <span className="ml-1 rounded bg-rose-500/20 px-1 py-px text-[9px] uppercase">
+              critical fail
+            </span>
+          )}
+        </span>
+        <span className="text-zinc-500">{pct.toFixed(0)}%</span>
+      </div>
+      <div className="mt-1 h-1.5 w-full rounded-full bg-zinc-800">
+        <div
+          className={`h-full rounded-full ${barColor}`}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      {reasoning && (
+        <div className="mt-1 text-[10px] text-zinc-500 italic">
+          {reasoning}
+          {evidenceIndices.length > 0 && (
+            <span className="ml-1 text-zinc-600">
+              (turns {evidenceIndices.join(", ")})
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Rubric verdict + transcript card for agentic conversational tests.
+// Renders the conversation_summary headline, per-criterion bars (with
+// critical failures in red), and an expandable transcript. Returns null
+// when the test didn't produce a rubric verdict (non-conversational or
+// scripted-mode tests).
+function RubricBreakdownBlock({
+  verdict,
+  transcript,
+}: {
+  verdict?: {
+    overall_score: number;
+    passed: boolean;
+    criterion_scores?: Array<{
+      criterion_name: string;
+      score: number;
+      reasoning: string;
+      evidence_turn_indices?: number[];
+    }>;
+    conversation_summary?: string;
+    critical_failures?: string[];
+  };
+  transcript?: Array<{
+    turn_index: number;
+    role: string;
+    text: string;
+  }>;
+}) {
+  if (!verdict) return null;
+  const critFailures = verdict.critical_failures ?? [];
+  const scores = verdict.criterion_scores ?? [];
+  const hasTranscript = transcript && transcript.length > 0;
+  return (
+    <div className="mt-2 rounded border border-zinc-800 bg-zinc-900/30 p-2">
+      <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
+        Rubric breakdown
+      </div>
+      {verdict.conversation_summary && (
+        <div className="mb-2 text-[11px] text-zinc-300 italic">
+          {verdict.conversation_summary}
+        </div>
+      )}
+      {critFailures.length > 0 && (
+        <div className="mb-2 rounded bg-rose-500/10 px-2 py-1 text-[10px] text-rose-300">
+          Critical failure(s): {critFailures.join(", ")}
+        </div>
+      )}
+      <div className="space-y-1">
+        {scores.map((s) => (
+          <RubricScoreBar
+            key={s.criterion_name}
+            name={s.criterion_name}
+            score={s.score}
+            reasoning={s.reasoning}
+            critical={critFailures.includes(s.criterion_name)}
+            evidenceIndices={s.evidence_turn_indices ?? []}
+          />
+        ))}
+      </div>
+      {hasTranscript && (
+        <details className="mt-2 text-[10px]">
+          <summary className="cursor-pointer text-zinc-500 hover:text-zinc-300">
+            Full transcript ({transcript!.length} turns)
+          </summary>
+          <div className="mt-1 space-y-1">
+            {transcript!.map((t, i) => (
+              <div key={i} className="rounded bg-zinc-900/50 p-1.5">
+                <div
+                  className={`text-[9px] uppercase ${
+                    t.role === "user" ? "text-blue-400" : "text-emerald-400"
+                  }`}
+                >
+                  Turn {t.turn_index} · {t.role === "user" ? "Caller" : "Agent"}
+                </div>
+                <div className="text-zinc-300">{t.text || "(empty)"}</div>
+              </div>
+            ))}
+          </div>
+        </details>
+      )}
+    </div>
+  );
+}
+
 interface EvidenceRow {
   test_case_id?: string;
   scenario?: string;
@@ -119,6 +260,30 @@ interface EvidenceRow {
   // Each path is absolute under runs/<trace_id>/harnesses/<slug>/voice/.
   // Playable via the /runs/{id}/audio?path=... endpoint.
   audio_paths?: AudioPath[];
+  // Rubric verdict from the agentic conversational eval path. Mirrors
+  // RubricVerdict shape — see src/types/pipeline.ts. Null/undefined for
+  // non-conversational tests and for scripted-mode conversations.
+  rubric_verdict?: {
+    overall_score: number;
+    passed: boolean;
+    criterion_scores?: Array<{
+      criterion_name: string;
+      score: number;
+      reasoning: string;
+      evidence_turn_indices?: number[];
+    }>;
+    conversation_summary?: string;
+    critical_failures?: string[];
+  };
+  // Per-turn transcript for conversational tests (agentic mode).
+  // Renders inside the expandable rubric breakdown panel. Empty/absent
+  // for non-conversational and scripted-mode tests.
+  transcript?: Array<{
+    turn_index: number;
+    role: string;
+    text: string;
+    meta?: Record<string, unknown>;
+  }>;
 }
 
 interface CandidateReport {
@@ -353,6 +518,10 @@ function CandidateRow({ c }: { c: CandidateReport }) {
                   </div>
                 )}
                 <AudioPathsBlock paths={ev.audio_paths} />
+                <RubricBreakdownBlock
+                  verdict={ev.rubric_verdict}
+                  transcript={ev.transcript}
+                />
               </div>
             ))}
           </div>
@@ -375,6 +544,10 @@ function CandidateRow({ c }: { c: CandidateReport }) {
                   </div>
                 )}
                 <AudioPathsBlock paths={ev.audio_paths} />
+                <RubricBreakdownBlock
+                  verdict={ev.rubric_verdict}
+                  transcript={ev.transcript}
+                />
               </div>
             ))}
           </div>

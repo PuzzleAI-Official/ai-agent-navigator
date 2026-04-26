@@ -899,6 +899,147 @@ def validate_agent3_output(
         if not tc.expected_output or not tc.expected_output.strip():
             errors.append(f"Test case {tc.id} has empty expected_output")
 
+        # --- Conversational-eval validation (agentic / scripted / hybrid) ---
+        #
+        # For conversational input_types (conversation / voice_conversation /
+        # voice_turn), the agentic path requires persona + goal + rubric.
+        # Missing fields with evaluation_mode='agentic' → warning (plugin
+        # falls back to scripted). Missing with mode='auto' → advisory
+        # (plugin auto-detects — if script is also missing, tests score 0).
+        # We WARN rather than ERROR so scripted legacy tests keep passing
+        # during migration.
+        conversational = tc.input_type in (
+            "conversation", "voice_conversation", "voice_turn"
+        )
+        mode = getattr(tc, "evaluation_mode", "auto")
+        persona = getattr(tc, "persona", None)
+        goal = getattr(tc, "goal", None)
+        rubric = getattr(tc, "rubric", None) or []
+        input_ctx = getattr(tc, "input_context", None) or {}
+
+        # --- Missing `input_context.instructions` on conversational ---
+        # The agent's system prompt MUST come from input_context.
+        # Without it, Agent 5's runner falls back to a generic
+        # "You are a helpful voice_agent for {candidate}" default
+        # which can't satisfy domain-specific rubric criteria.
+        # Warn loudly (not error) so legacy fixtures keep passing
+        # the validator during migration.
+        _SYSTEM_PROMPT_ALIASES = (
+            "instructions", "system_prompt", "system",
+            "brief", "agent_prompt",
+        )
+        if conversational and isinstance(input_ctx, dict):
+            has_agent_prompt = any(
+                isinstance(input_ctx.get(k), str) and input_ctx[k].strip()
+                for k in _SYSTEM_PROMPT_ALIASES
+            )
+            if not has_agent_prompt:
+                warnings.append(
+                    f"Test case {tc.id} ({tc.input_type}) has no "
+                    f"input_context.instructions (or alias). The candidate "
+                    f"agent will receive a GENERIC fallback system prompt, "
+                    f"NOT the scope-specific instructions — it won't know "
+                    f"the business domain, pricing menu, hours, or "
+                    f"escalation policy. Populate input_context."
+                    f"instructions with the agent's persona + scope rules."
+                )
+
+        if conversational and mode == "agentic":
+            if persona is None:
+                warnings.append(
+                    f"Test case {tc.id} is conversational with evaluation_mode="
+                    f"'{mode}' but has no persona — will fall back to scripted."
+                )
+            if not goal or not goal.strip():
+                warnings.append(
+                    f"Test case {tc.id} is conversational with evaluation_mode="
+                    f"'{mode}' but has no goal — will fall back to scripted."
+                )
+            if not rubric:
+                warnings.append(
+                    f"Test case {tc.id} is conversational with evaluation_mode="
+                    f"'{mode}' but has no rubric — will fall back to scripted."
+                )
+
+        # --- Conversational fields populated on NON-conversational tests ---
+        # persona/goal/constraints/rubric/max_turns are meaningful ONLY
+        # for conversational modalities. Populating them on OCR / vision /
+        # code / webhook tests is a signal of confused modality routing
+        # in Agent 3's output. We warn (not error) so a weirdly-shaped
+        # legacy fixture still passes, but the warning surfaces the
+        # misalignment at the pipeline summary level.
+        if not conversational:
+            stray = []
+            if persona is not None:
+                stray.append("persona")
+            if goal and goal.strip():
+                stray.append("goal")
+            if rubric:
+                stray.append("rubric")
+            if getattr(tc, "constraints", None):
+                stray.append("constraints")
+            if stray:
+                warnings.append(
+                    f"Test case {tc.id} ({tc.input_type}) populated "
+                    f"conversational-only field(s) {stray} — these are "
+                    f"unused for non-conversational modalities. Signal "
+                    f"of confused modality routing in Agent 3's output."
+                )
+            # `input_context.instructions` on a non-conversational
+            # test is also suspicious — the candidate isn't an agent
+            # being instructed; the string is wasted tokens on every
+            # harness call.
+            if isinstance(input_ctx, dict):
+                stray_instr = any(
+                    isinstance(input_ctx.get(k), str) and input_ctx[k].strip()
+                    for k in _SYSTEM_PROMPT_ALIASES
+                )
+                if stray_instr:
+                    warnings.append(
+                        f"Test case {tc.id} ({tc.input_type}) has "
+                        f"input_context.instructions but isn't a "
+                        f"conversational test. The candidate isn't an "
+                        f"LLM agent being instructed — remove "
+                        f"instructions from input_context."
+                    )
+
+        # Rubric structural checks — only when rubric is non-empty
+        if rubric:
+            total_rubric_weight = sum(c.weight for c in rubric)
+            if not (0.5 <= total_rubric_weight <= 2.0):
+                # Judge auto-normalizes, but suspiciously skewed weights
+                # usually indicate an Agent 3 emission bug.
+                warnings.append(
+                    f"Test case {tc.id} rubric weights sum to "
+                    f"{total_rubric_weight:.2f} (expected ~1.0)"
+                )
+            for c in rubric:
+                if not (0.0 <= c.weight <= 1.0):
+                    errors.append(
+                        f"Test case {tc.id} rubric criterion '{c.name}' "
+                        f"has invalid weight: {c.weight}"
+                    )
+                if c.critical and c.min_passing_score is not None:
+                    if not (0.0 <= c.min_passing_score <= 1.0):
+                        errors.append(
+                            f"Test case {tc.id} rubric criterion '{c.name}' "
+                            f"has invalid min_passing_score: {c.min_passing_score}"
+                        )
+
+        # max_turns sanity
+        max_t = getattr(tc, "max_turns", 6)
+        if conversational and (max_t < 1 or max_t > 50):
+            warnings.append(
+                f"Test case {tc.id} has suspicious max_turns={max_t} "
+                f"(expected 2-12 for typical conversational scopes)"
+            )
+
+        # evaluation_mode enum
+        if mode not in ("auto", "agentic", "scripted"):
+            errors.append(
+                f"Test case {tc.id} has invalid evaluation_mode: '{mode}'"
+            )
+
     # --- Coverage summary auto-compute + consistency check ---
     # Compute the truth from test_cases regardless. If Agent 3 didn't
     # populate coverage_summary (common — prompt doesn't strongly enforce

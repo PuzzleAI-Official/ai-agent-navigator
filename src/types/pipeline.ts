@@ -61,6 +61,41 @@ export interface AudioArtifact {
   token?: string;
 }
 
+// ---------------------------------------------------------------------------
+// Agentic conversational evaluation — rubric judge types
+// ---------------------------------------------------------------------------
+// Mirrors puzzleeval/schemas.py::RubricScore + RubricVerdict +
+// ConversationTurn. Populated for multi-turn conversation tests when
+// evaluation_mode resolves to 'agentic' or 'hybrid' — empty/null
+// otherwise. Drives the "Rubric breakdown" expandable card + transcript
+// display in the evaluation report.
+
+export interface RubricScore {
+  criterion_name: string;
+  score: number;           // 0.0 - 1.0
+  reasoning: string;
+  evidence_turn_indices: number[];
+}
+
+export interface RubricVerdict {
+  overall_score: number;
+  passed: boolean;
+  criterion_scores: RubricScore[];
+  conversation_summary: string;
+  // Names of criteria that tripped a critical-gate failure — even when
+  // overall_score looks passing, these veto the `passed` verdict. UI
+  // renders as red warning chips.
+  critical_failures: string[];
+  cost_usd: number;
+}
+
+export interface ConversationTurn {
+  turn_index: number;
+  role: "user" | "agent" | string;
+  text: string;
+  meta?: Record<string, unknown>;
+}
+
 export interface TestResult {
   test_case_id: string;
   passed: boolean;

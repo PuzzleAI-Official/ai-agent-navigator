@@ -8,6 +8,7 @@ import random
 import re
 import subprocess
 import sys
+import threading  # Used by _execute_all_tests + eval dispatchers for per-candidate parallelism locks (AGENT6_PER_CANDIDATE_PARALLELISM + AGENT6_PER_CANDIDATE_SESSION_PARALLELISM). See threading.Lock() call sites around state_lock + eval_state_lock.
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -29,6 +30,8 @@ from puzzleeval.config import (
     AGENT6_MIN_TESTS_BEFORE_ABORT,
     AGENT6_PASS_THRESHOLD,
     AGENT6_RATE_LIMIT_BACKOFF,
+    AGENT6_SESSION_MAX_RETRIES,
+    AGENT6_SESSION_RETRY_BACKOFF_BASE,
     AGENT6_TEST_TIMEOUT,
     AGENT6_TEST_TIMEOUT_LONG,
     ANTHROPIC_API_KEY,
@@ -191,6 +194,473 @@ def _format_atlas_context_for_builder(candidate: ScreenedCandidate) -> str:
     if not sections:
         return ""
     return "\n---\n## ENRICHMENT HINTS FROM AGENT 4\n\n" + "\n".join(sections)
+
+
+# Template field names the Phase 1 prompt teaches Agent 5 to use when
+# calling ask_research. The soft adherence checker counts how many of
+# these appear in the question. We don't reject malformed calls — Opus 4
+# follows the template reliably enough that hard validation would
+# produce false-rejects on benign rephrasings. Per Q3 in the plan:
+# instructional default + soft logging-only validator gives us telemetry
+# without rigidity.
+_ASK_RESEARCH_TEMPLATE_FIELDS: tuple[str, ...] = (
+    "CANDIDATE",
+    "ENDPOINT",
+    "KNOWN",
+    "FIELD NEEDED",
+    "WHY",
+)
+
+
+def _ask_research_template_adherence(question: str) -> dict[str, object]:
+    """Inspect an ask_research question for adherence to the
+    direction-pointing template (CANDIDATE / ENDPOINT / KNOWN /
+    FIELD NEEDED / WHY) and return a structured report.
+
+    Pure function. No side effects. Caller logs the report; no
+    behavioral change to the ask_research call itself. This is the
+    'hybrid' approach from PLAN_AGENT5_RESEARCH_AGENCY.md §Q3 —
+    instructional default in the prompt + observability here.
+
+    Returns a dict shaped for direct logging:
+      {
+        "fields_present": ["CANDIDATE", "WHY"],
+        "fields_missing": ["ENDPOINT", "KNOWN", "FIELD NEEDED"],
+        "adherence_ratio": 0.4,
+        "fully_adherent": False,
+      }
+    """
+    upper = (question or "").upper()
+    present = [f for f in _ASK_RESEARCH_TEMPLATE_FIELDS if f in upper]
+    missing = [f for f in _ASK_RESEARCH_TEMPLATE_FIELDS if f not in upper]
+    return {
+        "fields_present": present,
+        "fields_missing": missing,
+        "adherence_ratio": (
+            len(present) / len(_ASK_RESEARCH_TEMPLATE_FIELDS)
+        ),
+        "fully_adherent": len(missing) == 0,
+    }
+
+
+def _synthesize_api_spec_from_checklist(candidate: ScreenedCandidate) -> str | None:
+    """Pre-render an api_spec.txt skeleton from Agent 4's BuildReadinessChecklist.
+
+    The biggest single Agent 5 wall-clock cost is Sonnet's Phase 1
+    research turn — real-run measurement (trace 8ded6706, 2026-04-25):
+      - OpenAI Realtime:   T0 Sonnet = 358s, $1.20
+      - ElevenLabs ConvAI: T2 Sonnet = 408s, $1.19
+    Combined: ~12 minutes wall-clock + $2.40 per voice run, all spent
+    on RE-EXTRACTING fields that Agent 4 already confirmed in the
+    BuildReadinessChecklist.
+
+    The checklist for both candidates had:
+      * endpoint_path: confirmed (full wss URL with template params)
+      * auth_method: confirmed (bearer/api_key shape)
+      * request_body_shape: confirmed (full JSON event protocol)
+      * response_body_shape: confirmed (full event types)
+
+    Pre-rendering an api_spec.txt skeleton from this checklist BEFORE
+    the build loop starts means Sonnet sees a starting-point spec on
+    Phase A inventory and can either:
+      (a) accept it as-is and skip directly to Phase D / Phase 2 build
+          (saves the entire 6-min research turn — biggest win)
+      (b) augment only the gap fields (much shorter research turn)
+
+    Returns None when the checklist isn't complete enough to draft
+    from (missing/unknown non-negotiables) — the build loop falls back
+    to legacy full-research behavior unchanged.
+
+    Principle: this is general not modality-specific. Any candidate
+    whose Agent 4 checklist confirms all 4 non-negotiables gets a
+    pre-rendered spec. Voice / OCR / chatbot / future modalities all
+    benefit identically.
+    """
+    from puzzleeval.schemas import NON_NEGOTIABLE_FIELDS
+
+    checklist = getattr(candidate, "checklist", None)
+    if checklist is None:
+        return None
+    if checklist.populated_by != "agent_4":
+        # Sentinel checklist — Agent 4 failed to extract; can't pre-render
+        return None
+
+    # ── Eligibility for partial pre-render (NEW-AM v3) ──
+    # Pre-NEW-AM v3 we required ALL 4 non-negotiables to be `confirmed`
+    # — too strict. If 3-of-4 are confirmed and 1 is inferred, dropping
+    # the entire pre-render means Sonnet re-extracts the 3 confirmed
+    # fields too (~$0.40 wasted). Better: partial pre-render. Render
+    # confirmed fields as AUTHORITATIVE; render inferred fields with an
+    # explicit `[INFERRED — verify on first call]` marker; render
+    # unknown fields as REQUIRES_AUGMENT. Sonnet's augment scope shrinks
+    # accordingly (verify 1 inferred + augment 5 standard sections,
+    # rather than re-extract 3 confirmed + verify 1 + augment 5).
+    #
+    # Threshold: at least the endpoint_path must be confirmed-or-
+    # inferred (not unknown). Without an endpoint we have nothing to
+    # build against — better to fall through to full research.
+    n_confirmed = sum(
+        1 for fn in NON_NEGOTIABLE_FIELDS
+        if (getattr(checklist, fn, None) is not None
+            and getattr(checklist, fn).status == "confirmed")
+    )
+    ep = checklist.endpoint_path
+    if ep is None or ep.status == "unknown":
+        return None  # No endpoint → can't pre-render anything useful
+    # Even single-confirmed-non-negotiable triggers pre-render now —
+    # the partial spec saves redundant re-extraction of THAT field plus
+    # tells Sonnet exactly what's missing.
+    if n_confirmed == 0:
+        return None  # All 4 inferred-or-unknown → not enough scaffolding
+
+    # Build the spec skeleton in api_spec.txt format that Phase 2 expects.
+    lines: list[str] = ["API_SPEC_START"]
+    lines.append(f"SERVICE: {candidate.name}")
+    lines.append(f"PROVIDER: {candidate.provider}")
+    lines.append(f"DOCS_URL: {candidate.verified_api_docs_url}")
+    lines.append("")
+    lines.append("# Pre-rendered from Agent 4's BuildReadinessChecklist.")
+    lines.append(f"# {n_confirmed}/{len(NON_NEGOTIABLE_FIELDS)} non-negotiables confirmed; "
+                 "inferred fields marked [INFERRED — verify on first call];")
+    lines.append("# unknown fields marked [REQUIRES_AUGMENT] — research them targeted.")
+    lines.append("")
+
+    # Per-field renderer with status-aware marking. Confirmed → trust,
+    # inferred → verify on first call, unknown → augment in research.
+    def _render_field(label: str, field, conditional_purpose: str = "") -> None:
+        if field is None or field.status == "unknown":
+            lines.append(f"{label}: [REQUIRES_AUGMENT — checklist had no value]")
+            if conditional_purpose:
+                lines.append(f"  why: {conditional_purpose}")
+            lines.append("")
+            return
+        if field.status == "inferred":
+            lines.append(f"{label}: [INFERRED — verify on first API call]")
+        else:  # confirmed
+            lines.append(f"{label}:")
+        lines.append(f"  {field.value or '(empty)'}")
+        if field.source_url:
+            lines.append(f"  source: {field.source_url}")
+        lines.append("")
+
+    _render_field("ENDPOINT_PATH", checklist.endpoint_path)
+    _render_field("AUTH_METHOD", checklist.auth_method)
+    _render_field("REQUEST_BODY_SHAPE", checklist.request_body_shape)
+    _render_field("RESPONSE_BODY_SHAPE", checklist.response_body_shape)
+
+    # Optional / conditional fields — render with status tag so the
+    # builder knows whether to trust them or fill gaps.
+    for opt_field in (
+        "auth_refresh", "error_response_schema", "rate_limit_signal",
+        "async_pattern", "content_type_quirks", "sandbox_availability",
+    ):
+        f = getattr(checklist, opt_field, None)
+        if f is None:
+            continue
+        status = f.status
+        val = f.value or "(not extracted)"
+        # Header label uppercase for grep-ability + status marker
+        header_label = opt_field.upper()
+        marker = {"confirmed": "[OK]", "inferred": "[INFERRED]", "unknown": "[UNKNOWN]"}.get(status, "[?]")
+        lines.append(f"{header_label}: {marker}")
+        lines.append(f"  {val}")
+        lines.append("")
+
+    # ── Provider surface — alternative endpoints (Gap C + D fix) ──
+    # Agent 4 enumerated up to 5 endpoints in provider_surface during
+    # deep-verify, with role tags (primary/alternative/unrelated).
+    # Render them prominently with a directive: "if the chosen endpoint
+    # turns out wrong for your test case input, switch to one of these
+    # before re-researching the API from scratch." Without this Sonnet
+    # would re-search the docs to discover what alternatives exist.
+    surface = checklist.provider_surface or []
+    if surface:
+        lines.append("PROVIDER_SURFACE — endpoints Agent 4 considered:")
+        lines.append("  (If the chosen endpoint above turns out wrong for")
+        lines.append("   your test case input shape, try one of the")
+        lines.append("   [alternative] endpoints BEFORE re-researching.)")
+        # Schema (puzzleeval/schemas.py::EndpointSummary):
+        #   .name (e.g. "POST /v1/audio/speech" or "WebSocket /v1/realtime")
+        #   .purpose (one-line description)
+        #   .relevance_to_use_case ("primary" | "alternative" | "unrelated")
+        #   .selection_note (why chosen / rejected)
+        # Pre-NEW-AM v3 used getattr(ep, "method"/"path"/"role") which
+        # are NOT EndpointSummary fields — every entry rendered as
+        # "[?] ? ?" silently dropping the alternatives info. Real-run
+        # trace 8ded6706 surfaced this as one of the audit findings.
+        for ep in surface[:8]:  # cap for readability
+            name = getattr(ep, "name", None) or "?"
+            relevance = getattr(ep, "relevance_to_use_case", None) or "?"
+            purpose = (getattr(ep, "purpose", None) or "")[:120]
+            note = (getattr(ep, "selection_note", None) or "")[:80]
+            lines.append(f"  - [{relevance}] {name}  -- {purpose}")
+            if note:
+                lines.append(f"      note: {note}")
+        lines.append("")
+
+    # ── Completeness-confidence note (Gap D fix) ──
+    # The checklist's request_body_shape captures THE PRIMARY message
+    # shape for the chosen endpoint. APIs commonly have variants:
+    #   - WebSocket events: many message types, not just init
+    #   - REST endpoints: PATCH/PUT alongside POST with different bodies
+    #   - Override variants: conversation_initiation_client_data with
+    #     conversation_config_override (real example from ElevenLabs
+    #     ConvAI — critical for system prompt injection mid-stream)
+    # Without this note, builder might trust REQUEST_BODY_SHAPE as
+    # exhaustive and miss the variant it actually needs.
+    lines.append("COMPLETENESS_NOTE:")
+    lines.append("  REQUEST_BODY_SHAPE + RESPONSE_BODY_SHAPE above capture")
+    lines.append("  the PRIMARY message/event shapes for the chosen endpoint,")
+    lines.append("  not necessarily ALL variants. Common variants to check")
+    lines.append("  for in OVERRIDE_OR_SPECIAL_MESSAGE_SHAPES below:")
+    lines.append("    - WebSocket protocols: lifecycle events, error events,")
+    lines.append("      ping/pong keepalive, interruption signals")
+    lines.append("    - REST endpoints: PATCH/PUT body shapes, query params,")
+    lines.append("      header-based variants (e.g., If-Match for idempotency)")
+    lines.append("    - Override / context-injection variants needed to pass")
+    lines.append("      runtime config (system prompt, tool definitions, etc.)")
+    lines.append("  If your test case needs ANY variant beyond what's above,")
+    lines.append("  research it via web_fetch BEFORE writing harness code.")
+    lines.append("")
+
+    # Selection justification — why THIS endpoint over alternatives
+    if checklist.selection_justification:
+        lines.append("SELECTION_JUSTIFICATION:")
+        for chunk in checklist.selection_justification[:600].splitlines():
+            lines.append(f"  {chunk}")
+        lines.append("")
+
+    # ── EXPLICIT GAPS SECTION (NEW-AM v2 — per-test-case completion) ──
+    # Real-run analysis (trace 8ded6706, 2026-04-25) compared the
+    # checklist against what Sonnet's 6-minute research turn actually
+    # produced for ElevenLabs ConvAI:
+    #   * 60% redundant (re-extracted confirmed checklist fields)
+    #   * 40% NEW value the checklist doesn't carry by design:
+    #       - Auxiliary endpoint request bodies (POST /agents,
+    #         DELETE /agents/{id}, etc.) — only the primary endpoint
+    #         is in checklist.request_body_shape
+    #       - Override / special-case message shapes (e.g.,
+    #         conversation_initiation_client_data with
+    #         conversation_config_override for mid-stream system
+    #         prompt injection)
+    #       - INPUT_COMPATIBILITY (per-test-case mapping: which
+    #         test_case input shapes work, which return INCOMPATIBLE)
+    #       - ROUTING_TABLE (per-test-case dispatch logic: which
+    #         payload shape maps to which endpoint)
+    #       - WORKING_EXAMPLE (concrete copy-paste request flow)
+    #
+    # Pure-skip pre-render would lose this 40% and quality would
+    # degrade. The fix: render the AUTHORITATIVE 60% (saving the
+    # redundant Sonnet work) but mark the 40% as REQUIRES_AUGMENT
+    # so the builder knows what to research/synthesize before
+    # building. Net wall-clock saving: ~3-4 min per candidate
+    # (vs 6 if everything was redundant) — but quality preserved.
+    lines.append("")
+    lines.append("# ─────────────────────────────────────────────────────")
+    lines.append("# REQUIRES_AUGMENT — fields Sonnet/Opus must fill in")
+    lines.append("# ─────────────────────────────────────────────────────")
+    lines.append("# The four non-negotiables above are AUTHORITATIVE; do NOT")
+    lines.append("# re-research them. The fields below are per-test-case or")
+    lines.append("# auxiliary — fill them in only if your test cases need them.")
+    lines.append("")
+    lines.append("AUXILIARY_ENDPOINTS_REQUEST_BODIES: [REQUIRES_AUGMENT IF NEEDED]")
+    lines.append("  If your test case provisions resources (creates agents,")
+    lines.append("  deletes them, configures phone numbers, etc.) you must")
+    lines.append("  research the request body shape of those auxiliary")
+    lines.append("  endpoints. The provider_surface above lists them; the")
+    lines.append("  primary endpoint's body shape is in REQUEST_BODY_SHAPE.")
+    lines.append("")
+    lines.append("OVERRIDE_OR_SPECIAL_MESSAGE_SHAPES: [REQUIRES_AUGMENT IF NEEDED]")
+    lines.append("  If the API has special variants (config overrides, mid-")
+    lines.append("  stream context injection, dynamic-variable substitution,")
+    lines.append("  etc.) needed for your test cases, research and document")
+    lines.append("  them here. Common case: passing a system prompt mid-")
+    lines.append("  conversation requires the OVERRIDE message variant, not")
+    lines.append("  the basic init shape in REQUEST_BODY_SHAPE.")
+    lines.append("")
+    lines.append("INPUT_COMPATIBILITY: [REQUIRES_AUGMENT — per-test-case]")
+    lines.append("  Map each test case input form (text / audio / file_upload /")
+    lines.append("  base64 / url) to YES/NO based on what the API actually")
+    lines.append("  accepts. Drives ROUTING_TABLE below.")
+    lines.append("")
+    lines.append("ROUTING_TABLE: [REQUIRES_AUGMENT — per-test-case]")
+    lines.append("  For each test_case input shape, document which endpoint")
+    lines.append("  to call and how to transform the input. Forms that the")
+    lines.append("  API does NOT support → harness returns")
+    lines.append("  success=False, error='INCOMPATIBLE: <reason>'.")
+    lines.append("")
+    lines.append("WORKING_EXAMPLE: [REQUIRES_AUGMENT — synthesize]")
+    lines.append("  A complete runnable example (curl / Python / language of")
+    lines.append("  your choice) showing the canonical request flow end-to-end.")
+    lines.append("  At minimum: the primary endpoint call with auth + body +")
+    lines.append("  expected response shape. Multi-step flows: enumerate")
+    lines.append("  every step.")
+    lines.append("")
+    lines.append("ACCEPTED_INPUT_FORMATS:")
+    lines.append("  (derive from test case input_type + INPUT_COMPATIBILITY above)")
+    lines.append("")
+    lines.append("API_SPEC_END")
+
+    return "\n".join(lines)
+
+
+def _format_checklist_context_for_builder(candidate: ScreenedCandidate) -> str:
+    """Surface Agent 4's BuildReadinessChecklist to the Phase 1 builder.
+
+    This is the load-bearing handoff: the checklist enumerates what's
+    known/inferred/unknown across the ten build-readiness fields plus
+    the provider's relevant API surface.
+    Agent 5 reads it during Phase A (Inventory), uses Phase B trigger
+    rules to identify which unknowns matter for the test case, fills
+    only those (Phase C), then writes the spec (Phase D).
+
+    Three render modes:
+      - checklist is None        → cached / legacy candidate; tell
+                                    builder to do full research from
+                                    scratch (matches pre-checklist
+                                    behavior).
+      - populated_by == "system_failure" → Agent 4 sentinel; warn
+                                    builder and route to full research,
+                                    but include the failure reason so
+                                    the builder knows what to look out
+                                    for.
+      - normal                   → render the surface, the selection,
+                                    each of the ten fields with status
+                                    + value + source, and the
+                                    per-test-case trigger rules.
+    """
+    from puzzleeval.schemas import BUILD_READINESS_FIELDS, NON_NEGOTIABLE_FIELDS
+
+    checklist = getattr(candidate, "checklist", None)
+
+    # Mode 1: no checklist (cached / legacy)
+    if checklist is None:
+        return (
+            "\n---\n"
+            "## BUILD-READINESS CHECKLIST (from Agent 4)\n\n"
+            "Agent 4 did not produce a checklist for this candidate "
+            "(typically a cached candidate from a run predating the "
+            "checklist schema). Treat this as full-research mode: do "
+            "Phase A by reading the prefetched docs in your sandbox + "
+            f"the `verified_api_docs_url` ({candidate.verified_api_docs_url}), "
+            "then proceed through Phases B-E as normal."
+        )
+
+    # Mode 2: sentinel (system failure)
+    if checklist.populated_by == "system_failure":
+        # Surface the reason if any field carries it
+        reason = ""
+        for n in BUILD_READINESS_FIELDS:
+            r = getattr(checklist, n).reasoning
+            if r:
+                reason = r
+                break
+        reason_line = f"\n  Reason: {reason}" if reason else ""
+        return (
+            "\n---\n"
+            "## BUILD-READINESS CHECKLIST (from Agent 4)\n\n"
+            "Agent 4 hit a snag producing the checklist for this "
+            "candidate (parser failure, malformed JSON, or schema "
+            f"validation error).{reason_line}\n\n"
+            "Treat this as full-research mode: do Phase A by reading "
+            "the prefetched docs in your sandbox + the "
+            f"`verified_api_docs_url` ({candidate.verified_api_docs_url}), "
+            "then proceed through Phases B-E. Don't trust any field "
+            "in the checklist; all are flagged unknown for diagnostic "
+            "reasons."
+        )
+
+    # Mode 3: real checklist — render in full
+    lines: list[str] = [
+        "",
+        "---",
+        "## BUILD-READINESS CHECKLIST (from Agent 4 — Phase A inventory)",
+        "",
+    ]
+
+    # Top summary line
+    confirmed = len(checklist.fields_with_status("confirmed"))
+    inferred = len(checklist.fields_with_status("inferred"))
+    unknown = len(checklist.fields_with_status("unknown"))
+    verified_pass = checklist.is_verified_pass()
+    lines.append(
+        f"Status: {confirmed}/10 confirmed, {inferred} inferred, "
+        f"{unknown} unknown. "
+        f"Verified Pass: {'YES' if verified_pass else 'NO'} "
+        "(four non-negotiables — endpoint_path, auth_method, "
+        "request_body_shape, response_body_shape — all confirmed)."
+    )
+    lines.append("")
+
+    # Provider surface
+    if checklist.provider_surface:
+        lines.append("### Provider surface (endpoints Agent 4 considered)")
+        for ep in checklist.provider_surface:
+            tag = ep.relevance_to_use_case.upper()
+            note = f" — {ep.selection_note}" if ep.selection_note else ""
+            lines.append(f"  [{tag:<11}] `{ep.name}` — {ep.purpose}{note}")
+        lines.append("")
+    if checklist.selected_endpoint:
+        lines.append(f"Selected endpoint: `{checklist.selected_endpoint}`")
+        if checklist.selection_justification:
+            lines.append(f"Justification: {checklist.selection_justification}")
+        lines.append("")
+
+    # Build-readiness fields
+    lines.append("### Build-readiness fields (10)")
+    lines.append("")
+    for fname in BUILD_READINESS_FIELDS:
+        fs = getattr(checklist, fname)
+        non_neg_marker = "★" if fname in NON_NEGOTIABLE_FIELDS else " "
+        lines.append(f"{non_neg_marker} {fname}: [{fs.status.upper()}]")
+        if fs.value:
+            value_preview = fs.value[:200] + ("…" if len(fs.value) > 200 else "")
+            lines.append(f"    value: {value_preview}")
+        if fs.source_url:
+            lines.append(f"    source: {fs.source_url}")
+        if fs.reasoning:
+            reasoning_preview = fs.reasoning[:200] + ("…" if len(fs.reasoning) > 200 else "")
+            lines.append(f"    reasoning: {reasoning_preview}")
+    lines.append("")
+    lines.append("(★ = non-negotiable for Verified Pass)")
+    lines.append("")
+
+    # Phase B trigger rules — surfaced in the prompt as a reminder; the
+    # builder applies them during Phase B for the specific test case it's
+    # about to run.
+    lines.append("### Phase B trigger rules (which fields matter for THIS test case)")
+    lines.append("")
+    lines.append(
+        "The four non-negotiables are ALWAYS required (Agent 4 should have "
+        "confirmed them; if any is `unknown`/`inferred`, you fill them in "
+        "Phase C). The six conditional fields are required only when the "
+        "test case actually exercises them:"
+    )
+    lines.append(
+        "  - error_response_schema, rate_limit_signal: required IF the test "
+        "exercises retry / failure paths"
+    )
+    lines.append(
+        "  - auth_refresh: required IF the test session is long-running (>10 min)"
+    )
+    lines.append(
+        "  - async_pattern: required IF the API is async or streaming"
+    )
+    lines.append(
+        "  - content_type_quirks: required IF non-standard content types "
+        "(multipart, SSE, binary)"
+    )
+    lines.append(
+        "  - sandbox_availability: required IF the candidate has side_effects "
+        "(creates/modifies/deletes records)"
+    )
+    lines.append("")
+    lines.append(
+        "Fields irrelevant to your test case stay `unknown` and that's fine "
+        "— don't research them out of habit."
+    )
+
+    return "\n".join(lines)
 
 
 # Field names different harnesses use for "the system prompt that tells the
@@ -381,6 +851,182 @@ def _apply_message_cache_breakpoint(messages: list[dict]) -> list[dict]:
     return messages
 
 
+# ============================================================================
+# Sonnet → Opus boundary compaction (PLAN_VOICE_RUN_OPTIMIZATIONS extension)
+# ============================================================================
+#
+# Real-run measurement (trace 73a9d605, 2026-04-25):
+#   - ElevenLabs first-Opus turn cache_create: 69,770 tokens → ~$0.44 tax
+#   - OpenAI first-Opus turn cache_create:     35,993 tokens → ~$0.22 tax
+#   - Combined per-run model-switch tax:       ~$0.66
+#
+# What's happening: Opus has a separate cache namespace from Sonnet.
+# When the model switches at the Phase 1 → Phase 2 boundary, Opus's
+# first turn re-caches the entire conversation (including Sonnet's
+# raw web_fetch / web_search tool_result blobs — 15-30K chars each)
+# into its own namespace. That re-cache is the tax.
+#
+# Compaction trades the raw-doc blobs (which Opus rarely re-reads
+# verbatim) for brief 1-line summaries pointing at:
+#   - api_spec.txt (the contract Sonnet synthesized)
+#   - DOC_REFERENCES (URL list inside api_spec.txt)
+#   - fetched_docs_*.txt (the same content Agent 4 / Sonnet saved
+#     to disk via save_web_fetches_to_sandbox — Opus can read_file()
+#     any of them on demand)
+#
+# Safety guarantees (verified before shipping):
+#   - Every web_fetch_tool_result content blob is ALSO on disk as
+#     fetched_docs_N.txt (web_doc_cache.save_web_fetches_to_sandbox
+#     writes both Agent 4's and Agent 5/Sonnet's fetches there).
+#   - Real-run audit confirmed Agent 5 prefers read_file over
+#     web_fetch when files exist (ElevenLabs: 2 read_file, 0
+#     web_fetch); the read_file path is the established happy path.
+#   - tool_use_id is preserved on every replaced block so the
+#     server-tool pairing invariant (every tool_use has a matching
+#     tool_result) is not broken.
+#
+# Wired at the same point that flips `api_spec_written = True` so
+# compaction runs ONCE per build (not per turn).
+# ============================================================================
+
+# What we replace `web_fetch_tool_result.content.content.source.data`
+# with after compaction. Opus reads this and sees a clear pointer to
+# the on-disk artifacts — no ambiguity about where to look if it
+# needs the raw page content.
+_COMPACTED_FETCH_PLACEHOLDER = (
+    "[research artifact COMPACTED — original page content available via "
+    "read_file('fetched_docs_N.txt') in this sandbox; the synthesized "
+    "contract lives in api_spec.txt. Read those files if you need the "
+    "raw doc; the prior conversation history has been compacted to save "
+    "cache space at the Sonnet → Opus model boundary.]"
+)
+
+
+def _compact_research_tool_results(messages: list) -> int:
+    """Replace web_fetch / web_search tool_result CONTENT BLOBS in the
+    conversation history with brief summaries.
+
+    Mutates each message's content list in place — the builder loop
+    owns the `messages` list and re-sends it on every API call. After
+    compaction, the next API call sees ~5K tokens of message history
+    instead of ~60K, eliminating the model-switch cache rebuild tax.
+
+    Preserves the SHAPE of every block (web_fetch_tool_result stays a
+    web_fetch_tool_result, just with shorter `content.content.source.data`)
+    so the API's "every tool_use has a matching tool_result" invariant
+    is not broken. tool_use_id is preserved.
+
+    Idempotent: calling twice has no effect on the second call (the
+    compaction marker is in the new content; calling again re-replaces
+    the marker with itself).
+
+    Returns: number of blocks compacted (for logging / observability).
+
+    Safe on:
+      - Empty messages list (returns 0)
+      - Messages with string content (skipped)
+      - Messages with no research blocks (no-op)
+      - Mix of typed SDK objects + dicts (handled both shapes)
+    """
+    compacted_count = 0
+    for msg in messages or ():
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for i, block in enumerate(content):
+            block_type = _block_type(block)
+            if block_type == "web_fetch_tool_result":
+                content[i] = _compact_web_fetch_block(block)
+                compacted_count += 1
+            # NOTE: web_search_tool_result is NOT compacted (NEW-AM v3 fix).
+            # Real-run trace 32a4b134 (2026-04-25) caught a 400 from the
+            # Anthropic API: "Invalid `encrypted_content` in `search_result`
+            # block". Our prior _compact_web_search_block set
+            # `encrypted_content: ""` (empty string) — Anthropic now
+            # rejects that as invalid (the field expects either a real
+            # encrypted blob or an omitted entry).
+            #
+            # Skipping web_search_tool_result compaction is safe AND has
+            # negligible cost impact: web_search results are 5-7K tokens
+            # each (titles + snippets); web_fetch results are 5-25K (full
+            # page content). The 60K-token cache rebuild tax we're
+            # eliminating is dominated by web_fetch blobs. Removing
+            # web_search from the compaction reduces our savings by
+            # <5% but eliminates the API-rejection failure mode.
+            #
+            # If Anthropic ever publishes a "compacted" sentinel for
+            # encrypted_content (or accepts None), revisit and re-add
+            # web_search compaction.
+    return compacted_count
+
+
+def _block_type(block) -> str | None:
+    """Return the `.type` of a content block, handling both SDK-typed
+    and dict shapes. Returns None when no type is discernible."""
+    if isinstance(block, dict):
+        return block.get("type")
+    return getattr(block, "type", None)
+
+
+def _block_attr(block, name: str, default=None):
+    """Read an attribute / dict key off a block, dual-shape safe."""
+    if isinstance(block, dict):
+        return block.get(name, default)
+    return getattr(block, name, default)
+
+
+def _compact_web_fetch_block(block) -> dict:
+    """Replace a web_fetch_tool_result block's page content with a
+    short summary. Preserves type + tool_use_id + URL.
+
+    Output is a plain dict (not an SDK object) — the Anthropic API
+    accepts both shapes for re-sent assistant messages, and dicts
+    survive the SDK's serialization round-trip without mutation
+    issues if the caller's typed object is frozen.
+    """
+    tool_use_id = _block_attr(block, "tool_use_id", "")
+    inner = _block_attr(block, "content")
+    # Try to preserve the URL for diagnostic/traceability value.
+    url = ""
+    if inner is not None:
+        url = _block_attr(inner, "url", "") or ""
+    return {
+        "type": "web_fetch_tool_result",
+        "tool_use_id": tool_use_id,
+        "content": {
+            "type": "web_fetch_result",
+            "url": url,
+            "content": {
+                "type": "document",
+                "source": {
+                    "type": "text",
+                    "media_type": "text/plain",
+                    "data": _COMPACTED_FETCH_PLACEHOLDER,
+                },
+            },
+        },
+    }
+
+
+def _compact_web_search_block(block) -> dict:
+    """Replace a web_search_tool_result block's results list with a
+    single brief entry. Preserves type + tool_use_id."""
+    tool_use_id = _block_attr(block, "tool_use_id", "")
+    return {
+        "type": "web_search_tool_result",
+        "tool_use_id": tool_use_id,
+        "content": [{
+            "type": "web_search_result",
+            "url": "",
+            "title": "[research artifact compacted]",
+            "page_age": "",
+            "encrypted_content": "",
+        }],
+    }
+
+
 def _adaptive_test_timeout(harness) -> int:
     """Pick the right test-case subprocess timeout for this harness.
 
@@ -510,15 +1156,54 @@ ALWAYS batch independent tool calls in one response. Every separate turn
 costs an API round-trip and tokens for the entire conversation prefix,
 so minimizing turns has compounding savings.
 
-**Scaffold phase (MANDATORY, not a suggestion):** once api_spec.txt is
-written, emit requirements.txt + harness.py + smoke_test.py + live_test.py
-as PARALLEL write_file calls in ONE turn. They are independent files;
-serial writes are never necessary here. A 4-file scaffold in 4 separate
-turns wastes 3 turns and ~$0.24 per build. A concrete real-run example:
-Veryfi build finished a full OCR harness in 5 turns ($0.87) by doing
-this; the next build that did serial scaffold writes needed 12 turns
-($1.46) for an equivalent-difficulty API — the difference was parallelism,
-not API complexity.
+**Scaffold phase (Phase 2 only — Opus model; HARD CONSTRAINT):** once
+api_spec.txt is written or patched, requirements.txt + harness.py +
+smoke_test.py + live_test.py belong to PHASE 2 (Opus). Sonnet (the
+research model) MUST NOT write these files. The model switch from
+Sonnet → Opus fires AFTER Sonnet writes/patches api_spec.txt; the
+NEXT turn is Opus, which writes the code files.
+
+WHY THIS MATTERS — REAL-RUN EVIDENCE (trace a4860e94, 2026-04-25):
+Sonnet wrote harness.py at T2 in parallel with patching api_spec.txt.
+Result: harness.py contained subtly-wrong session.update body shape
+(flat fields instead of GA-required nested audio.input config) AND
+a trivial live_test that called harness.run with audio_url=None
+(skipping the production audio path entirely). Real tests scored
+0/5 — agent silent every turn. Same prompt as trace 8ded6706 where
+Sonnet wrote ONLY api_spec.txt and Opus wrote harness.py → real
+tests scored 4/5.
+
+PHASE 1 SONNET ALLOWED:
+  * read_file (api_spec.txt, fetched_docs_*.txt, output_turn*.txt)
+  * web_fetch / web_search / ask_research (research)
+  * write_file('api_spec.txt') — fresh spec from scratch
+  * patch_file('api_spec.txt') — augment a pre-rendered spec
+
+PHASE 1 SONNET FORBIDDEN:
+  * write_file('harness.py') — Phase 2 work, Opus's job
+  * write_file('smoke_test.py') — Phase 2 work, Opus's job
+  * write_file('live_test.py') — Phase 2 work, Opus's job
+  * write_file('requirements.txt') — Phase 2 work, Opus's job
+
+After Sonnet writes/patches api_spec.txt, STOP. Do not parallel-write
+code files in the same turn. The next turn switches to Opus, which
+will write all four code files in parallel (preserving the parallel-
+writes optimization where it actually helps — Phase 2 with Opus).
+
+PHASE 2 OPUS PARALLEL-WRITES (ENCOURAGED):
+Once on Opus, write requirements.txt + harness.py + smoke_test.py +
+live_test.py in ONE turn. Real-run evidence: the Veryfi OCR harness
+finished in 5 turns ($0.87) by parallelizing scaffold writes; a
+comparable-difficulty API with serial scaffold writes took 12 turns
+($1.46). Parallelism is the right pattern — JUST NOT during Phase 1.
+
+ESCAPE HATCH: if you genuinely need to see harness.py's live API
+signature before writing live_test.py (e.g., your live test needs to
+match harness.run()'s exact input shape and you're unsure what shape
+you'll land on), sequential is acceptable. Don't force parallelism
+against your own reasoning — use it when the files are truly
+independent decisions, serial when they genuinely depend on each
+other's content.
 
 **General rule:** if two tool calls do not depend on each other's output,
 they belong in the SAME turn. Concrete patterns that are ALWAYS parallelizable:
@@ -634,7 +1319,7 @@ have been one turn with three parallel patch_file calls.
 
 <think_before_acting>
 Before writing harness.py, re-read api_spec.txt. Check AUTH_HEADER, ENDPOINTS,
-and PYTHON_EXAMPLES. Resolve unknowns by reading the DOC_MAP entries OR by writing
+and WORKING_EXAMPLE. Resolve unknowns by reading the DOC_MAP entries OR by writing
 a first-pass harness.py and letting live errors tell you what's wrong. A ran
 harness.py with a concrete error ("AttributeError: 'Conversation' has no attribute
 'X'") is the fastest teacher — faster than any introspection script.
@@ -905,42 +1590,143 @@ writing api_spec.txt AS SOON AS you have enough to populate the required fields
 (BASE_URL, one ENDPOINT with request format, AUTH_HEADER, INPUT_COMPATIBILITY).
 Unknowns become `TODO: <specific question>` entries that you gap-fill in later turns.
 
-**HARD RESEARCH BUDGET:** no more than 3 tool calls to web_search/web_fetch BEFORE
-you call write_file("api_spec.txt"). If after 3 research calls you still can't fill
-the required fields, write the spec with the fields you have (remainder as TODOs)
-anyway. Do NOT keep researching to "refine" or "verify" — that's refinement that
-never ends. Commit, then patch from live-test feedback.
-
-**Two valid flows:**
-
-- **Compact (preferred when first pass lands enough info)** — In a single turn:
-  `web_search` + `web_fetch` + `write_file("api_spec.txt")`. Typical for well-
-  documented providers with an OpenAPI spec or strong quickstart page. This is
-  what the "I have enough info, let me write the spec" moment looks like — act
-  on it IMMEDIATELY, don't hedge with "let me check one more thing first."
-
-- **Incremental (when first pass has gaps)** — Turn 1: `web_search` + `web_fetch`.
-  Turn 2: `write_file("api_spec.txt")` with TODOs for anything missing. Turn 3+:
-  ONE targeted search/fetch per TODO, then `patch_file` the resolved field.
-
-**Which flow to pick:** if after your first `web_fetch` you can fill all required
-fields, write the full spec in the same turn. If there are gaps, write what you
-HAVE — TODOs included — and resolve each one in a dedicated follow-up turn. NEVER
-run a second research pass without writing the spec first.
+**HARD RESEARCH BUDGET:** no more than **2 TURNS** of research (web_search /
+web_fetch) before you call write_file("api_spec.txt"). Each turn can use parallel
+tool calls — do MANY fetches in ONE turn instead of spreading them across many
+turns. If after 2 research turns you still can't fill the required fields, write
+the spec with the fields you have (remainder as TODOs) anyway. Do NOT keep
+researching to "refine" or "verify" — that's refinement that never ends. Commit,
+then patch from live-test feedback.
 
 **Budget discipline:** adaptive-thinking blocks, web_fetch results, and your text
 prose all count against max_tokens. If you catch yourself mid-turn writing a long
 "analysis" of what you've read, STOP and call write_file now. The spec is your
 memory; it's always easier to patch later than to re-research.
 
-### How to research (search → navigate → fetch)
+### How to research (FIVE PHASES — checklist-driven, per-test-case relevance)
 
-1. `web_search("{service} API documentation")` — survey the docs landscape
-2. `web_search("{service} openapi.json OR swagger")` — find the machine-readable spec
-3. `web_fetch(most_promising_docs_url)` — read endpoints, auth, examples
+Phase 1 has FIVE sub-phases that map directly to how a careful engineer
+approaches an unfamiliar API: see what was handed to you, identify what's
+missing for THIS test case, fill ONLY the named gaps, write a contract
+(api_spec.txt), then build. The five phases are general — they work for
+voice APIs, OCR APIs, code-gen APIs, webhook providers, vision APIs, any
+REST or WebSocket surface.
 
-Search results include snippet content — skim them before deciding what to fetch.
-Fetching is expensive (tokens + budget); be selective.
+The starting context is the BuildReadinessChecklist Agent 4 produced.
+Agent 4's job was capability survey + best-effort answers to ten
+build-readiness questions. Your job is harness construction, which is a
+narrower question: *do I have what I need to write working code for THIS
+test case?*
+
+**PHASE A — Inventory (read what Agent 4 gave you)**
+
+Your initial message contains:
+- The BuildReadinessChecklist (provider_surface + ten field statuses).
+  See "Build-Readiness Checklist" section below.
+- Pre-fetched API documentation files (`fetched_docs_*.txt`) listed in
+  your sandbox inventory. These back the `confirmed` fields with source
+  URLs you can cross-check via `read_file`.
+- ScreenedCandidate metadata: `verified_api_docs_url`, `auth_method`,
+  `interaction_model`, `sandbox_available`, etc.
+
+Read the checklist first — it enumerates what's known, inferred, and
+unknown across the ten build-readiness fields. Read the prefetched docs
+as needed to back-check `confirmed` fields and to ground your code
+generation. Output (internal): a short mental note of "Agent 4 confirmed
+N/10 fields, inferred K, marked U as unknown."
+
+**PHASE B — Gap analysis for THIS test case (NOT for every test case)**
+
+Most build-readiness fields are CONDITIONAL. Apply these triggers to
+decide what's actually needed for the harness you're about to write:
+
+  ALWAYS required (the four non-negotiables — Agent 4 should have
+  already confirmed these):
+    endpoint_path, auth_method, request_body_shape, response_body_shape
+
+  Required IF the test case exercises retry / failure paths:
+    error_response_schema, rate_limit_signal
+
+  Required IF the test session is long-running (over ~10 min):
+    auth_refresh
+
+  Required IF the API is async or streaming:
+    async_pattern (with full protocol details)
+
+  Required IF the request uses non-standard content types
+  (multipart, SSE, binary, ndjson):
+    content_type_quirks
+
+  Required IF the candidate has side_effects = creates_records /
+  modifies_records / deletes_records:
+    sandbox_availability
+
+Your output: a NAMED LIST of fields that are (a) NOT `confirmed` in the
+checklist and (b) triggered for this test case. Empty list is acceptable
+and common — small read-only sync calls only need the four
+non-negotiables, which Agent 4 should have already confirmed.
+
+**PHASE C — Targeted research (fill ONLY the fields Phase B named)**
+
+For each gap in Phase B's list:
+
+- Use `web_fetch` when you have a specific URL likely to answer (Agent
+  4's `provider_surface[].name` often hints; the prefetched docs
+  often link reference pages you haven't read yet).
+- Use `read_file` for prefetched docs you haven't yet inspected.
+- Use `ask_research` when the gap needs delegation. Use this template:
+
+  ```
+  CANDIDATE: <provider name>
+  ENDPOINT: <from checklist.selected_endpoint>
+  KNOWN: <one sentence on what Agent 4 already confirmed>
+  FIELD NEEDED: <one of the 10 build-readiness field names>
+  WHY: <how the answer changes the harness, in one sentence>
+  ```
+
+  Direction-pointing questions get direction-pointing answers. Vague
+  "tell me about X" calls produce vague answers and waste budget.
+
+After research, update your mental model: gap → `confirmed` (with
+source URL you can cite in the spec) or → `inferred` (with reasoning
+you'd be willing to stand behind).
+
+**Soft research budget: at most 2 calls per gap.** If a third is
+needed, name why before making it. If a fourth would be needed, commit
+to your best understanding and proceed; record the residual uncertainty
+in the spec. The spec is more honest as "inferred from X, may be wrong"
+than as "still researching after 5 fetches."
+
+**Stop test (apply after each gap is resolved):**
+
+  "Can I write the harness's request-builder, response-parser, and
+   error-handler for this test case WITHOUT a TODO, WITHOUT guessing
+   a field name, and WITHOUT writing a comment that says 'might need to'?
+   AND have I left genuinely irrelevant unknowns (e.g., auth_refresh
+   for a 2-second test) untouched?"
+
+When the answer is YES, move to Phase D. The spec ships with `unknown`
+fields that don't matter — that's the whole point of per-test-case
+relevance.
+
+**PHASE D — Write the spec (commit to a contract via api_spec.txt)**
+
+The api_spec.txt file IS your contract. Translate the now-resolved
+checklist + your harness plan into the api_spec.txt template (below).
+Required fields are non-negotiable; optional fields stay as TODO when
+they don't matter for THIS test case.
+
+If you cannot write the spec without a TODO on a field Phase B flagged
+as needed, return to Phase C — your research is incomplete.
+
+Don't research to make the spec "look complete." Research to make the
+HARNESS work. The spec reflects that.
+
+**PHASE E — Build (Phase 2 begins; see below)**
+
+Implement harness.py from the spec. The spec is the single source of
+truth; if implementation diverges from spec, update the spec comment
+first.
 
 ### api_spec.txt template
 
@@ -958,11 +1744,25 @@ ENDPOINTS:
 AUTH_HEADER: [exact format quoted from docs | TODO: need auth scheme]
 REQUEST_FORMAT: [per endpoint — json= vs data= vs files= matters]
 RESPONSE_FORMAT: [JSON structure]
+ERRORS:
+  - HTTP 401: [what triggers it, example body if shown in docs]
+  - HTTP 429: [rate-limit headers to watch, retry-after format]
+  - HTTP 4xx/5xx provider-specific: [any documented error code with
+    its meaning — some providers use codes like 1008 or custom error
+    objects]
+  [≥2 entries required. These are what turns 5-15 of Phase 2 debug
+   against; not having them means opaque 'something failed' messages.]
 SDK_PACKAGE: [pip package | "none -- use requests"]
 ACCEPTED_INPUT_FORMATS: [file types, URL support, plain text, base64]
 
-PYTHON_EXAMPLES:
-  [paste code snippets from docs — file upload, URL submission, SDK usage]
+WORKING_EXAMPLE:
+  [paste ≥1 COMPLETE working request example from the docs — endpoint +
+   headers + body + auth, complete enough to translate to Python `requests`
+   mechanically. ANY language is acceptable (Python, curl, JS/Node, Go,
+   Ruby, Java, C#, raw HTTP from Swagger). Preference order: Python > curl
+   > JS > other SDKs > raw HTTP. curl→Python translation cheat-sheet:
+   `-H` → `headers=`, `-d` → `data=` or `json=`, `-F` → `files=`, `-X` →
+   `method=`. Docs always have a quickstart in SOMETHING; find and paste it.]
 
 DOC_REFERENCES:
   [URLs: API reference, auth docs, SDK, OpenAPI spec]
@@ -1000,12 +1800,49 @@ Read your spec. For each TODO:
 value. Never do broad/open-ended searches — only narrow, gap-specific queries. Doing
 the same web_search twice wastes budget and buries the answer in duplicate context.
 
-### Phase 1 completion checklist — move to Phase 2 when ALL are true
+### Phase D completion checklist — api_spec.txt is ready for Phase 2 when ALL are true
+
+This is the structural gate on Phase D's spec output. It complements the
+behavioral stop test from Phase C ("can I write request-builder, response-
+parser, error-handler without TODO/guess/'might need to'?"). When BOTH
+gates pass, your Phase 1 work is done and you move to Phase 2.
+
+For the ENDPOINT-FIT entry below, you can lift directly from the
+checklist's `selected_endpoint` + `selection_justification` Agent 4
+already produced — no need to re-derive when those are populated.
+
+**Required sections** (if ANY is TODO/empty, do ONE more targeted search or fetch
+to fill the gap before proceeding):
 
 - [x] api_spec.txt exists on disk (you called write_file)
 - [x] BASE_URL is a concrete URL (not TODO)
 - [x] At least one ENDPOINT has METHOD, path, request format, and Content-Type
-- [x] AUTH_HEADER is quoted from docs (not TODO)
+- [x] AUTH_HEADER is quoted from docs (not TODO) — exact header format
+- [x] REQUEST_FORMAT: field names + which Python requests param (json=/data=/files=/params=)
+- [x] RESPONSE_FORMAT: the shape of a successful response (field list, not
+      "varies"). You can't handle a response you've never seen described.
+- [x] ERRORS: ≥2 common error classes documented — auth (401/403), rate-limit
+      (429), or provider-specific error codes. What triggers them, what the
+      error body looks like. Build-phase harness debug cycles depend on
+      recognizing these; not having them means live-test failures are opaque.
+- [x] WORKING_EXAMPLE: ≥1 COMPLETE working request example **in ANY
+      language** — Python, curl, JavaScript/Node, Go, Ruby, raw HTTP, or a
+      gRPC sample. The shape requirement is "endpoint URL + headers + body
+      + auth, complete enough to translate to Python `requests` mechanically."
+      Acceptable forms (in preference order):
+        1. Python snippet (no translation needed)
+        2. curl command (1-to-1 with `requests`: `-H` → `headers=`,
+           `-d` → `data=` or `json=`, `-F` → `files=`, `-X` → `method=`)
+        3. JavaScript fetch / Node SDK example
+        4. Go / Ruby / Java / C# SDK example
+        5. Raw HTTP request from API reference (Swagger "Try it" output)
+      Why "any language": many great APIs don't have Python examples (curl-
+      only is common; JS-first is common for serverless). Forcing Python
+      makes the builder fabricate from training data when none exists,
+      which is worse than no example. As long as ONE complete request
+      shape is documented somewhere, the builder can translate. Missing
+      this entirely is the #1 cause of "I guessed the request shape wrong"
+      build failures. Docs usually have quickstart code in SOMETHING.
 - [x] INPUT_COMPATIBILITY for every input form your test cases will use is YES/NO (not TODO)
 - [x] ENDPOINT-FIT: you picked the RIGHT endpoint for this user's scope, not just
       any endpoint that compiles. Write a 2-3 line `<endpoint_fit>` block:
@@ -1017,9 +1854,19 @@ the same web_search twice wastes budget and buries the answer in duplicate conte
       - volume_fit: one sentence tying the endpoint to user's monthly_volume
         (LOW = atomic request, HIGH = batch/streaming if available)
 
+**Completeness rule:** if `ERRORS` or `WORKING_EXAMPLE` is empty/TODO after your
+first research turn, issue ONE targeted search/fetch for them in your next turn
+BEFORE writing api_spec.txt. Example queries:
+  - `web_search("site:{domain}/docs errors OR error-codes OR status-codes")`
+  - `web_search("site:{domain}/docs quickstart OR getting-started OR curl")`
+A spec without errors or examples will cost you 3-5 extra Phase 2 debug turns
+to recover; one extra research fetch here is cheaper. (Any language's quickstart
+counts — curl, JS, Python all work. See WORKING_EXAMPLE checklist entry above.)
+
 When the checklist passes, state your PLAN in 3 bullet lines, then move to Phase 2.
-**Remaining TODOs are FINE** — Phase 2's live tests provide cheaper, more
-informative feedback than another docs-reading turn.
+**TODOs on non-required fields are FINE** — Phase 2's live tests provide cheaper,
+more informative feedback than another docs-reading turn. But do NOT skip the
+required checklist above; missing those guarantees Phase 2 pain.
 
 ### Principle: live validation IS verification
 
@@ -1059,11 +1906,14 @@ is worth 10 introspection scripts.
 
 **SEQUENCE — follow in order, no detours:**
 
-1. **READ** api_spec.txt — locate PYTHON_EXAMPLES for your chosen endpoint
-2. **WRITE** harness.py — COPY the PYTHON_EXAMPLE pattern and adapt to the run()
-   contract. If no Python example exists, write from ENDPOINTS + AUTH_HEADER + request
-   format. Use `requests` or the provider SDK exactly as the docs show. Do NOT
-   second-guess method names from training memory — the spec is the truth.
+1. **READ** api_spec.txt — locate WORKING_EXAMPLE for your chosen endpoint
+2. **WRITE** harness.py — COPY the WORKING_EXAMPLE pattern and adapt to the run()
+   contract. If the example is not in Python (e.g., curl or JS), mechanically
+   translate it: `-H` → `headers=`, `-d` → `data=` or `json=`, `-F` → `files=`,
+   `-X` → `method=`, SDK `.post({...})` → `requests.post(..., json={...})`.
+   If no working example exists in ANY language, write from ENDPOINTS + AUTH_HEADER
+   + request format. Use `requests` or the provider SDK exactly as the docs show.
+   Do NOT second-guess method names from training memory — the spec is the truth.
 3. **WRITE** requirements.txt — list the pip deps (e.g., `requests`, `elevenlabs`)
 4. **RUN** `pip install -r requirements.txt`
 5. **RUN** `python smoke_test.py`
@@ -1083,6 +1933,37 @@ web_fetch (not web_search) of a specific doc URL, patch api_spec.txt with the
 result, then write harness.py. Never loop: no fetch → inspect → fetch → inspect
 cycle. At most one gap-fill fetch, then commit to code.
 
+**HARNESS.PY HEADER — emit Phase D's spec as a comment block at the top.**
+
+Your harness.py MUST start with a structured `=== API SPEC (Phase D) ===`
+comment block summarizing the contract you're implementing. This is your
+debugging artifact: when a real run fails, the maintainer opens harness.py
+and sees exactly which build-readiness fields were `confirmed` vs
+`inferred` vs `unknown`. The block has a fixed shape (everyone agreeing
+on the shape is what makes it scannable):
+
+```python
+# === API SPEC (Phase D) ===
+# Endpoint:        <selected_endpoint from BuildReadinessChecklist or your spec>
+# Auth:            <method + header — confirmed/inferred/unknown>
+# Request shape:   <JSON skeleton or "see api_spec.txt">
+# Response parse:  <path to primary output, e.g., response['choices'][0]['message']['content']>
+# Error handling:  <which codes retry, which fail, retry budget>
+# Async pattern:   <sync | polling (interval) | streaming (format) | webhook>
+# Side-effect mode: <read_only | sandbox | dry_run | live>
+# Residual unknowns: <list any Phase B-named fields that ended Phase C as 'inferred'
+#                     or 'unknown' — what assumptions could break>
+# === END SPEC ===
+```
+
+Write the spec as the FIRST thing in harness.py (above imports is fine
+— Python ignores leading comments). Lift values from the
+BuildReadinessChecklist (in your initial message above) when populated;
+fall back to your api_spec.txt entries otherwise. The "Residual unknowns"
+line is the most important — it's where the maintainer learns "this
+test passed but the harness was guessing about X." Empty residual list
+is fine and common.
+
 **NEVER write API calls from training data memory** — always from api_spec.txt.
 
 **PRESERVE API ERROR RESPONSES.** When the API returns an error, ALWAYS include the
@@ -1096,15 +1977,16 @@ if resp.status_code != 200:
 NEVER use `response.raise_for_status()` — it discards the response body and gives you
 only "400 Bad Request" with no detail. Always read `response.text` for the real reason.
 
-1. **READ** api_spec.txt — find PYTHON_EXAMPLES, ENDPOINTS, AUTH_HEADER
-2. **WRITE** harness.py — COPY patterns from PYTHON_EXAMPLES, adapt to run() interface
+1. **READ** api_spec.txt — find WORKING_EXAMPLE, ENDPOINTS, AUTH_HEADER
+2. **WRITE** harness.py — COPY patterns from WORKING_EXAMPLE (translate curl/JS →
+   Python if needed; see translation cheat-sheet above), adapt to run() interface
 3. **WRITE** requirements.txt with pip dependencies
 4. **RUN** `pip install -r requirements.txt`
 
 <verify_against_docs>
 BEFORE running any tests, VERIFY your code matches the docs:
 1. read_file("harness.py") — look at what you actually wrote
-2. read_file("api_spec.txt") — check AUTH_HEADER, ENDPOINTS, PYTHON_EXAMPLES
+2. read_file("api_spec.txt") — check AUTH_HEADER, ENDPOINTS, WORKING_EXAMPLE
 3. Compare line by line: Does your auth header EXACTLY match? Does your endpoint URL
    match? Does your request format (json= vs data= vs files=) match?
 4. If anything doesn't match, patch_file to fix BEFORE running the smoke test.
@@ -1485,12 +2367,57 @@ PATCH_FILE_TOOL = {
 ASK_RESEARCH_TOOL = {
     "name": "ask_research",
     "description": (
-        "Ask a research sub-agent to verify or find specific API information. "
-        "Spawns a fresh web search in a separate context — cheap and fast (~$0.05). "
-        "Use when: (1) same error occurred twice and you need to verify your assumptions "
-        "about the endpoint URL, auth format, or API version, (2) you suspect the company "
-        "migrated to a new API platform, (3) read_file(api_spec.txt) doesn't answer your "
-        "specific question. Be specific — ask ONE thing at a time."
+        "Your peer integration engineer FOR PHASE 2+ DEBUGGING ONLY. Pass "
+        "a specific question about an API you're already integrating; a "
+        "research sub-agent searches the web and returns a structured "
+        "answer.\n\n"
+        "⚠️ PHASE-1 BLOCKED: this tool REFUSES to run until api_spec.txt "
+        "exists in your sandbox. Initial API discovery is YOUR job — do "
+        "it directly with web_search + web_fetch so you build your own "
+        "mental model of the API. The sub-agent inherits YOUR context "
+        "(api_spec excerpt, harness code, recent errors) to give targeted "
+        "answers; before the spec exists there's nothing to inherit, so "
+        "calling ask_research would mean the sub-agent does generic "
+        "research that YOU should have done + internalized yourself.\n\n"
+        "Phase 1 pattern (do this FIRST with web_search/web_fetch):\n"
+        "  1. Find the provider's docs (site-scoped search + targeted fetch)\n"
+        "  2. Extract ENDPOINTS / AUTH / REQUEST_FORMAT / RESPONSE_FORMAT / "
+        "ERRORS / SAMPLE_CODE\n"
+        "  3. Write api_spec.txt capturing that structure\n"
+        "Phase 2+ pattern (NOW ask_research is unlocked):\n"
+        "  4. Build harness.py from api_spec.txt\n"
+        "  5. Hit an error your spec can't explain → call ask_research "
+        "with the specific gap\n\n"
+        "AUTO-INHERITED CONTEXT (Phase 2+): api_spec excerpt, recent "
+        "error output, harness code snippet, and provider details are "
+        "automatically attached. You do NOT need to restate any of that "
+        "in your question. Just ask the specific thing you're uncertain "
+        "about.\n\n"
+        "TWO AUTOMATIC MODES:\n"
+        "  • Targeted mode (you name a specific flag/endpoint/error code): "
+        "the sub-agent does ONE precise search, returns the answer + source "
+        "URL, stops.\n"
+        "  • Exploratory mode (open-ended question, or thin context): the "
+        "sub-agent diversifies across search angles — official docs, "
+        "GitHub SDK issues, community forums, archived web — and "
+        "synthesizes findings. It will explicitly report what it didn't "
+        "find rather than fabricate.\n\n"
+        "WHEN TO USE IT IN PHASE 2+ (treat as a normal tool, not a last "
+        "resort):\n"
+        "  • You suspect a known API quirk behind an error (WebSocket "
+        "close codes, undocumented config flags, deprecated endpoints)\n"
+        "  • Docs might document a flag/config your api_spec doesn't cover\n"
+        "  • You'd Google it yourself in 30 seconds — call ask_research "
+        "instead (one call ~$0.15-0.25, cheaper than 2-3 probe scripts)\n"
+        "  • The same error surfaces twice and you want to verify "
+        "assumptions before another patch attempt\n\n"
+        "HONEST FAILURE: if the sub-agent says 'NOT FOUND — searched X, Y, "
+        "Z', TRUST IT. Do not re-call with a rephrased question hoping "
+        "for a different result. Switch to empirical probing or ask for a "
+        "different angle. Research and probing are complementary, not "
+        "substitutes.\n\n"
+        "Cost: ~$0.15-0.25 per call. Sub-agent uses Sonnet + 3 searches + "
+        "3 fetches."
     ),
     "input_schema": {
         "type": "object",
@@ -1499,9 +2426,15 @@ ASK_RESEARCH_TOOL = {
             "question": {
                 "type": "string",
                 "description": (
-                    "A specific question about the API you're integrating with. "
-                    "Example: 'What is the correct endpoint URL for Google Document AI?' "
-                    "or 'Does the API require multipart upload or JSON body?'"
+                    "The specific thing you're uncertain about. Focus on "
+                    "the UNKNOWN, not the context (context is auto-attached). "
+                    "Good: 'What enables override_permissions at agent "
+                    "creation for ElevenLabs Conversational AI?' "
+                    "Good: 'Why does a ConvAI WebSocket close with code "
+                    "1008 immediately after sending first_message override?' "
+                    "Avoid: 'What is the ElevenLabs Conversational AI "
+                    "endpoint?' (already in your api_spec — don't re-ask "
+                    "known info)."
                 ),
             },
         },
@@ -1718,10 +2651,29 @@ def run(input_data):
 6. When the API returns text-only (no audio — rare but valid for voice
    APIs that can degrade to text), just omit BOTH audio keys. The plugin
    falls back to the text path.
-7. For multi-turn sessions, each turn's harness call returns ONE turn's
-   agent audio. The plugin handles session_state threading — you just
-   read `input_data.get("session_state", {})` and mutate it in-place for
-   continuity.
+7. For multi-turn sessions, the PLUGIN passes `session_state` from
+   turn N → turn N+1. **Nothing more.** THE HARNESS owns provider
+   continuity:
+     - On turn_index=0: open the WebSocket / get the conversation_id /
+       initialize whatever provider-side state your API uses.
+       **STORE the connection handle (or conversation_id, or message
+       history list) INSIDE `session_state`** — that dict is
+       mutated-in-place and survives to the next turn.
+     - On turn_index>0: **READ from session_state and REUSE.** Do NOT
+       open a fresh WebSocket / start a new conversation / drop the
+       message history. The agent depends on your stored state to
+       remember turn 0.
+
+   Skipping this causes the **"agent introduces itself every turn"**
+   bug — fresh provider session per harness call → agent has zero
+   memory of prior turns → every multi-turn test scores near zero
+   regardless of agent quality.
+
+   The plugin CANNOT do this for you. It doesn't know whether your
+   provider needs a WebSocket handle, a conversation_id header, an
+   accumulated messages list, or some custom session token. Only the
+   HARNESS knows. Read your API docs for the session lifecycle and
+   thread it explicitly.
 
 ### What the plugin does with each shape (so you can verify your harness output)
 
@@ -1736,29 +2688,353 @@ you violated this contract. Re-read the shapes above.
 """
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# STREAMING RESPONSE COLLECTION CONTRACT (NEW-AM v4)
+# ─────────────────────────────────────────────────────────────────────────────
+# Real-run trace 4427591c (2026-04-25) caught a prompt-under-specification
+# bug: two builds of the SAME ElevenLabs ConvAI provider produced TWO
+# DIFFERENT response-collection architectures (60% vs 20% pass rate)
+# because the prompt teaches "what to return" + "session_state for multi-turn"
+# but says NOTHING about HOW to wait for streaming responses. The LLM
+# coin-flips between good and bad patterns based on training-data salience.
+#
+# This contract teaches the CORRECT abstraction (error-timeout +
+# reset-on-event) for any streaming-response harness — voice WebSocket,
+# SSE chat, async polling, etc. NOT injected for single-call REST
+# harnesses (OCR/vision/inbound webhook/outbound), so they see ZERO
+# prompt overhead and ZERO behavior change.
+#
+# Anti-bandaid checks (regression-tested):
+#   * Principle-based content (no provider names like "ElevenLabs", no
+#     specific timeout numbers like "1.5s")
+#   * Schema-driven trigger (input_type/output_type indicates streaming)
+#   * Conditional injection mirrors __OS_SPECIFIC_RULES__ +
+#     __MODALITY_CONTRACT__ patterns (no new infrastructure)
+_STREAMING_RESPONSE_CONTRACT = """\
+## Streaming / multi-event response collection — REQUIRED for streaming APIs
+
+Your harness collects a response that arrives OVER TIME (WebSocket events,
+SSE chunks, polled job results, audio stream chunks). Use the
+**error-timeout + reset-on-event** pattern. DO NOT use "silence threshold"
+patterns that try to predict completion from short gaps in the stream —
+they confuse INFERENCE LATENCY with completion.
+
+### Why "silence threshold" is wrong
+
+When the harness sends user input and starts collecting, the server is doing:
+  1. Process input (transcription, validation, routing)
+  2. Run inference (LLM thinking, code generation, search, etc.)
+  3. Generate output (TTS, formatting, encoding)
+  4. Stream output chunks back
+
+The first response chunk can take 1-15 seconds depending on the API. A
+1-2 second silence threshold confuses "still inferring" with "done"
+and exits BEFORE the first chunk arrives. The next collection turn then
+receives the delayed chunk along with new input → garbled state, wrong
+answers, tests fail randomly.
+
+### Correct pattern (general for any streaming response)
+
+```python
+def collect_response(connection, error_timeout_s):
+    \"\"\"Collect events until completion signal OR extended idle.
+
+    Reset the timeout on EVERY received event/message. Only exit when
+    no events arrive for `error_timeout_s` (= done OR errored) OR when
+    an explicit completion event lands.
+    \"\"\"
+    last_event_at = time.time()
+    collected = []
+    while True:
+        idle = time.time() - last_event_at
+        remaining = error_timeout_s - idle
+        if remaining <= 0:
+            break  # extended idle = agent done OR connection failed
+        try:
+            event = recv_with_remaining_budget(connection, remaining)
+        except Timeout:
+            break
+        if is_explicit_completion_event(event):  # provider-specific marker
+            process(event)
+            break
+        process(event)
+        last_event_at = time.time()  # ← KEY: reset on every event
+    return collected
+```
+
+### Sizing `error_timeout_s` (apply judgment based on the API)
+
+  - LLM-backed providers (chat, voice, code-gen): **8-15 seconds.** First
+    chunk wait can be several seconds (LLM inference + provider TTS/post-
+    processing). Don't go below 8.
+  - Async polling APIs (job queues, batch processing): **max_polls ×
+    poll_interval.** Don't exit after one empty poll — the job may not
+    have started yet.
+  - Real-time event streams (audio chunks, SSE token stream): **3-5
+    seconds between events.** First-chunk wait may be longer; once
+    streaming starts, gaps are typically short.
+
+### Listen for explicit completion signals when the API provides them
+
+Always more reliable than time-based heuristics:
+  - WebSocket: `response.done`, `agent_response_finished`, `[DONE]`
+  - SSE: `data: [DONE]` token, custom finish event types
+  - Polling: `status="completed"` / `"failed"` / `"cancelled"`
+
+When the API has a known completion signal, watch for it and break
+on receipt — don't rely solely on idle timeout.
+
+### Background-thread pattern (preferred for WebSocket where blocking
+recv would block other ops)
+
+For WebSocket harnesses where you might need to send pings/keepalives
+in parallel with receiving, run recv in a background daemon thread
+that pushes to a queue. The main loop drains the queue with the same
+error-timeout + reset-on-event semantics. This is the pattern that
+worked in trace 8ded6706's harness — separates audio pacing from
+response collection cleanly.
+
+### Trailing-input padding (provider-specific, watch for it)
+
+Some providers' VAD requires a small amount of trailing silence on the
+input stream to detect end-of-speech (otherwise they keep waiting for
+more input and never start responding). When your provider docs mention
+VAD or "voice activity detection", append ~1-1.5s of silence to your
+audio before flipping to receive mode.
+"""
+
+
 def _modality_specific_contract(test_cases: list[Any] | None) -> str:
-    """Return the modality-specific harness contract for this candidate's
-    tests. Empty string when no modality needs a custom contract.
+    """Return the modality-specific harness contracts for this candidate's
+    tests. **Composed content** — multiple feature-specific contracts
+    merge into a single string in the order they apply.
 
-    The input/output types we treat as voice signals — any of these in
-    the candidate's test cases injects the voice contract:
-      * input_type:  ``conversation`` / ``voice_conversation`` / ``voice_turn`` / ``audio_content``
-      * output_type: ``voice_conversation`` / ``voice_turn`` / ``audio_content``
+    NEW-AM v4: this is the consolidation point for ALL conditional
+    contract injection. Mirrors the AD-002 skills/playbook architecture
+    direction (one loader returning composed per-modality content).
+    Adding a new feature contract = adding a new helper that returns
+    a string and appending it here. No new placeholders, no new
+    renderer wiring.
 
-    Other capabilities (code_gen, vision, ocr, translation) currently
-    have no custom contract — they fall through to the general harness
-    rules. When a future modality needs its own contract, add another
-    branch here; when the contract set grows past ~6, migrate to per-
-    modality files in a skills/ directory (see CLAUDE.md AD-002).
+    Today's feature contracts:
+      * ``_voice_harness_contract_for(test_cases)`` — voice return
+        shape + session_state continuity (voice/audio modalities only)
+      * ``_streaming_response_contract_for(test_cases)`` — error-
+        timeout + reset-on-event collection pattern (broader: voice +
+        multi-turn chat + code-gen streaming + any streaming response)
+
+    When a future feature lands (e.g., async_polling pattern, batch_
+    file submission, OAuth refresh-token loop, multi-modal output
+    fanout), add another helper + append it below. When the helper
+    count crosses ~8 OR independent ownership becomes valuable,
+    migrate the helpers to per-skill markdown files in skills/
+    and read them here. Per AD-002 revisit triggers.
+
+    Empty string when no feature contract applies (OCR / vision /
+    single-call REST builds see zero injection).
     """
     if not test_cases:
         return ""
+    parts: list[str] = []
+    voice = _voice_harness_contract_for(test_cases)
+    if voice:
+        parts.append(voice)
+    streaming = _streaming_response_contract_for(test_cases)
+    if streaming:
+        parts.append(streaming)
+    # NEW-AM v6: live-test contract — voice/conversation/code modalities
+    # need rigorous live testing (not the OCR-style file-based pattern).
+    # Real-run trace a4860e94 caught OpenAI's harness "passing" live test
+    # with audio_url=None then failing 0/5 in production. Conditional —
+    # OCR/vision/REST builds get empty injection.
+    live_test = _live_test_contract_for(test_cases)
+    if live_test:
+        parts.append(live_test)
+    if not parts:
+        return ""
+    return "\n\n".join(parts)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LIVE-TEST CONTRACT (NEW-AM v6 — Phase 3 modality-specific live testing)
+# ─────────────────────────────────────────────────────────────────────────────
+# Real-run trace a4860e94 (2026-04-25) caught a Phase 3 prompt gap: the
+# template teaches OCR-style live testing (file-based, single-call) and
+# leaves the builder to improvise for voice/conversation modalities. Two
+# harnesses for the SAME prompt produced wildly different live_tests:
+#
+#   ElevenLabs live_test (162 lines, comprehensive):
+#     * Synthesized real caller audio via TTS
+#     * Drove 2-turn conversation through harness.run()
+#     * Verified full WebSocket + agent-creation + multi-turn flow
+#     → Real tests: 4/5 pass (the live test caught real bugs)
+#
+#   OpenAI live_test (28 lines, trivial):
+#     * Called harness.run({"audio_url": None, "turn_index": 0})
+#     * Asserted: success=True AND audio_bytes_len > 0
+#     → "Test passed" without ever exercising the audio code path
+#     → Real tests: 0/5 pass (agent silent every turn)
+#
+# The audio code path was NEVER VERIFIED for OpenAI. The harness was
+# declared "live-test passed" but the production input shape was
+# never even sent to the API.
+#
+# Conditional injection — fires ONLY for streaming/multi-call modalities
+# that need rigorous live testing. Single-call REST harnesses (OCR /
+# vision / inbound webhook / outbound) keep the existing OCR-style live
+# test guidance — no contamination.
+_LIVE_TEST_CONTRACT_VOICE = """\
+## Voice / multi-turn live-test requirements (REQUIRED — Phase 3)
+
+Your harness handles real-time voice or multi-turn conversation. The
+plugin's `drive_conversation` will call `harness.run()` MULTIPLE TIMES
+per test with this payload shape:
+
+    {
+        "audio_url": "<URL of caller's TTS-synthesized audio>",
+        "turn_index": int,            # 0, 1, 2, ...
+        "session_state": <mutable dict>,  # threading state across turns
+        "input_context": {"instructions": "<system prompt>"}
+    }
+
+Your live_test.py MUST exercise THIS exact production flow before
+HARNESS_COMPLETE. A live test that skips the audio path (e.g.,
+`audio_url=None`) only verifies the trivial "agent greets without input"
+case. Production tests with real caller audio will fail silently with
+ZERO agent response — and you won't catch it.
+
+### Required live_test.py shape (voice/conversation):
+
+```python
+\"\"\"Live test: drive a 2-turn conversation through the production payload shape.\"\"\"
+import os, json, requests, harness
+
+# 1) Synthesize real caller audio (use any available TTS service)
+def synth_caller_audio(text):
+    # ... return raw audio bytes (mp3 / wav / pcm16)
+    ...
+
+# 2) Serve audio at a fetchable URL (local HTTP server OR upload to a temp store)
+turn0_audio_url = serve_audio(synth_caller_audio("Hi, I have a problem with X"))
+turn1_audio_url = serve_audio(synth_caller_audio("My name is Test User, phone 555-1234"))
+
+# 3) Drive 2 turns with the EXACT production payload shape
+session_state = {}
+instructions = "You are a helpful agent. Greet the caller, gather their name + number."
+
+# Turn 0 — fresh session (turn_index=0)
+result_t0 = harness.run({
+    "audio_url": turn0_audio_url,
+    "turn_index": 0,
+    "session_state": session_state,
+    "input_context": {"instructions": instructions},
+})
+
+# Turn 1 — must reuse session_state (multi-turn continuity)
+result_t1 = harness.run({
+    "audio_url": turn1_audio_url,
+    "turn_index": 1,
+    "session_state": session_state,  # same dict — MUST persist agent state
+    "input_context": {"instructions": instructions},
+})
+
+# 4) ASSERTIONS (live test PASSES = ALL true):
+assert result_t0["success"] is True, f"Turn 0 failed: {result_t0.get('error')}"
+assert result_t1["success"] is True, f"Turn 1 failed: {result_t1.get('error')}"
+
+# Audio in BOTH turns — agent must respond, not just succeed
+audio_t0 = result_t0.get("raw_response", {}).get("audio_bytes", b"")
+audio_t1 = result_t1.get("raw_response", {}).get("audio_bytes", b"")
+assert len(audio_t0) > 1000, "Turn 0 produced no agent audio"
+assert len(audio_t1) > 1000, "Turn 1 produced no agent audio"
+
+# Continuity check — turn 1's transcript should NOT restart with greeting
+# (if agent says 'Thanks for calling' on turn 1, it's treating each turn
+#  as a new conversation — session_state isn't carrying agent context)
+transcript_t1 = (result_t0.get("output", "") + " " +
+                  result_t1.get("output", "")).lower()
+# (Soft check — log if greeting repeats; some providers legitimately
+# re-greet, but flag it for review)
+
+print(json.dumps({"turn0_audio_bytes": len(audio_t0),
+                   "turn1_audio_bytes": len(audio_t1),
+                   "turn0_transcript": result_t0.get("output", "")[:200],
+                   "turn1_transcript": result_t1.get("output", "")[:200],
+                   "success": True}, indent=2))
+```
+
+### Why this matters
+
+The production flow is multi-turn audio. A live test that doesn't send
+audio is meaningless for proving the harness works. Real-run trace
+a4860e94 OpenAI: live test passed (audio_url=None path), real tests
+got 0/5 — agent silent on every turn because the audio path was broken
+but never tested.
+
+### What HARNESS_COMPLETE requires for voice/conversation:
+
+[Y] smoke_test.py passes (structural validation — same as before)
+[Y] live_test.py drives 2 turns with REAL caller audio via the
+    production payload shape `{audio_url, turn_index, session_state,
+    input_context}`
+[Y] BOTH turns return success=True
+[Y] BOTH turns produce non-empty agent audio (> 1000 bytes)
+[Y] session_state carries agent provider state across turns (verified
+    by turn 1 not re-initializing the WebSocket / not re-creating
+    the agent_id / not losing conversation context)
+
+Skipping any of these → harness will silently fail in production tests.
+"""
+
+
+def _live_test_contract_for(test_cases: list[Any]) -> str:
+    """Return the voice/conversation live-test contract when test cases
+    include multi-turn streaming response shapes; empty string for
+    single-call REST harnesses (which keep the existing OCR-style Phase 3
+    live-test guidance).
+
+    Trigger: same shapes as the streaming-response-collection contract
+    (voice_conversation, voice_turn, audio_content, conversation, code).
+    These all require the production-payload-shape live test pattern.
+
+    Non-streaming shapes get NO injection — OCR/vision/REST harnesses
+    keep the existing single-call live-test guidance (test each file
+    type, success=True + output_len>100). Zero contamination.
+    """
+    if not test_cases:
+        return ""
+    streaming_shapes = {
+        "voice_conversation", "voice_turn", "audio_content",
+        "conversation",
+        "code",
+    }
+    for tc in test_cases:
+        input_type = (
+            getattr(tc, "input_type", None)
+            or (tc.get("input_type") if isinstance(tc, dict) else None)
+        )
+        output_type = (
+            getattr(tc, "output_type", None)
+            or (tc.get("output_type") if isinstance(tc, dict) else None)
+        )
+        if input_type in streaming_shapes or output_type in streaming_shapes:
+            return _LIVE_TEST_CONTRACT_VOICE
+    return ""
+
+
+def _voice_harness_contract_for(test_cases: list[Any]) -> str:
+    """Return the voice harness contract when test cases include voice
+    modalities; empty string otherwise. Helper consumed by the unified
+    `_modality_specific_contract` dispatcher.
+
+    Voice signals (any in candidate's test cases injects):
+      * input_type:  ``conversation`` / ``voice_conversation`` / ``voice_turn`` / ``audio_content``
+      * output_type: ``voice_conversation`` / ``voice_turn`` / ``audio_content``
+    """
     voice_modalities = {
         "conversation", "voice_conversation", "voice_turn", "audio_content",
     }
     for tc in test_cases:
-        # TestCase may be Pydantic model or dict — handle both for
-        # flexibility (tests call this with dicts; production with models).
         input_type = (
             getattr(tc, "input_type", None)
             or (tc.get("input_type") if isinstance(tc, dict) else None)
@@ -1772,6 +3048,46 @@ def _modality_specific_contract(test_cases: list[Any] | None) -> str:
     return ""
 
 
+def _streaming_response_contract_for(test_cases: list[Any]) -> str:
+    """Return the streaming-response collection contract when test cases
+    declare streaming-shape input/output types; empty string otherwise.
+    Helper consumed by the unified `_modality_specific_contract`
+    dispatcher.
+
+    Streaming-response shapes (need the rule):
+      * voice_conversation, voice_turn, audio_content
+      * conversation (multi-turn chat — events stream)
+      * code (code-gen often streams)
+    """
+    streaming_shapes = {
+        "voice_conversation", "voice_turn", "audio_content",
+        "conversation",
+        "code",
+    }
+    for tc in test_cases:
+        input_type = (
+            getattr(tc, "input_type", None)
+            or (tc.get("input_type") if isinstance(tc, dict) else None)
+        )
+        output_type = (
+            getattr(tc, "output_type", None)
+            or (tc.get("output_type") if isinstance(tc, dict) else None)
+        )
+        if input_type in streaming_shapes or output_type in streaming_shapes:
+            return _STREAMING_RESPONSE_CONTRACT
+    return ""
+
+
+def _streaming_response_contract(test_cases: list[Any] | None) -> str:
+    """Back-compat shim — public name retained for tests + external
+    callers that grep for it. The dispatch lives in
+    `_streaming_response_contract_for`; this just forwards.
+    """
+    if not test_cases:
+        return ""
+    return _streaming_response_contract_for(test_cases)
+
+
 def _render_builder_prompt(
     prompt_template: str,
     test_cases: list[Any] | None = None,
@@ -1780,9 +3096,20 @@ def _render_builder_prompt(
     based on host + candidate test cases.
 
     Thin wrapper over ``_render_builder_prompt_for_os`` that ALSO injects
-    the right modality-specific harness contract. Voice tests get the
-    voice harness contract; other modalities get an empty string so the
-    prompt stays lean.
+    the unified modality-specific contract — ONE placeholder, ONE
+    renderer, COMPOSED content from feature-specific helpers
+    (`_voice_harness_contract_for`, `_streaming_response_contract_for`).
+
+    NEW-AM v4 consolidation: voice return-shape contract + streaming-
+    response-collection contract both flow through the unified
+    `_modality_specific_contract` dispatcher. Single placeholder keeps
+    the architecture forward-compatible with AD-002's skills/playbook
+    direction (one loader returning composed per-modality content).
+
+    Single-call REST harnesses (OCR / vision / inbound webhook /
+    outbound) get empty injection — the dispatcher returns "" when no
+    feature contract applies. Zero prompt overhead, zero behavior
+    change to non-streaming builds.
     """
     rendered = _render_builder_prompt_for_os(prompt_template)
     contract = _modality_specific_contract(test_cases)
@@ -2377,83 +3704,191 @@ def _extract_text_from_response(response: anthropic.types.Message) -> str:
     return "\n\n".join(text_parts)
 
 
+def _detect_patch_fragmentation_pattern(
+    conversation_log: list[dict],
+    already_nudged_files: set[str],
+    *,
+    output_token_ceiling: int = 600,
+) -> str | None:
+    """
+    Gate C — detect small-serial-patch fragmentation on the same file.
+
+    Returns the filename when the last 2 real turns were:
+      - Both small (each turn's ``output_tokens`` < ``output_token_ceiling``)
+      - Both had EXACTLY ONE ``patch_file`` tool_use
+      - Both targeted the SAME ``filename``
+      - That filename is NOT already in ``already_nudged_files``
+
+    Returns ``None`` when the pattern doesn't hold, or when the file was
+    already nudged this build (we fire at most once per file per build so
+    the builder never sees the same nudge twice on the same file).
+
+    Why this signal is safe:
+      - ``patch_file`` is the builder's PRIMARY code-fix tool — legitimate
+        use is frequent. The serial-same-file-small pattern specifically
+        surfaces cases where the builder is nibbling fix-by-fix when a
+        wider edit batch would land in one turn.
+      - 600 output tokens ≈ a small targeted patch (single string replace
+        + a line of rationale). A full rewrite-style patch blows past
+        600 easily and won't false-positive.
+      - Single tool_use per turn filters out the already-healthy case of
+        "two parallel patches to harness.py in one turn".
+
+    Non-real entries (``"save-docs-*"`` / ``"verify-*"`` bookkeeping rows
+    appended after web_fetch saves + verification-gate retries) use
+    string turn IDs and lack ``output_tokens`` — we skip them when
+    walking back, so a save-docs entry between two small patches still
+    triggers correctly. This matters: without the skip, the gate would
+    silently never fire because real-turn and bookkeeping-turn rows are
+    interleaved in practice.
+    """
+    # Walk back through the log picking REAL turns only (those with a
+    # numeric ``turn`` key and an ``output_tokens`` field). We only need
+    # the last two.
+    real_turns: list[dict] = []
+    for entry in reversed(conversation_log):
+        if isinstance(entry.get("turn"), int) and "output_tokens" in entry:
+            real_turns.append(entry)
+            if len(real_turns) >= 2:
+                break
+    if len(real_turns) < 2:
+        return None
+    # ``real_turns`` is in reverse order after the walk — the current turn
+    # is ``real_turns[0]``, the prior turn is ``real_turns[1]``.
+    curr, prev = real_turns[0], real_turns[1]
+
+    # Both turns must be small — guards against rewrite-style patches that
+    # legitimately need their own turn to review after landing.
+    sentinel = 10**9
+    if (
+        int(curr.get("output_tokens", sentinel)) >= output_token_ceiling
+        or int(prev.get("output_tokens", sentinel)) >= output_token_ceiling
+    ):
+        return None
+
+    def _single_patch_target(turn_entry: dict) -> str | None:
+        """Return the patched filename when this turn has EXACTLY one
+        ``patch_file`` tool_use, else None. Multi-tool turns (e.g.,
+        parallel patches, or patch + run_code) and zero-patch turns
+        both return None — we only want to flag isolated-small patches."""
+        tool_calls = turn_entry.get("tool_calls", []) or []
+        patches = [
+            tc for tc in tool_calls
+            if isinstance(tc, dict)
+            and tc.get("tool") == "patch_file"
+            and isinstance(tc.get("input"), dict)
+        ]
+        if len(patches) != 1:
+            return None
+        # ``tool_calls`` as a whole should be just this one patch —
+        # allow advisor telemetry rows but disallow mixed code actions
+        # (run_code + patch_file signals a genuine iterate-and-verify
+        # cycle, not fragmentation).
+        non_advisor_tools = [
+            tc for tc in tool_calls
+            if isinstance(tc, dict) and tc.get("tool") not in ("advisor",)
+        ]
+        if len(non_advisor_tools) != 1:
+            return None
+        filename = patches[0]["input"].get("filename", "")
+        return filename or None
+
+    curr_file = _single_patch_target(curr)
+    prev_file = _single_patch_target(prev)
+    if curr_file is None or prev_file is None:
+        return None
+    if curr_file != prev_file:
+        return None
+    if curr_file in already_nudged_files:
+        return None
+    return curr_file
+
+
 def _extract_and_save_web_content(
     response: anthropic.types.Message,
     sandbox_dir: Path,
     existing_count: int = 0,
 ) -> list[str]:
+    """Back-compat shim over :func:`puzzleeval.web_doc_cache.save_web_fetches_to_sandbox`.
+
+    The original implementation lived inline in this module. It was
+    lifted into ``puzzleeval/web_doc_cache.py`` so Agent 4 can use the
+    same logic to prefetch docs into the sandbox before Agent 5 builds.
+    Keeping this shim avoids touching the Agent 5 call site at line
+    ~3991, which is deep inside the builder-loop turn handler.
     """
-    Extract page text from WebFetchToolResultBlock in the API response.
-    Save each fetched page to sandbox_dir/fetched_docs_{n}.txt.
-    Returns list of saved filenames.
-
-    The actual page text is at:
-      block.content.content.source.data  (PlainTextSource.data)
-
-    This is the same text Claude sees in context. By saving it to a file,
-    we can drop it from conversation history and let Claude read_file()
-    it on demand — paying for it once instead of every turn.
-    """
-    saved_files = []
-    fetch_count = existing_count
-
-    for block in response.content:
-        block_type = getattr(block, "type", "")
-        if block_type == "web_fetch_tool_result":
-            try:
-                # Navigate: WebFetchToolResultBlock → WebFetchBlock → DocumentBlock → PlainTextSource
-                fetch_block = block.content  # WebFetchBlock or WebFetchToolResultErrorBlock
-                if hasattr(fetch_block, "content") and hasattr(fetch_block.content, "source"):
-                    page_text = fetch_block.content.source.data
-                    url = getattr(fetch_block, "url", "unknown")
-                    filename = f"fetched_docs_{fetch_count}.txt"
-                    filepath = sandbox_dir / filename
-                    header = f"# Fetched from: {url}\n# Saved for reference during build phase\n\n"
-                    # Cap at 50K chars to prevent huge files
-                    filepath.write_text(header + page_text[:50000], encoding="utf-8")
-                    saved_files.append(filename)
-                    fetch_count += 1
-            except (AttributeError, OSError):
-                pass  # Non-critical — if extraction fails, web content stays in context as usual
-        elif block_type == "web_search_tool_result":
-            # Also save search result content — contains useful snippets with
-            # API endpoints, code examples, and SDK install instructions
-            try:
-                search_block = block.content  # WebSearchBlock
-                if hasattr(search_block, "content") and search_block.content:
-                    # Extract text from search result entries
-                    snippets = []
-                    for entry in search_block.content:
-                        if hasattr(entry, "title") and hasattr(entry, "url"):
-                            snippets.append(f"## {entry.title}\nURL: {entry.url}")
-                        if hasattr(entry, "page_snippet"):
-                            snippets.append(entry.page_snippet)
-                        elif hasattr(entry, "text"):
-                            snippets.append(entry.text)
-                    if snippets:
-                        filename = f"fetched_docs_{fetch_count}.txt"
-                        filepath = sandbox_dir / filename
-                        header = "# Search results — saved for reference during build phase\n\n"
-                        filepath.write_text(header + "\n\n---\n\n".join(snippets)[:30000], encoding="utf-8")
-                        saved_files.append(filename)
-                        fetch_count += 1
-            except (AttributeError, OSError, TypeError):
-                pass  # Non-critical
-
-    return saved_files
+    from puzzleeval.web_doc_cache import save_web_fetches_to_sandbox
+    return save_web_fetches_to_sandbox(response, sandbox_dir, existing_count=existing_count)
 
 
 
 TARGETED_RESEARCH_SYSTEM = (
-    "You are an API documentation researcher helping a developer debug an integration. "
-    "Search the web for the answer and report your findings concisely.\n\n"
-    "Rules:\n"
-    "1. Prioritize official documentation (docs.*, developers.*, api.*) over blog posts and tutorials\n"
-    "2. If you find conflicting information, prefer the most recent source (2025-2026)\n"
-    "3. If the company has rebranded or migrated their API to a new domain, report BOTH "
-    "the old and new endpoints so the developer can switch\n"
-    "4. Include exact URLs, endpoint paths, auth header formats, and code examples\n"
-    "5. If you cannot find the answer in official docs, say so clearly — do not guess"
+    "You are a peer integration engineer helping a builder agent debug a "
+    "specific API. You've been handed FULL CONTEXT already: the provider "
+    "name, docs URL, auth method, what the builder knows (api_spec.txt "
+    "excerpt), what they've tried (recent error output, harness code), "
+    "and the specific question they need answered.\n\n"
+    "DO NOT re-derive what's already in the context. Don't restate the "
+    "endpoint base URL or auth method — the builder already has those. "
+    "Your job is to find what's MISSING, WRONG, or NON-OBVIOUS.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "ROUTE BY REGIME — self-classify from the context you were given:\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "REGIME A — TARGETED (question names a specific thing):\n"
+    "  Signals: question mentions a specific flag, endpoint, error code, "
+    "config parameter, or HTTP status. Context has a rich api_spec with "
+    "clear base URL + auth.\n"
+    "  Strategy: ONE precise search — `{provider} {specific_feature}` — "
+    "fetch the most authoritative result (official docs preferred), "
+    "return the answer + source URL. Stop. Do NOT burn remaining budget.\n"
+    "  Example: 'What enables override_permissions for ElevenLabs "
+    "Conversational AI agent?' → one search → fetch their agent-config "
+    "docs → cite the exact flag + docs URL → done.\n\n"
+    "REGIME B — EXPLORATORY (question is open-ended OR context is thin):\n"
+    "  Signals: question asks WHY something fails without a clear "
+    "hypothesis, or api_spec excerpt is minimal, or the symptom could "
+    "have many causes (WebSocket close codes, silent failures, "
+    "intermittent issues).\n"
+    "  Strategy: DIVERSIFY across search angles — do NOT repeat the "
+    "same query. Spread budget across 3-4 DIFFERENT sources:\n"
+    "    1. Official docs: `{provider} {feature}`\n"
+    "    2. GitHub SDK issues: `site:github.com {provider} {symptom}`\n"
+    "    3. Community (StackOverflow / Reddit / forum): "
+    "`{provider} {error_pattern} site:stackoverflow.com`\n"
+    "    4. Archived docs (for deprecated endpoints / migrations): "
+    "`{provider} {feature} site:web.archive.org`\n"
+    "  Fetch 1-2 most promising results across different sources. "
+    "Synthesize findings. If the provider migrated (new domain / v2 API), "
+    "report BOTH old and new endpoints explicitly.\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "HONEST OUTPUT FORMAT (both regimes):\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "If the answer was FOUND:\n"
+    "  `ANSWER: <direct actionable answer — specific flag, endpoint, "
+    "fix, code snippet if relevant>`\n"
+    "  `SOURCE: <URL — prefer official docs; cite multiple if cross-"
+    "referenced>`\n"
+    "  `CONFIDENCE: high|medium (based on source authority + specificity)`\n\n"
+    "If the answer was NOT found:\n"
+    "  `ANSWER: NOT FOUND — searched: <queries tried>; checked: "
+    "<sources checked>`\n"
+    "  `HYPOTHESIS: <best guess from context, explicitly labeled as "
+    "unverified>` (only if you have something grounded; otherwise omit)\n"
+    "  `RECOMMENDED NEXT STEP: <what the builder should try empirically, "
+    "e.g., 'probe the WebSocket close code and check the frame payload'>`\n"
+    "  `CONFIDENCE: low`\n\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    "CRITICAL RULES:\n"
+    "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
+    "1. NEVER fabricate a confident-sounding answer. Hallucinating an "
+    "endpoint URL or config flag is WORSE than saying 'NOT FOUND'. The "
+    "builder will waste turns acting on your wrong answer.\n"
+    "2. If you find conflicting info, prefer the most recent source "
+    "(2025-2026) and report the conflict.\n"
+    "3. If the company rebranded or migrated, report BOTH old and new "
+    "endpoints — builder may have credentials for only one.\n"
+    "4. Keep output concise — builder has limited context. 300-800 words "
+    "ideal. Front-load the ANSWER line; supporting detail below."
 )
 
 
@@ -2501,6 +3936,22 @@ def _run_targeted_research(
                 system=[{"type": "text", "text": _with_shared_preamble(TARGETED_RESEARCH_SYSTEM)}],
                 messages=messages,
                 tools=[
+                    # Budget tightened 3→2 (NEW-AM v5, post real-run trace
+                    # a4860e94 deep-dive). Real-run measurement: ElevenLabs
+                    # build's Sonnet T2 fired ask_research and the sub-
+                    # agent took 487 SECONDS (~8 min) — 60% of the entire
+                    # build's wall-clock — researching one auxiliary
+                    # endpoint shape. With max_uses=3 each (3 search + 3
+                    # fetch = 6 server tools), the sub-agent had headroom
+                    # to do exhaustive multi-angle exploration. For
+                    # 99% of build-time gap-fill questions, 2 search +
+                    # 2 fetch is sufficient (1 primary search/fetch +
+                    # 1 refinement). Capping forces shorter, focused
+                    # answers. Risk: less complete answers for genuinely
+                    # complex queries — accepted because the build agent
+                    # can ALWAYS call ask_research again with a refined
+                    # question if first answer didn't suffice (cheaper
+                    # than one massive 8-min call).
                     {"type": "web_search_20250305", "name": "web_search", "max_uses": 2},
                     {"type": "web_fetch_20250910", "name": "web_fetch", "max_uses": 2, "max_content_tokens": 10000},
                 ],
@@ -2553,12 +4004,24 @@ def _build_initial_message(
     input_data: Agent5Input,
     credentials: dict[str, str] | None = None,
     staged_test_cases: list[TestCase] | None = None,
+    sandbox_dir: Path | None = None,
+    api_spec_pre_rendered: bool = False,
 ) -> str:
     """
     Build the first user message for the builder agent. Includes all seed
     knowledge from Agent 4's screening + context from Agent 1/3 + credential hints.
 
-    The builder does its own research in Phase 1 — no pre-researched spec.
+    When `sandbox_dir` is provided, the message enumerates any
+    `fetched_docs_*.txt` files Agent 4 prefetched during screening —
+    those are the builder's STEP 1 targets for `read_file` instead of
+    hitting web_fetch again. See puzzleeval/web_doc_cache.py.
+
+    When `api_spec_pre_rendered=True`, an api_spec.txt skeleton has
+    already been written to the sandbox by
+    `_synthesize_api_spec_from_checklist` (NEW-AM). The initial message
+    surfaces this so Sonnet's Phase 1 can read it as a starting point
+    and either skip directly to Phase 2 build (saves the 6-min Sonnet
+    research turn) or augment only the gap fields.
     """
     # Sub-task context from Agent 1
     subtask_lines = []
@@ -2838,13 +4301,328 @@ a MODEL_ID variable typically means a newer API version that uses model UUIDs. M
 your harness reads ALL of these variables and uses the correct API version that matches them.
 {registry_notes}
 {_format_atlas_context_for_builder(candidate)}
+{_format_checklist_context_for_builder(candidate)}
 {_format_modality_context_for_builder(input_data)}
+{_format_sandbox_contents_block(sandbox_dir, staged_test_cases)}
+{_format_prefetched_docs_block(sandbox_dir)}
+{(
+    "---\n\n"
+    "### ⚡ FAST PATH — api_spec.txt PRE-RENDERED (with cross-check + augment)\n\n"
+    "Agent 4's BuildReadinessChecklist provided some-or-all of the "
+    "build-readiness fields with evidence-backed source URLs. We have "
+    "already pre-rendered `api_spec.txt` into your sandbox — read it "
+    "first via `read_file('api_spec.txt')`.\n\n"
+    "**Architectural principle:** Agent 4's job is verification (does the "
+    "API exist with the 4 non-negotiables findable in docs?). YOUR job "
+    "is to OWN the full-picture understanding. The pre-rendered spec is "
+    "a HEAD START you can verify+extend, not a contract you must accept "
+    "blindly. You always have these fallback paths to discover anything "
+    "the checklist missed:\n"
+    "  - `verified_api_docs_url` (always available — read it)\n"
+    "  - `fetched_docs_*.txt` (prefetched by Agent 4 — read_file them)\n"
+    "  - `web_fetch` (max_uses=5; fetch any new URL)\n"
+    "  - `web_search` (max_uses=4; discover endpoints)\n"
+    "  - `ask_research` (delegate targeted research mid-build)\n\n"
+    "**Status semantics — three tiers in the spec:**\n\n"
+    "  - **Authoritative** (no marker): Agent 4 confirmed with evidence "
+    "URL. **CROSS-CHECK on Phase A**: when you read the prefetched docs, "
+    "verify the value matches what the docs show. If they agree, trust "
+    "for the rest of the build. If they disagree, downgrade to "
+    "[INFERRED] in your mental model and verify on first API call.\n"
+    "  - **`[INFERRED — verify on first call]`**: Agent 4 found indirect "
+    "evidence. Use the value, but the first live API call will catch "
+    "errors fast.\n"
+    "  - **`[REQUIRES_AUGMENT]`**: not in checklist (per-test-case, "
+    "auxiliary, or unknown). Research these targeted via web_fetch / "
+    "web_search / read_file on prefetched docs.\n\n"
+    "**Critical completeness check:** the checklist's REQUEST_BODY_SHAPE "
+    "+ RESPONSE_BODY_SHAPE capture the PRIMARY message shape, NOT all "
+    "variants. The `OVERRIDE_OR_SPECIAL_MESSAGE_SHAPES` section is a "
+    "REQUIRES_AUGMENT trigger for variants needed by your test cases "
+    "(WebSocket lifecycle events, REST PATCH/PUT bodies, override "
+    "messages for config injection, etc.). Real example from prior runs: "
+    "ElevenLabs ConvAI's `conversation_initiation_client_data` has an "
+    "OVERRIDE variant for mid-stream system prompt injection that the "
+    "basic init shape doesn't show — missing it breaks system prompt "
+    "passing entirely.\n\n"
+    "**Workflow:**\n"
+    "  1. `read_file('api_spec.txt')` — understand what's done + what's marked\n"
+    "  2. `read_file('fetched_docs_0.txt')` etc — Phase A cross-check: "
+    "do the authoritative values in the spec match what the docs show? "
+    "If yes, trust them. If no, treat as INFERRED and verify.\n"
+    "  3. List the `[REQUIRES_AUGMENT]` and `[INFERRED]` sections explicitly\n"
+    "  4. Match against your test cases — which augment sections are "
+    "actually needed?\n"
+    "  5. Research ONLY those (web_fetch / read_file on prefetched docs / "
+    "ask_research). Skip augment sections your test cases don't exercise.\n"
+    "  6. Use patch_file or write_file to update api_spec.txt with the "
+    "augmented sections (replace [REQUIRES_AUGMENT] markers).\n"
+    "  7. The PROVIDER_SURFACE alternatives section lists the other "
+    "endpoints Agent 4 considered. If your chosen endpoint turns out "
+    "wrong for the test case input shape, switch to one of the "
+    "[alternative] endpoints. If even those don't fit, web_search the "
+    "docs URL for more endpoints — provider_surface is a head start, "
+    "NOT an exhaustive list.\n"
+    "  8. Proceed to Phase 2 build.\n\n"
+    "Real-run measurement (trace 8ded6706, 2026-04-25): pre-NEW-AM "
+    "Sonnet's full research turn took ~6 minutes / $1.20 per candidate, "
+    "of which ~60% was re-extracting fields the checklist already had. "
+    "Expected with NEW-AM: ~2-3 minutes / $0.50-0.60 per candidate "
+    "(cross-check + targeted augment). If your candidate's checklist had "
+    "fewer confirmed fields, expect closer to 4-5 min (more augment "
+    "scope). Either way better than 6 min.\n"
+) if api_spec_pre_rendered else ""}
 ---
 
-Start by fetching the API docs URL to understand the exact endpoints, authentication flow,
-and response format. Write your findings to api_spec.txt, then build the harness."""
+Start with Phase A inventory: read the BuildReadinessChecklist Agent 4
+produced (in your candidate's metadata above) and the prefetched docs
+listed in your sandbox inventory. The checklist tells you which of the
+ten build-readiness fields are confirmed, inferred, or unknown; the
+prefetched docs back the confirmed entries with source URLs you can
+cross-check. From there, run Phase B (gap analysis for THIS test case)
+to identify which unknowns actually matter, Phase C (targeted research
+to fill them), Phase D (write api_spec.txt as the contract), then
+Phase E (build harness.py).{
+    " **Phase D is already partially done — see the FAST PATH section "
+    "above; you may be able to skip directly to Phase E if the "
+    "pre-rendered spec is sufficient for your test cases.**"
+    if api_spec_pre_rendered else ""
+}"""
 
     return message
+
+
+def _format_sandbox_contents_block(
+    sandbox_dir: Path | None,
+    staged_test_cases: list[TestCase] | None,
+) -> str:
+    """Render a comprehensive listing of the sandbox starting contents.
+
+    Real-run trace 2b2b9d1f (2026-04-22) showed ALL candidate builds
+    started turn 0 with `python -c "import os; print(os.listdir('.'))"`
+    at ~$0.10/candidate. That probe is wasteful — the initial message
+    can tell the builder exactly what's there, so turn 0 should jump
+    straight to research or build.
+
+    This block lists EVERY file the builder needs to know about:
+      - Prefetched docs from Agent 4 (if the handoff landed)
+      - Staged test inputs from Agent 3 (under test_inputs/)
+      - Any other starting files
+    Plus an explicit directive not to re-probe.
+
+    The `_format_prefetched_docs_block` below still fires separately —
+    it's the teaching-oriented "read_file before web_fetch" guidance.
+    This block is the inventory.
+
+    Returns empty string when sandbox_dir is None (test fixtures /
+    mock runs that don't have a real sandbox yet).
+    """
+    if sandbox_dir is None or not sandbox_dir.exists():
+        return ""
+    try:
+        entries = sorted(sandbox_dir.iterdir(), key=lambda p: p.name)
+    except OSError:
+        return ""
+    if not entries:
+        return ""
+
+    lines = [
+        "",
+        "### Sandbox Starting Contents — DO NOT PROBE",
+        "",
+        "Your sandbox directory is pre-populated with the files listed "
+        "below. This list is AUTHORITATIVE — **do not run "
+        "`os.listdir('.')`, `ls`, `dir`, or any other directory-"
+        "exploration command on turn 0**. Every candidate build on real "
+        "run traces wasted ~$0.10 on that probe before jumping to "
+        "research; the probe tells you nothing the list below doesn't.",
+        "",
+        "```",
+    ]
+
+    # Classify files so the builder knows what each one is for
+    fetched_docs = []
+    test_files = []
+    other_files = []
+    subdirs = []
+    for p in entries:
+        if p.is_dir():
+            subdirs.append(p.name + "/")
+        elif p.name.startswith("fetched_docs_") and p.name.endswith(".txt"):
+            fetched_docs.append(p.name)
+        elif p.name in ("harness.py", "requirements.txt", "smoke_test.py",
+                        "live_test.py", "api_spec.txt"):
+            # These shouldn't exist pre-build, but if they do (rerun
+            # scenario), list them so the builder doesn't stomp.
+            other_files.append(p.name + "  [already exists — patch_file, don't rewrite]")
+        else:
+            other_files.append(p.name)
+
+    if fetched_docs:
+        lines.append("Pre-fetched API documentation (from Agent 4 — read these first):")
+        for fn in fetched_docs:
+            lines.append(f"  {fn}")
+    if subdirs:
+        lines.append("Subdirectories:")
+        for d in subdirs:
+            lines.append(f"  {d}")
+    if other_files:
+        lines.append("Other files:")
+        for fn in other_files:
+            lines.append(f"  {fn}")
+
+    # Test file paths — these come from Agent 3 via staging
+    if staged_test_cases:
+        test_file_paths = []
+        for tc in staged_test_cases:
+            tfp = getattr(tc, "test_file_path", None)
+            if tfp:
+                test_file_paths.append(str(tfp))
+        if test_file_paths:
+            lines.append("")
+            lines.append("Test input files (staged for harness.run() calls):")
+            for tfp in test_file_paths:
+                lines.append(f"  {tfp}")
+
+    lines.append("```")
+    lines.append("")
+    lines.append(
+        "**Turn 0 rule**: your very first tool call should be productive "
+        "work (web_fetch for research, read_file for a prefetched doc, "
+        "or write_file to start the spec). NOT `os.listdir` / `ls` / "
+        "`dir`. That inventory is already above."
+    )
+    return "\n".join(lines)
+
+
+# Soft heuristic for ordering prefetched files in the inventory — pages
+# with code fences, HTTP endpoints, auth headers, or WebSocket
+# protocol mentions tend to be more useful starting reads than nav-link
+# pages. This is a RANKING SIGNAL ONLY; nothing is gated on it. The
+# builder still decides what to read via Phase A inventory.
+#
+# Replaces the prior density-tier system (HIGH/MEDIUM/THIN with
+# inline-vs-listed branching), which conflated "this page has structural
+# richness" with "this page tells you how to BUILD" — two different
+# questions. The checklist now answers the second question directly via
+# Agent 4's per-field source URLs; the prefetched files are background
+# reading material, ordered by a soft proxy for usefulness.
+_USEFULNESS_PATTERNS = (
+    ("code_fences", lambda c: c.count("```") * 3),
+    ("endpoints", lambda c: len(re.findall(r"^\s*(POST|GET|PUT|DELETE|PATCH)\s+/", c, re.MULTILINE)) * 3),
+    ("websocket", lambda c: (c.lower().count("wss://") + c.lower().count("websocket")) * 2),
+    ("auth_examples", lambda c: (c.count("Authorization:") + c.count("Bearer ") + c.count("X-API-Key:") + c.lower().count("xi-api-key")) * 2),
+    ("substantive", lambda c: 1 if len(c) > 5000 else 0),
+    ("nav_penalty", lambda c: -(c.count("](https://") // 10)),
+)
+
+
+def _usefulness_signal(content: str) -> int:
+    """Soft ordering signal for prefetched docs. Higher = more useful as a
+    starting read for a harness builder. Pure ranking signal — no
+    thresholds, no gates, no instructional branches downstream."""
+    if not content:
+        return 0
+    return sum(scorer(content) for _name, scorer in _USEFULNESS_PATTERNS)
+
+
+def _format_prefetched_docs_block(sandbox_dir: Path | None) -> str:
+    """Render a ranked inventory of Agent 4's prefetched docs.
+
+    The builder reads these via `read_file` during Phase A (Inventory)
+    when the BuildReadinessChecklist points at one as a source for a
+    `confirmed` field, OR during Phase C (Targeted Research) to back-
+    check an `inferred` field, OR opportunistically when a checklist
+    `unknown` field needs background context before Phase C research.
+
+    Files are ordered by `_usefulness_signal` so the builder sees the
+    code-heavy / endpoint-heavy pages first when scanning the list. The
+    signal is purely RANKING — there are no gates, no tier instructions,
+    no "skip to STEP X" branches. The checklist (rendered separately
+    above this block) is the load-bearing handoff; this block is
+    background reading material.
+
+    Returns empty string when sandbox_dir is None / missing / empty —
+    Agent 5 then falls back to web_fetch / web_search (still possible
+    via tools). The five-phase Phase 1 prompt handles the "no prefetch"
+    case naturally without per-block branching.
+    """
+    if sandbox_dir is None or not sandbox_dir.exists():
+        return ""
+
+    from puzzleeval.web_doc_cache import count_existing_fetched_docs
+
+    count = count_existing_fetched_docs(sandbox_dir)
+    if count == 0:
+        return ""
+
+    # Load each prefetched file and compute its usefulness signal.
+    # Tuples: (signal, filename, source_url, body_length)
+    docs: list[tuple[int, str, str, int]] = []
+    for i in range(count):
+        filename = f"fetched_docs_{i}.txt"
+        filepath = sandbox_dir / filename
+        try:
+            content = filepath.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # Extract source URL from the first-line header written by
+        # save_web_fetches_to_sandbox.
+        source_url = ""
+        first_line = content.splitlines()[0] if content else ""
+        if first_line.startswith("# Fetched from: "):
+            source_url = first_line[len("# Fetched from: "):]
+        elif first_line.startswith("# Search results"):
+            source_url = "<aggregated search snippets>"
+        # Strip header lines before scoring so "# Fetched from:" doesn't
+        # skew the signal.
+        body = content
+        if first_line.startswith("#"):
+            body_lines = content.splitlines()
+            idx = 0
+            while idx < len(body_lines) and body_lines[idx].startswith("#"):
+                idx += 1
+            if idx < len(body_lines) and body_lines[idx].strip() == "":
+                idx += 1
+            body = "\n".join(body_lines[idx:])
+        signal = _usefulness_signal(body)
+        docs.append((signal, filename, source_url, len(body)))
+
+    if not docs:
+        return ""
+
+    # Rank descending — code/endpoint-heavy pages first
+    docs.sort(key=lambda d: -d[0])
+
+    lines = [
+        "",
+        "### Prefetched Documentation Inventory (Agent 4 saved these to your sandbox)",
+        "",
+        (
+            "Below are the files Agent 4 fetched while verifying this "
+            "candidate, ranked by a usefulness signal (code fences, HTTP "
+            "endpoints, auth headers — pages with these tend to be better "
+            "starting reads than nav-only pages). The ranking is a HINT, "
+            "not a gate."
+        ),
+        "",
+        (
+            "When to read these files (`read_file('fetched_docs_<n>.txt')`): "
+            "during Phase A to ground the BuildReadinessChecklist's "
+            "`source_url` references; during Phase C as targeted background "
+            "for the specific gap you're researching. The checklist (above) "
+            "is the load-bearing artifact — this block is background "
+            "material."
+        ),
+        "",
+    ]
+    for signal, filename, source_url, body_len in docs:
+        size_kb = body_len // 1024
+        lines.append(
+            f"  {filename} — {source_url}  "
+            f"(signal {signal}, {size_kb}KB)"
+        )
+    return "\n".join(lines)
 
 
 # ============================================================================
@@ -2990,12 +4768,51 @@ def _build_single_harness(
             "candidate_name": candidate.name,
         })
 
+    # ── Pre-render api_spec.txt from BuildReadinessChecklist (NEW-AM) ──
+    # Real-run measurement (trace 8ded6706, 2026-04-25): Sonnet's Phase 1
+    # research turn took 358-408 seconds per candidate ($1.19-$1.20),
+    # almost entirely RE-EXTRACTING fields that Agent 4's checklist
+    # already had confirmed. Pre-rendering an api_spec.txt skeleton
+    # from the checklist BEFORE the build loop starts means Sonnet
+    # sees a starting-point spec on Phase A inventory and can either
+    # (a) accept it and skip to Phase 2 build (saves entire 6-min
+    # research turn — ~$1.20 saved per candidate, ~$2.40/run, ~12 min
+    # wall-clock saved on parallel builds), or (b) augment only the
+    # gap fields. Falls through gracefully when checklist isn't
+    # complete (None / sentinel / inferred-only non-negotiables) —
+    # legacy full-research behavior unchanged.
+    pre_rendered_spec = _synthesize_api_spec_from_checklist(candidate)
+    if pre_rendered_spec:
+        try:
+            (sandbox_dir / "api_spec.txt").write_text(
+                pre_rendered_spec, encoding="utf-8",
+            )
+            logger.info(
+                f"Pre-rendered api_spec.txt from checklist for {candidate.name}",
+                extra={
+                    "operation": "checklist_prerender_spec",
+                    "trace_id": trace_id,
+                    "candidate_name": candidate.name,
+                    "spec_chars": len(pre_rendered_spec),
+                },
+            )
+        except OSError as exc:
+            # Non-fatal: builder will produce one from scratch in Phase 1.
+            logger.warning(
+                f"Failed to pre-render api_spec for {candidate.name}: {exc}",
+                extra={"operation": "checklist_prerender_failed",
+                       "trace_id": trace_id},
+            )
+            pre_rendered_spec = None
+
     # ★ CORE: Initialize the conversation with seed knowledge + credential hints
     # No separate research sub-agent — the builder does its own research in Phase 1.
     # This keeps research and coding in ONE context, so the actual fetched API docs
     # are in memory when the code is written. No knowledge-handoff loss.
     initial_message = _build_initial_message(
-        candidate, input_data, credentials=credentials, staged_test_cases=staged_test_cases,
+        candidate, input_data, credentials=credentials,
+        staged_test_cases=staged_test_cases, sandbox_dir=sandbox_dir,
+        api_spec_pre_rendered=bool(pre_rendered_spec),
     )
     messages = [{"role": "user", "content": initial_message}]
     # Exposed to the per-turn builder loop so `_render_builder_prompt` can
@@ -3006,12 +4823,67 @@ def _build_single_harness(
     accumulated_cost = 0.0
     total_web_searches = 0
     turn = 0
-    api_spec_written = False  # Tracks Phase 1 → Phase 2 transition for model switch
+    # ── Phase 1 → Phase 2 transition tracker ──
+    # Stays False at build start. The transition fires when the builder
+    # writes OR PATCHES api_spec.txt (NEW-AM v7 — added patch_file
+    # trigger).
+    #
+    # Architecture (NEW-AM v3 + v7 combined):
+    #   * Pre-render writes api_spec.txt at sandbox setup (NEW-AM v3)
+    #   * Sonnet does targeted augment via patch_file('api_spec.txt')
+    #     during Phase 1
+    #   * patch_file('api_spec.txt') flips this flag (NEW-AM v7)
+    #   * Next turn switches to Opus, which writes harness.py + tests
+    #
+    # Pre-NEW-AM v7 BUG (real-run trace a4860e94, 2026-04-25):
+    #   * Pre-render created api_spec.txt
+    #   * Sonnet PATCHED it (patch_file → no trigger)
+    #   * Sonnet then wrote harness.py (write_file → trigger fires
+    #     too late; harness.py is already Sonnet's code)
+    #   * Sonnet's harness.py had subtly-wrong session.update shape
+    #     and trivial live_test (audio_url=None) → 0/5 real tests
+    #
+    # NEW-AM v7 fix: trigger ALSO fires on patch_file('api_spec.txt'),
+    # so Sonnet's augment patch immediately switches to Opus before
+    # Sonnet can write any code files. Plus Phase 1 prompt now hard-
+    # forbids Sonnet from writing harness.py / requirements.txt /
+    # smoke_test.py / live_test.py.
+    api_spec_written = False
+    if pre_rendered_spec:
+        logger.info(
+            f"Pre-rendered spec landed for {candidate.name}; Sonnet will targeted-augment via patch_file (will trigger Opus switch)",
+            extra={
+                "operation": "checklist_prerender_for_augment",
+                "trace_id": trace_id,
+                "candidate_name": candidate.name,
+            },
+        )
     last_text = ""
     verification_attempts = 0
     verification_passed = False
     conversation_log = []  # Human-readable log of every turn
-    saved_doc_files = []   # Filenames of fetched docs saved to sandbox
+    # Seed saved_doc_files from the sandbox dir — Agent 4's verification
+    # turn persists `fetched_docs_*.txt` here before we ever start, so the
+    # builder's STEP 1 can `read_file` instead of `web_fetch` the same URL
+    # a second time. If Agent 4 found nothing (or the feature flag was
+    # off), this is the empty list and Agent 5 behaves exactly as before.
+    # See puzzleeval/web_doc_cache.py for the handoff protocol.
+    from puzzleeval.web_doc_cache import count_existing_fetched_docs
+    _prefetched_count = count_existing_fetched_docs(sandbox_dir)
+    saved_doc_files = [
+        f"fetched_docs_{i}.txt" for i in range(_prefetched_count)
+    ]
+    if saved_doc_files:
+        logger.info(
+            f"Seeded Agent 5 with {_prefetched_count} prefetched docs from Agent 4",
+            extra={
+                "operation": "agent5_doc_handoff_seed",
+                "trace_id": trace_id,
+                "candidate_name": candidate.name,
+                "prefetched_count": _prefetched_count,
+                "prefetched_files": saved_doc_files,
+            },
+        )
     consecutive_errors = 0  # Track consecutive tool results with errors
     total_reassessments = 0  # Cumulative — never reset (drives escalation tiers)
     error_history = []  # List of (turn, category) for pattern detection
@@ -3027,6 +4899,12 @@ def _build_single_harness(
     candidate_web_fetch_blocks = 0  # Cumulative recoverable web_fetch blocks across turns (Phase 1 hardening)
     smoke_ever_passed = False  # Track smoke test pass across ALL turns
     smoke_passed_at_turn = -1  # Which turn the smoke test first passed
+    # Gate C — patch-fragmentation nudge history. Each filename is
+    # added AFTER the nudge fires for that file, so a single file can
+    # be nudged AT MOST once per build. Re-fires on DIFFERENT files
+    # (e.g., nibbling on harness.py then nibbling on live_test.py
+    # triggers two nudges, which is correct — two distinct lessons).
+    patch_fragmentation_nudged_files: set[str] = set()
     # MAX_TURNS_AFTER_SMOKE: 25 (was 15) — more debug room after the smoke
     # test passes. Live API calls (especially voice / async-polling) often
     # need 5-10 fix iterations for payload shape, auth headers, etc.
@@ -3040,6 +4918,8 @@ def _build_single_harness(
     from puzzleeval.config import (
         AGENT5_DIMINISHING_RETURNS_WINDOW,
         AGENT5_MAX_REASSESSMENT_TIERS,
+        AGENT5_PATCH_FRAGMENT_NUDGE_ENABLED,
+        AGENT5_PATCH_FRAGMENT_TOKEN_CEILING,
     )
     progress_ring: list[bool] = []
     diminishing_nudge_sent = False
@@ -3134,6 +5014,7 @@ def _build_single_harness(
                     output_config_for_request,
                     CACHE_MESSAGES_ENABLED,
                     CACHE_CLEAR_AT_LEAST_TOKENS,
+                    CACHE_CLEAR_TOOL_USES_TRIGGER,
                 )
                 from puzzleeval.anthropic_client import call_with_model_fallback
                 _kwargs_builder: dict[str, object] = {}
@@ -3279,7 +5160,14 @@ def _build_single_harness(
                             # cache rewrite costs.
                             {
                                 "type": "clear_tool_uses_20250919",
-                                "trigger": {"type": "input_tokens", "value": 80000},
+                                # Trigger threshold tuned per real-run
+                                # analysis: 120K avoids firing on typical
+                                # 12-turn builds where the cache_create
+                                # tax exceeds savings (NEW-AM analysis,
+                                # trace 8ded6706, 2026-04-25). Long
+                                # debug-heavy builds still benefit.
+                                "trigger": {"type": "input_tokens",
+                                             "value": CACHE_CLEAR_TOOL_USES_TRIGGER},
                                 "keep": {"type": "tool_uses", "value": 3},
                                 "clear_at_least": {
                                     "type": "input_tokens",
@@ -3299,7 +5187,7 @@ def _build_single_harness(
                                     "Summarize this conversation for continuity. "
                                     "You MUST preserve ALL of the following:\n"
                                     "1. Exact API endpoint URLs, base URL, and auth header format (e.g., 'Bearer' vs 'Token')\n"
-                                    "2. Full api_spec.txt contents: INPUT_COMPATIBILITY, ROUTING_TABLE, ENDPOINTS, PYTHON_EXAMPLES\n"
+                                    "2. Full api_spec.txt contents: INPUT_COMPATIBILITY, ROUTING_TABLE, ENDPOINTS, WORKING_EXAMPLE\n"
                                     "3. Credential env var names (e.g., MINDEE_API_KEY, VERYFI_CLIENT_ID) and which API version they target\n"
                                     "4. Installed SDK package names and versions (e.g., 'mindee>=4.25.0') and key method names used\n"
                                     "5. All files written to sandbox (harness.py, requirements.txt, smoke_test.py, etc.) and their purpose\n"
@@ -3417,6 +5305,14 @@ def _build_single_harness(
             operation=f"harness_build_{candidate_label}_turn{turn}",
         )
 
+        # [observability] Capture per-turn latency so conversation_log
+        # has wall-clock data alongside token/cost data. log_llm_call
+        # captures latency to stderr structured logs but doesn't write
+        # to the persisted turn dict; without this we have no way to
+        # correlate "this turn cost $X" with "this turn took Ys" when
+        # diagnosing perf issues post-hoc.
+        call_latency_ms = round((time.time() - call_start) * 1000, 2)
+
         # [cost tracking] All costs (executor + advisor + cache + web search)
         # calculated from the iterations array per Anthropic API docs
         call_cost = _calculate_call_cost(response, current_model)
@@ -3460,29 +5356,12 @@ def _build_single_harness(
             "cache_read_tokens": cache_read,
             "cache_create_tokens": cache_create,
             "cache_hit_pct": cache_hit_pct,
+            "latency_ms": call_latency_ms,
             "text": "",
             "tool_calls": [],
             "tool_results": [],
             "iterations": iterations_log,
         }
-
-        # Per-turn progress callback — let the frontend show live build progress
-        if progress_callback:
-            # Determine phase from model + flags
-            phase = "researching" if not api_spec_written else "building"
-            if smoke_ever_passed:
-                phase = "validating"
-            # Extract tool names used this turn
-            tool_names = [b.name for b in response.content if b.type == "tool_use"]
-            progress_callback("build_turn", {
-                "candidate_name": candidate.name,
-                "turn": turn + 1,
-                "max_turns": AGENT5_MAX_TURNS,
-                "phase": phase,
-                "model": current_model,
-                "cost_usd": round(call_cost, 4),
-                "tools_used": tool_names,
-            })
 
         for block in response.content:
             if block.type == "text":
@@ -3498,7 +5377,21 @@ def _build_single_harness(
                 if block.name in CUSTOM_TOOL_NAMES:
                     tool_entry["input"] = block.input
                 else:
-                    tool_entry["input"] = "(server tool -- handled by API)"
+                    # [observability] Capture server-tool inputs (web_fetch URL,
+                    # web_search query) instead of dropping them — the URL or
+                    # query is exactly the diagnostic info that lets the
+                    # operator see WHAT Claude is researching this turn.
+                    # Pre-NEW-AM the input was replaced with a generic
+                    # placeholder string and the URL/query was thrown away,
+                    # making mid-build debugging impossible.
+                    raw_input = getattr(block, "input", None) or {}
+                    if isinstance(raw_input, dict):
+                        tool_entry["input"] = {
+                            k: (str(v)[:300] if isinstance(v, str) else v)
+                            for k, v in raw_input.items()
+                        }
+                    else:
+                        tool_entry["input"] = "(server tool — non-dict input)"
                 turn_log["tool_calls"].append(tool_entry)
             elif block.type == "server_tool_use" and getattr(block, "name", "") == "advisor":
                 turn_log["tool_calls"].append({"tool": "advisor", "id": block.id, "input": "(advisor call)"})
@@ -3510,7 +5403,121 @@ def _build_single_harness(
                 elif content and hasattr(content, "encrypted_content"):
                     advice_text = "(encrypted advisor response)"
                 turn_log["tool_results"].append({"tool": "advisor", "result": advice_text})
+            # [observability] Capture web_fetch / web_search server-tool RESULTS
+            # so the operator can see WHAT Claude actually found this turn.
+            # Pre-NEW-AM these block types passed through silently — we knew
+            # Claude called web_fetch but had no idea what page came back
+            # (which is critical when debugging "why did Claude pick the
+            # wrong endpoint?"). Truncate aggressively (500 chars per blob)
+            # to keep the conversation_log readable; the full fetched docs
+            # are persisted separately as fetched_docs_*.txt.
+            elif block.type == "web_fetch_tool_result":
+                fetched_url = ""
+                fetched_preview = ""
+                fetched_chars = 0
+                content = getattr(block, "content", None)
+                if content is not None:
+                    inner = getattr(content, "content", None)
+                    if inner is not None:
+                        fetched_url = getattr(inner, "url", "") or ""
+                        source = getattr(inner, "source", None)
+                        if source is not None:
+                            data = getattr(source, "data", "") or ""
+                            fetched_chars = len(data)
+                            fetched_preview = data[:500]
+                turn_log["tool_results"].append({
+                    "tool": "web_fetch",
+                    "url": fetched_url,
+                    "chars_returned": fetched_chars,
+                    "preview": fetched_preview,
+                })
+            elif block.type == "web_search_tool_result":
+                content = getattr(block, "content", None)
+                results_summary = []
+                result_count = 0
+                if isinstance(content, list):
+                    result_count = len(content)
+                    for r in content[:5]:  # capture top 5 hits
+                        title = getattr(r, "title", "") or (r.get("title", "") if isinstance(r, dict) else "")
+                        url = getattr(r, "url", "") or (r.get("url", "") if isinstance(r, dict) else "")
+                        results_summary.append({"title": title[:120], "url": url[:200]})
+                turn_log["tool_results"].append({
+                    "tool": "web_search",
+                    "result_count": result_count,
+                    "top_results": results_summary,
+                })
         conversation_log.append(turn_log)
+
+        # [observability] Incremental conversation_log.json save — written
+        # after EVERY turn instead of only at end-of-build. Lets the
+        # operator `cat conversation_log.json` mid-build to see exactly
+        # what Claude did each turn (text emitted, tools called, URLs
+        # fetched, search queries). Previously the file only existed
+        # AFTER the build finished — useless for debugging a stuck build.
+        # Best-effort: failures here MUST NOT break the build loop.
+        try:
+            (sandbox_dir / "conversation_log.json").write_text(
+                json.dumps(conversation_log, indent=2, ensure_ascii=False, default=str),
+                encoding="utf-8",
+            )
+        except OSError:
+            pass
+
+        # Per-turn progress callback — let the frontend show live build progress.
+        # MOVED here AFTER block iteration so we have access to the actual
+        # text emitted + tool inputs. Previously the callback fired before
+        # block iteration, so it could only report tool NAMES, not the
+        # URL/query/content that's the actually-useful diagnostic data.
+        if progress_callback:
+            phase = "researching" if not api_spec_written else "building"
+            if smoke_ever_passed:
+                phase = "validating"
+
+            # Build a richer per-turn summary. tool_calls_detail surfaces
+            # WHAT each tool did (URL for web_fetch, query for web_search,
+            # filename for write_file), not just "tools_used: [web_fetch]".
+            tool_calls_detail = []
+            for tc in turn_log["tool_calls"]:
+                tool_name = tc.get("tool", "?")
+                tc_input = tc.get("input")
+                summary = ""
+                if isinstance(tc_input, dict):
+                    if tool_name == "web_fetch":
+                        summary = tc_input.get("url", "")[:200]
+                    elif tool_name == "web_search":
+                        summary = tc_input.get("query", "")[:200]
+                    elif tool_name in ("write_file", "patch_file", "read_file"):
+                        summary = str(tc_input.get("path", tc_input.get("file_path", "")))[:200]
+                    elif tool_name == "run_code":
+                        cmd = tc_input.get("command") or tc_input.get("code") or ""
+                        summary = str(cmd)[:200]
+                    elif tool_name == "ask_research":
+                        summary = str(tc_input.get("question", ""))[:200]
+                    else:
+                        # Unknown tool — show first key/value pair
+                        summary = ", ".join(f"{k}={str(v)[:60]}" for k, v in list(tc_input.items())[:2])
+                elif isinstance(tc_input, str):
+                    summary = tc_input[:200]
+                tool_calls_detail.append({"tool": tool_name, "summary": summary})
+
+            text_preview = (turn_log["text"] or "").strip()[:300]
+
+            progress_callback("build_turn", {
+                "candidate_name": candidate.name,
+                "turn": turn + 1,
+                "max_turns": AGENT5_MAX_TURNS,
+                "phase": phase,
+                "model": current_model,
+                "cost_usd": round(call_cost, 4),
+                "cumulative_cost_usd": round(accumulated_cost, 4),
+                "latency_ms": call_latency_ms,
+                "cache_read_tokens": cache_read,
+                "cache_create_tokens": cache_create,
+                "tools_used": [b.name for b in response.content if b.type == "tool_use"],
+                "tool_calls_detail": tool_calls_detail,
+                "text_preview": text_preview,
+                "stop_reason": response.stop_reason,
+            })
 
         # ── Handle compaction (server-side context management) ──
         # When the API compacts context, it returns stop_reason="compaction".
@@ -3765,9 +5772,130 @@ def _build_single_harness(
                     # instead of generic API overviews.
                     if block.name == "ask_research":
                         question = block.input.get("question", "")
+                        # ── PHASE-1 GATE ──────────────────────────────────────
+                        # AD-007 safety contract enforced deterministically:
+                        # ask_research is for Phase 2+ debugging — it fills
+                        # GAPS in an existing api_spec.txt. Calling it before
+                        # api_spec.txt exists defeats the whole context-
+                        # inheritance design: the sub-agent's enrichment path
+                        # has nothing to enrich with (no spec excerpt, no
+                        # harness code, no prior errors), so it does generic
+                        # research that the builder should have done itself
+                        # via web_search/web_fetch.
+                        #
+                        # Real-run evidence (trace f9de380b): ElevenLabs build
+                        # called ask_research TWICE before api_spec.txt was
+                        # written — both calls returned useful-looking text
+                        # but the builder then had no structured spec to
+                        # anchor against, so subsequent turns re-asked
+                        # questions the initial web research should have
+                        # answered.
+                        #
+                        # Gate: if api_spec.txt doesn't exist yet, refuse
+                        # the call with a clear message pointing to the
+                        # right tools. Deterministic code, not prompt rule.
+                        spec_path = sandbox_dir / "api_spec.txt"
+                        phase1_block = not spec_path.exists()
+
+                        if phase1_block:
+                            result_text = (
+                                "ask_research REFUSED: you haven't written "
+                                "api_spec.txt yet. ask_research is a tool for "
+                                "filling GAPS in an existing spec during "
+                                "Phase 2+ debugging — it's NOT a shortcut for "
+                                "initial discovery.\n\n"
+                                "WHY THIS MATTERS: the sub-agent inherits YOUR "
+                                "context (api_spec excerpt, harness code, "
+                                "recent errors) to give targeted answers. "
+                                "With no api_spec.txt on disk, the sub-agent "
+                                "has nothing to inherit — it falls back to "
+                                "generic research which YOU should be doing "
+                                "yourself in Phase 1 so you develop your own "
+                                "understanding of the API.\n\n"
+                                "WHAT TO DO INSTEAD — Phase 1 research pattern:\n"
+                                "  1. web_search: '<provider> API documentation "
+                                "<your specific scope>'\n"
+                                "  2. web_fetch: the top result's docs URL\n"
+                                "  3. Navigate + fetch related pages (auth, "
+                                "endpoints, errors, rate limits)\n"
+                                "  4. Synthesize findings into api_spec.txt "
+                                "with ENDPOINTS / AUTH / REQUEST_FORMAT / "
+                                "RESPONSE_FORMAT / ERRORS / SAMPLE_CODE\n"
+                                "  5. ONLY AFTER api_spec.txt exists, if you "
+                                "hit a debug question the spec can't answer, "
+                                "THEN call ask_research with the specific gap.\n\n"
+                                f"Your question was: '{question[:300]}'. "
+                                "Convert it into direct web_search/web_fetch "
+                                "calls for now. Retry ask_research later when "
+                                "you have api_spec.txt + a concrete error/gap."
+                            )
+                            logger.warning(
+                                f"ask_research blocked for {candidate.name} at "
+                                f"turn {turn} — api_spec.txt doesn't exist yet "
+                                f"(question: {question[:100]!r})",
+                                extra={
+                                    "operation": "ask_research_phase1_gate",
+                                    "trace_id": trace_id,
+                                    "candidate_name": candidate.name,
+                                    "turn": turn,
+                                },
+                            )
+                            tool_results.append({
+                                "type": "tool_result",
+                                "tool_use_id": block.id,
+                                "content": result_text[:8000],
+                            })
+                            if conversation_log:
+                                conversation_log[-1]["tool_results"].append({
+                                    "tool": "ask_research",
+                                    "result": "BLOCKED (Phase 1 — use web_search/web_fetch)",
+                                })
+                            continue
+
                         if not question:
                             result_text = "Error: empty question. Ask a specific question about the API."
                         else:
+                            # ── SOFT TEMPLATE ADHERENCE LOG (Plan §Q3 hybrid) ──
+                            # Inspect the question for the
+                            # CANDIDATE/ENDPOINT/KNOWN/FIELD NEEDED/WHY
+                            # template fields. We don't reject malformed
+                            # calls — Opus follows the template reliably
+                            # enough that hard validation would produce
+                            # false-rejects on benign rephrasings. Logging
+                            # only gives us telemetry to detect drift if
+                            # adherence ever degrades in production.
+                            adherence = _ask_research_template_adherence(question)
+                            if not adherence["fully_adherent"]:
+                                logger.info(
+                                    f"ask_research template adherence: "
+                                    f"{len(adherence['fields_present'])}/5 fields "
+                                    f"for {candidate.name} at turn {turn} "
+                                    f"(missing: {adherence['fields_missing']})",
+                                    extra={
+                                        "operation": "ask_research_template_adherence",
+                                        "trace_id": trace_id,
+                                        "candidate_name": candidate.name,
+                                        "turn": turn,
+                                        "fully_adherent": False,
+                                        "adherence_ratio": adherence["adherence_ratio"],
+                                        "fields_present": adherence["fields_present"],
+                                        "fields_missing": adherence["fields_missing"],
+                                    },
+                                )
+                            else:
+                                logger.info(
+                                    f"ask_research fully template-adherent for "
+                                    f"{candidate.name} at turn {turn}",
+                                    extra={
+                                        "operation": "ask_research_template_adherence",
+                                        "trace_id": trace_id,
+                                        "candidate_name": candidate.name,
+                                        "turn": turn,
+                                        "fully_adherent": True,
+                                        "adherence_ratio": 1.0,
+                                    },
+                                )
+
                             # Enrich question with actual context so research is targeted
                             # (Claude Code pattern: sub-agents get relevant context, not bare queries)
                             enriched_question = f"Service: {candidate.name} ({candidate.provider})\n"
@@ -3778,7 +5906,6 @@ def _build_single_harness(
                             # Send key sections: first 2K (endpoints, auth) + DOC_REFERENCES + DOC_MAP
                             # so the research agent has the URL navigation map for targeted lookups.
                             try:
-                                spec_path = sandbox_dir / "api_spec.txt"
                                 if spec_path.exists():
                                     full_spec = spec_path.read_text(encoding="utf-8")
                                     # Always include the beginning (endpoints, auth, request format)
@@ -3846,21 +5973,112 @@ def _build_single_harness(
                     # Persist large outputs to disk (Claude Code pattern: >30KB → file)
                     result_text = _persist_large_output(result_text, sandbox_dir, turn)
                     # Detect Phase 1 → Phase 2 transition.
-                    # Primary trigger: api_spec.txt written (intended flow).
-                    # Fallback trigger: harness.py or requirements.txt written
-                    # (agent skipped spec and went straight to coding).
-                    if not api_spec_written and block.name == "write_file":
-                        written_file = block.input.get("filename", "")
-                        if written_file in ("api_spec.txt", "harness.py", "requirements.txt"):
-                            api_spec_written = True
-                            trigger = written_file
-                            logger.info(f"Phase 1 complete for {candidate.name}, switching to Opus (trigger: {trigger})", extra={
-                                "operation": "phase_transition",
-                                "trace_id": trace_id,
-                                "candidate_name": candidate.name,
-                                "turn": turn,
-                                "trigger_file": trigger,
-                            })
+                    #
+                    # Primary triggers (intended flow):
+                    #   * write_file('api_spec.txt') — Sonnet writing
+                    #     spec from scratch (no pre-render)
+                    #   * patch_file('api_spec.txt') — Sonnet PATCHING
+                    #     a pre-rendered spec (NEW-AM v3 augment path)
+                    #
+                    # Fallback triggers:
+                    #   * write_file('harness.py' / 'requirements.txt') —
+                    #     Sonnet skipped spec entirely. Mark transition
+                    #     but PHASE 1 PROMPT FORBIDS this — Sonnet
+                    #     should never write code files. If we hit
+                    #     this branch, log a WARNING.
+                    #
+                    # NEW-AM v7 fix (real-run trace a4860e94, 2026-04-25):
+                    # Pre-NEW-AM v7 the trigger only fired on write_file.
+                    # With NEW-AM v3 pre-render, api_spec.txt exists at
+                    # sandbox setup → Sonnet PATCHES it (patch_file) →
+                    # trigger never fires from spec → Sonnet then writes
+                    # harness.py (write_file) → trigger fires too late,
+                    # harness.py is Sonnet's code (broken: wrong
+                    # session.update shape, audio_url=None live test).
+                    # Adding patch_file('api_spec.txt') as a trigger
+                    # ensures the model switches to Opus right after
+                    # Sonnet's augment patch, BEFORE Sonnet can write
+                    # any code files.
+                    transition_triggered = False
+                    trigger = ""
+                    if not api_spec_written:
+                        if block.name == "write_file":
+                            written_file = block.input.get("filename", "")
+                            if written_file in ("api_spec.txt", "harness.py", "requirements.txt"):
+                                transition_triggered = True
+                                trigger = f"write_file:{written_file}"
+                                if written_file in ("harness.py", "requirements.txt"):
+                                    logger.warning(
+                                        f"Sonnet wrote {written_file} during Phase 1 for {candidate.name} — "
+                                        "this is a Phase 1 prompt violation. Sonnet should ONLY write/patch "
+                                        "api_spec.txt. The code file is now Sonnet-generated (low quality "
+                                        "for code) instead of Opus-generated.",
+                                        extra={
+                                            "operation": "sonnet_wrote_code_file",
+                                            "trace_id": trace_id,
+                                            "candidate_name": candidate.name,
+                                            "turn": turn,
+                                            "file": written_file,
+                                        },
+                                    )
+                        elif block.name == "patch_file":
+                            # NEW-AM v7: patch_file('api_spec.txt') is the
+                            # canonical post-pre-render augment-completion
+                            # signal. Without this, Sonnet's patch goes
+                            # untriggered and Sonnet ends up writing
+                            # harness.py (Phase 2 work).
+                            patched_file = block.input.get("filename", "")
+                            if patched_file == "api_spec.txt":
+                                transition_triggered = True
+                                trigger = "patch_file:api_spec.txt"
+                    if transition_triggered:
+                        api_spec_written = True
+                        logger.info(f"Phase 1 complete for {candidate.name}, switching to Opus (trigger: {trigger})", extra={
+                            "operation": "phase_transition",
+                            "trace_id": trace_id,
+                            "candidate_name": candidate.name,
+                            "turn": turn,
+                            "trigger_file": trigger,
+                        })
+                        # ─────────────────────────────────────────
+                        # Sonnet → Opus boundary compaction
+                        # ─────────────────────────────────────────
+                        # Eliminate the model-switch cache rebuild
+                        # tax (~$0.66 per run, real-run measurement
+                        # in trace 73a9d605). Compact Sonnet's raw
+                        # web_fetch / web_search tool_result blobs
+                        # to brief summaries; Opus reads them on
+                        # disk via read_file when needed.
+                        try:
+                            compacted = _compact_research_tool_results(
+                                messages,
+                            )
+                            if compacted:
+                                logger.info(
+                                    f"Compacted {compacted} research tool_result block(s) "
+                                    f"at Sonnet→Opus boundary for {candidate.name}",
+                                    extra={
+                                        "operation": "research_compaction",
+                                        "trace_id": trace_id,
+                                        "candidate_name": candidate.name,
+                                        "turn": turn,
+                                        "blocks_compacted": compacted,
+                                    },
+                                )
+                        except Exception as exc:  # noqa: BLE001
+                            # Compaction failure is non-fatal — at
+                            # worst we pay the original tax. Don't
+                            # let a malformed message structure
+                            # crash the build.
+                            logger.warning(
+                                f"Research compaction failed for {candidate.name}: "
+                                f"{type(exc).__name__}: {str(exc)[:200]}",
+                                extra={
+                                    "operation": "research_compaction_failed",
+                                    "trace_id": trace_id,
+                                    "candidate_name": candidate.name,
+                                },
+                            )
                     # Set is_error flag per Anthropic docs — tells Claude the result
                     # is an error, triggering smarter retry/correction behavior.
                     # Without this, Claude treats "Error: file not found" the same
@@ -3875,12 +6093,40 @@ def _build_single_harness(
                     if has_tool_error:
                         tool_result_entry["is_error"] = True
                     tool_results.append(tool_result_entry)
-                    # Log tool result (truncated for readability)
+                    # [observability] Log tool result with rich diagnostic
+                    # context: exit_code (was dropped on the floor), full
+                    # 2000-char tail (so tracebacks fit — 500 chars cut
+                    # error messages mid-line), and per-tool metadata
+                    # (write_file content size, patch_file diff hint).
+                    # Without this, debugging "why did smoke_test.py fail?"
+                    # required re-reading sandbox files manually because
+                    # the truncated 500-char tool result hid the actual
+                    # Python traceback.
                     if conversation_log:
-                        conversation_log[-1]["tool_results"].append({
+                        result_entry = {
                             "tool": block.name,
-                            "result": result_text[:500],
-                        })
+                            "exit_code": exit_code,
+                            "is_error": has_tool_error,
+                            "result": result_text[-2000:],  # Tail, not head — errors at end
+                            "result_length": len(result_text),
+                        }
+                        # Per-tool diagnostic enrichment
+                        if block.name == "write_file":
+                            content = block.input.get("content", "") if isinstance(block.input, dict) else ""
+                            result_entry["wrote_path"] = block.input.get("filename", block.input.get("path", "")) if isinstance(block.input, dict) else ""
+                            result_entry["wrote_chars"] = len(content)
+                            result_entry["wrote_preview"] = content[:200]
+                        elif block.name == "patch_file":
+                            old_str = block.input.get("old_string", "") if isinstance(block.input, dict) else ""
+                            new_str = block.input.get("new_string", "") if isinstance(block.input, dict) else ""
+                            result_entry["patch_path"] = block.input.get("filename", block.input.get("path", "")) if isinstance(block.input, dict) else ""
+                            result_entry["patch_diff_chars"] = len(new_str) - len(old_str)
+                            result_entry["patch_old_preview"] = old_str[:120]
+                            result_entry["patch_new_preview"] = new_str[:120]
+                        elif block.name == "run_code":
+                            cmd = block.input.get("command") or block.input.get("code") or "" if isinstance(block.input, dict) else ""
+                            result_entry["command"] = str(cmd)[:300]
+                        conversation_log[-1]["tool_results"].append(result_entry)
                     # (live_test injection removed — agent validates with real test data)
 
             # ── Detect smoke test passing in tool results ──
@@ -4090,6 +6336,53 @@ def _build_single_harness(
                            "candidate_name": candidate.name},
                 )
 
+            # ── Gate C — patch-fragmentation runtime nudge ──
+            # When the builder serial-nibbles at the same file with two
+            # small patches back-to-back, offer (softly) that parallel
+            # patches land a multi-edit fix in ONE turn instead of N.
+            # NOT a hard stop; genuine iterate-and-verify cycles continue
+            # unchanged. At-most-once per file per build (see state set
+            # above) so it can't spam the loop on legitimate long debug
+            # sessions.
+            if AGENT5_PATCH_FRAGMENT_NUDGE_ENABLED and AGENT5_PATCH_FRAGMENT_TOKEN_CEILING > 0:
+                fragmented_file = _detect_patch_fragmentation_pattern(
+                    conversation_log,
+                    patch_fragmentation_nudged_files,
+                    output_token_ceiling=AGENT5_PATCH_FRAGMENT_TOKEN_CEILING,
+                )
+                if fragmented_file:
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"## Patch-fragmentation observation\n\n"
+                            f"The last 2 patches to `{fragmented_file}` were "
+                            f"small and sequential. If you already know 3+ "
+                            f"more edits to `{fragmented_file}` for the same "
+                            f"underlying bug, emit them as PARALLEL "
+                            f"`patch_file` calls in the same turn — each "
+                            f"round-trip costs a full conversation replay. "
+                            f"If you're genuinely iterating (each patch "
+                            f"depends on seeing the last one's effect, "
+                            f"e.g., you need to re-run smoke_test between "
+                            f"edits), keep going sequentially — this nudge "
+                            f"is advisory, not a mandate. This is the only "
+                            f"nudge you'll see for `{fragmented_file}` "
+                            f"this build.\n"
+                        ),
+                    })
+                    patch_fragmentation_nudged_files.add(fragmented_file)
+                    logger.info(
+                        f"Patch-fragmentation nudge sent for {candidate.name} "
+                        f"on file={fragmented_file} at turn {turn}",
+                        extra={
+                            "operation": "patch_fragmentation_nudge",
+                            "trace_id": trace_id,
+                            "candidate_name": candidate.name,
+                            "filename": fragmented_file,
+                            "turn": turn,
+                        },
+                    )
+
             # ── Force completion after smoke + live fix attempts ──
             # If smoke passed but agent is still trying to fix live test
             # after MAX_TURNS_AFTER_SMOKE turns, stop and fail.
@@ -4158,7 +6451,7 @@ def _build_single_harness(
                     "  1. What exactly failed (the error message, not a summary)\n"
                     "  2. What assumption did I make in the code? (cite the line)\n"
                     "  3. What does api_spec.txt say about this? (cite the section — "
-                    "AUTH_HEADER / ENDPOINTS / REQUEST_FORMAT / PYTHON_EXAMPLES / DOC_MAP)\n"
+                    "AUTH_HEADER / ENDPOINTS / REQUEST_FORMAT / WORKING_EXAMPLE / DOC_MAP)\n"
                     "  4. Which DOC_MAP URL would resolve this? (before ask_research)\n"
                     "  5. What's the specific fix? (1-sentence plan)\n"
                     "If the spec doesn't answer #3, that's the gap — use ask_research with the "
@@ -4469,25 +6762,36 @@ def _compute_conversation_summary(
         "cache_create_tokens": 0,
         "output_tokens": 0,
         "cost_usd": 0.0,
+        "latency_ms": 0.0,
     }
     per_model: dict[str, dict] = {}
+    # Per-turn latencies for min/max/avg drill-down. Skips zero values
+    # (turns logged before the latency_ms field was added — pre-NEW-AL
+    # back-compat).
+    latencies_ms: list[float] = []
 
     for turn_dict in real_turns:
         for k in ("input_tokens", "cache_read_tokens",
                   "cache_create_tokens", "output_tokens"):
             totals[k] += int(turn_dict.get(k, 0) or 0)
         totals["cost_usd"] += float(turn_dict.get("cost_usd", 0.0) or 0.0)
+        turn_latency = float(turn_dict.get("latency_ms", 0.0) or 0.0)
+        totals["latency_ms"] += turn_latency
+        if turn_latency > 0:
+            latencies_ms.append(turn_latency)
 
         m = turn_dict.get("model") or "unknown"
         mbucket = per_model.setdefault(m, {
             "turns": 0, "input_tokens": 0, "cache_read_tokens": 0,
             "cache_create_tokens": 0, "output_tokens": 0, "cost_usd": 0.0,
+            "latency_ms": 0.0,
         })
         mbucket["turns"] += 1
         for k in ("input_tokens", "cache_read_tokens",
                   "cache_create_tokens", "output_tokens"):
             mbucket[k] += int(turn_dict.get(k, 0) or 0)
         mbucket["cost_usd"] += float(turn_dict.get("cost_usd", 0.0) or 0.0)
+        mbucket["latency_ms"] += turn_latency
 
     total_billed = (totals["input_tokens"] + totals["cache_read_tokens"]
                     + totals["cache_create_tokens"])
@@ -4495,9 +6799,22 @@ def _compute_conversation_summary(
     def _pct(n: int | float) -> float:
         return round(100.0 * n / total_billed, 2) if total_billed > 0 else 0.0
 
+    # Latency rollups — total wall-clock spent in API calls plus
+    # per-turn min/max/avg for diagnostic drill-down. Only counts
+    # turns that actually recorded a latency (latencies_ms list).
+    # Helps answer "did slow turns drive the cost or did slow turns
+    # come from rate-limit retries?" without re-grepping stderr.
+    if latencies_ms:
+        latency_min_ms = round(min(latencies_ms), 2)
+        latency_max_ms = round(max(latencies_ms), 2)
+        latency_avg_ms = round(sum(latencies_ms) / len(latencies_ms), 2)
+    else:
+        latency_min_ms = latency_max_ms = latency_avg_ms = 0.0
+
     aggregate = {
         **totals,
         "cost_usd": round(totals["cost_usd"], 4),
+        "latency_ms": round(totals["latency_ms"], 2),
         "total_billed_input": total_billed,
         "fresh_input_pct": _pct(totals["input_tokens"]),
         "cache_read_pct": _pct(totals["cache_read_tokens"]),
@@ -4506,6 +6823,15 @@ def _compute_conversation_summary(
         # the formula we use per-turn. Higher = more context served
         # from cache = cheaper runs.
         "cache_hit_pct": _pct(totals["cache_read_tokens"]),
+        # Wall-clock latency stats. latency_ms is total across all
+        # turns (sum of per-turn API latencies). min/max/avg are
+        # per-turn distribution; spotting an outlier 60s turn vs a
+        # 5s turn helps identify rate-limit retries, slow upstream
+        # providers, or just genuinely-deep extended-thinking.
+        "latency_min_ms": latency_min_ms,
+        "latency_max_ms": latency_max_ms,
+        "latency_avg_ms": latency_avg_ms,
+        "turns_with_latency": len(latencies_ms),
     }
 
     # Cache behavior signals. Useful for debugging "is message caching
@@ -4564,6 +6890,88 @@ def _compute_conversation_summary(
         for t in sorted_by_cost
     ]
 
+    # [observability] Build-phase breakdown — derives Phase 1 (research) /
+    # Phase 2 (build) / Phase 3 (validate) boundaries from turn data
+    # WITHOUT requiring per-turn phase tags upstream. Walks turns in
+    # order, mirroring the same trigger logic as _build_single_harness:
+    #   * research → build:  first turn that writes api_spec.txt OR
+    #                        harness.py OR requirements.txt
+    #   * build → validate:  first turn whose tool_results mention
+    #                        "SMOKE TEST PASSED"
+    #   * validate → done:   first turn whose text mentions
+    #                        "HARNESS_COMPLETE"
+    # Each phase reports turn count + cost + latency so the operator
+    # can answer "where did the time go?" without re-tracing the loop.
+    api_spec_at = -1
+    smoke_passed_at = -1
+    harness_complete_at = -1
+
+    for t in real_turns:
+        tn = t.get("turn")
+        if api_spec_at < 0:
+            for tc in (t.get("tool_results") or []):
+                if isinstance(tc, dict):
+                    wrote = tc.get("wrote_path", "")
+                    if wrote in ("api_spec.txt", "harness.py", "requirements.txt"):
+                        api_spec_at = tn
+                        break
+        if smoke_passed_at < 0:
+            results_text = " ".join(
+                str(tc.get("result", "")) for tc in (t.get("tool_results") or [])
+                if isinstance(tc, dict)
+            )
+            if "SMOKE TEST PASSED" in results_text:
+                smoke_passed_at = tn
+        if harness_complete_at < 0:
+            text = t.get("text", "") or ""
+            if "HARNESS_COMPLETE" in text:
+                harness_complete_at = tn
+
+    def _bucket_phase(tn: int) -> str:
+        """Classify a turn into research / build / validate / post."""
+        if api_spec_at >= 0 and tn < api_spec_at:
+            return "research"
+        if smoke_passed_at >= 0 and tn < smoke_passed_at:
+            return "build"
+        if harness_complete_at >= 0 and tn < harness_complete_at:
+            return "validate"
+        if harness_complete_at >= 0 and tn >= harness_complete_at:
+            return "post"
+        # No HARNESS_COMPLETE yet — treat post-smoke as validate
+        if smoke_passed_at >= 0:
+            return "validate"
+        # No smoke pass — treat post-spec as build
+        if api_spec_at >= 0:
+            return "build"
+        return "research"
+
+    phase_buckets: dict[str, dict] = {
+        p: {"turns": 0, "cost_usd": 0.0, "latency_ms": 0.0, "first_turn": -1, "last_turn": -1}
+        for p in ("research", "build", "validate", "post")
+    }
+    for t in real_turns:
+        tn = int(t.get("turn", 0))
+        phase = _bucket_phase(tn)
+        b = phase_buckets[phase]
+        b["turns"] += 1
+        b["cost_usd"] += float(t.get("cost_usd", 0.0) or 0.0)
+        b["latency_ms"] += float(t.get("latency_ms", 0.0) or 0.0)
+        if b["first_turn"] < 0:
+            b["first_turn"] = tn
+        b["last_turn"] = tn
+    # Round + drop empty phases for readability
+    build_phases = {
+        p: {
+            "turns": b["turns"],
+            "cost_usd": round(b["cost_usd"], 4),
+            "latency_ms": round(b["latency_ms"], 2),
+            "first_turn": b["first_turn"],
+            "last_turn": b["last_turn"],
+        }
+        for p, b in phase_buckets.items()
+        if b["turns"] > 0
+    }
+
     return {
         "candidate_name": candidate_name,
         "total_turns": len(real_turns),
@@ -4578,6 +6986,17 @@ def _compute_conversation_summary(
             "message_cache_likely_active": message_cache_likely_active,
         },
         "top_costly_turns": top_costly_turns,
+        # Build-phase breakdown — primary diagnostic surface for
+        # "where did Agent 5 spend its time?" questions. The boundary
+        # turn numbers (-1 = phase never reached) tell you whether
+        # the build got stuck in research / failed at smoke / failed
+        # validation, without needing to re-read the full conversation.
+        "build_phases": build_phases,
+        "boundary_turns": {
+            "api_spec_written_at": api_spec_at,
+            "smoke_passed_at": smoke_passed_at,
+            "harness_complete_at": harness_complete_at,
+        },
     }
 
 
@@ -4680,6 +7099,35 @@ VENV_PREINSTALL_MANIFEST = [
 ]
 
 
+# Module-level lock registry for concurrent venv creation safety.
+# Both `precreate_venvs_for_candidates` (background, post-selection) and
+# `_create_venv` (synchronous, called from Agent 5 build) can race for the
+# same sandbox dir if Agent 4 finishes fast and Agent 5 starts before
+# pre-creation completes. The per-sandbox-dir lock ensures whichever
+# call gets there first does the work; the other short-circuits when it
+# sees the venv python already exists.
+_VENV_CREATE_LOCKS: dict[str, threading.Lock] = {}
+_VENV_CREATE_LOCKS_GUARD = threading.Lock()
+
+
+def _venv_lock_for(sandbox_dir: Path) -> threading.Lock:
+    """Get-or-create the per-sandbox venv-creation lock."""
+    key = str(sandbox_dir.resolve())
+    with _VENV_CREATE_LOCKS_GUARD:
+        lock = _VENV_CREATE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _VENV_CREATE_LOCKS[key] = lock
+        return lock
+
+
+def _venv_python_path(venv_dir: Path) -> Path:
+    """Return the platform-correct path to the venv's python interpreter."""
+    if sys.platform == "win32":
+        return venv_dir / "Scripts" / "python.exe"
+    return venv_dir / "bin" / "python"
+
+
 def _create_venv(sandbox_dir: Path, logger, trace_id: str, candidate_name: str) -> bool:
     """
     Create a Python venv in the sandbox directory. Returns True on success.
@@ -4692,42 +7140,191 @@ def _create_venv(sandbox_dir: Path, logger, trace_id: str, candidate_name: str) 
     failures do NOT fail venv creation (the builder can install missing
     packages itself if any slipped through). Controlled by
     `PUZZLEEVAL_VENV_PREINSTALL=0` to disable (debug / minimal-venv runs).
+
+    **Idempotent + race-safe**: when the venv already exists (pre-created
+    by `precreate_venvs_for_candidates` during Agent 4), short-circuits
+    after acquiring the per-sandbox lock. When two callers race for the
+    same sandbox, the second one waits, sees the venv exists, and
+    short-circuits — no duplicate work, no concurrent pip install.
     """
     venv_dir = sandbox_dir / ".venv"
-    try:
-        result = subprocess.run(
-            [sys.executable, "-m", "venv", str(venv_dir)],
-            capture_output=True,
-            text=True,
-            timeout=120,
-        )
-        if result.returncode == 0:
-            logger.info(f"Venv created for {candidate_name}", extra={
-                "operation": "venv_create",
-                "trace_id": trace_id,
-                "candidate_name": candidate_name,
-                "venv_dir": str(venv_dir),
-            })
-            # Optional pre-install of common deps — cuts ~2-3 Agent 5 turns.
-            if os.environ.get("PUZZLEEVAL_VENV_PREINSTALL", "1") != "0":
-                _preinstall_venv_deps(
-                    venv_dir, logger, trace_id, candidate_name,
-                )
+    venv_python = _venv_python_path(venv_dir)
+    lock = _venv_lock_for(sandbox_dir)
+    with lock:
+        # Short-circuit when the venv already exists (pre-creation
+        # finished, or this is the second of two racing callers).
+        if venv_python.exists():
+            logger.info(
+                f"Venv already exists for {candidate_name} — short-circuit",
+                extra={
+                    "operation": "venv_create_short_circuit",
+                    "trace_id": trace_id,
+                    "candidate_name": candidate_name,
+                    "venv_dir": str(venv_dir),
+                },
+            )
             return True
-        else:
-            logger.warning(f"Venv creation failed for {candidate_name}: {result.stderr[:500]}", extra={
-                "operation": "venv_create_failed",
+        try:
+            # `python -m venv .venv` includes pip by default. On
+            # Windows+anaconda this can silently fail — the venv's
+            # python.exe exists but `python -m pip` returns "No module
+            # named pip" (real-run trace 8ded6706, 2026-04-25: ElevenLabs
+            # build wasted 4 turns on T6-T9 doing `python -c sys.executable`,
+            # retrying `pip install`, finally bootstrapping with
+            # `ensurepip`). We don't use --with-pip (not a real venv arg —
+            # pip inclusion is the DEFAULT and only togglable OFF via
+            # --without-pip). Defense: after creation, verify pip actually
+            # landed and run ensurepip as a fallback if not.
+            result = subprocess.run(
+                [sys.executable, "-m", "venv", str(venv_dir)],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            if result.returncode == 0:
+                # ── Verify pip actually landed in the venv (Windows+anaconda
+                #    edge case fix, NEW-AM). If pip is missing, run ensurepip
+                #    explicitly with the venv's own python — bootstraps pip
+                #    from cached wheels in ~5 seconds. Without this, the
+                #    build agent has to discover the missing-pip state itself
+                #    and re-bootstrap during the build (4 wasted turns +
+                #    $0.20 + 30s observed).
+                pip_check = subprocess.run(
+                    [str(venv_python), "-m", "pip", "--version"],
+                    capture_output=True, text=True, timeout=15,
+                )
+                if pip_check.returncode != 0:
+                    logger.warning(
+                        f"Venv created for {candidate_name} but pip missing — bootstrapping via ensurepip",
+                        extra={
+                            "operation": "venv_pip_missing_ensurepip",
+                            "trace_id": trace_id,
+                            "candidate_name": candidate_name,
+                            "pip_check_stderr": (pip_check.stderr or "")[:300],
+                        },
+                    )
+                    # Best-effort ensurepip — don't fail venv creation if
+                    # this also fails (the build agent can still bootstrap
+                    # itself; we just lose the optimization).
+                    subprocess.run(
+                        [str(venv_python), "-m", "ensurepip", "--upgrade", "--default-pip"],
+                        capture_output=True, text=True, timeout=30,
+                    )
+                logger.info(f"Venv created for {candidate_name}", extra={
+                    "operation": "venv_create",
+                    "trace_id": trace_id,
+                    "candidate_name": candidate_name,
+                    "venv_dir": str(venv_dir),
+                })
+                # Optional pre-install of common deps — cuts ~2-3 Agent 5 turns.
+                if os.environ.get("PUZZLEEVAL_VENV_PREINSTALL", "1") != "0":
+                    _preinstall_venv_deps(
+                        venv_dir, logger, trace_id, candidate_name,
+                    )
+                return True
+            else:
+                logger.warning(f"Venv creation failed for {candidate_name}: {result.stderr[:500]}", extra={
+                    "operation": "venv_create_failed",
+                    "trace_id": trace_id,
+                    "candidate_name": candidate_name,
+                })
+                return False
+        except (subprocess.TimeoutExpired, OSError) as e:
+            logger.warning(f"Venv creation error for {candidate_name}: {e}", extra={
+                "operation": "venv_create_error",
                 "trace_id": trace_id,
                 "candidate_name": candidate_name,
             })
             return False
-    except (subprocess.TimeoutExpired, OSError) as e:
-        logger.warning(f"Venv creation error for {candidate_name}: {e}", extra={
-            "operation": "venv_create_error",
+
+
+def precreate_venvs_for_candidates(
+    candidate_names: list[str],
+    trace_id: str,
+    logger,
+    runs_root: "Path | str | None" = None,
+    max_workers: int | None = None,
+) -> dict[str, bool]:
+    """Pre-create venvs for SELECTED candidates in parallel.
+
+    Hook for pipeline_runner: called immediately after the user submits
+    Phase 6 selections (or after Phase 7 auto-pick), running concurrently
+    with Agent 4 verification. Each candidate's venv lives at the same
+    path Agent 5 expects (`runs/<trace>/harnesses/<candidate_slug>/.venv/`)
+    so when Agent 5 calls `_create_venv` later, it short-circuits via
+    the lock-guarded `if venv_python.exists()` check.
+
+    Saves 60-120s of Agent 5's build wall-clock per candidate by moving
+    venv create + `pip install` of `VENV_PREINSTALL_MANIFEST` into the
+    Agent 4 phase's natural slack (Agent 4 spends most of its 2-4 min on
+    server-side `web_fetch` / `web_search` waits).
+
+    **Only runs for SELECTED candidates** — pass the post-selection
+    filtered name list (e.g., from `state.agent2_result['candidates']`
+    AFTER `apply_scope_picks`). Non-selected Agent 2 candidates never
+    get venvs.
+
+    Returns a dict mapping candidate_name → success bool. Failures are
+    logged but never raise — Agent 5's `_create_venv` falls back to
+    creating the venv synchronously (legacy path) when a candidate's
+    pre-creation didn't complete. Belt + braces.
+    """
+    from puzzleeval.web_doc_cache import candidate_sandbox_dir
+
+    if not candidate_names:
+        return {}
+    workers = max_workers if max_workers is not None else min(len(candidate_names), 5)
+    workers = max(1, workers)
+
+    logger.info(
+        f"Pre-creating venvs for {len(candidate_names)} selected candidate(s)",
+        extra={
+            "operation": "venv_precreate_start",
             "trace_id": trace_id,
-            "candidate_name": candidate_name,
-        })
-        return False
+            "candidate_count": len(candidate_names),
+            "workers": workers,
+        },
+    )
+
+    results: dict[str, bool] = {}
+
+    def _create_one(name: str) -> tuple[str, bool]:
+        try:
+            sandbox_dir = candidate_sandbox_dir(trace_id, name, runs_root=runs_root)
+            sandbox_dir.mkdir(parents=True, exist_ok=True)
+            ok = _create_venv(sandbox_dir, logger, trace_id, name)
+            return name, ok
+        except Exception as exc:  # noqa: BLE001 — must never crash background task
+            logger.warning(
+                f"venv pre-create exception for {name}: "
+                f"{type(exc).__name__}: {exc}",
+                extra={
+                    "operation": "venv_precreate_exception",
+                    "trace_id": trace_id,
+                    "candidate_name": name,
+                    "error_type": type(exc).__name__,
+                    "error_msg": str(exc)[:300],
+                },
+            )
+            return name, False
+
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_create_one, name) for name in candidate_names]
+        for future in as_completed(futures):
+            name, ok = future.result()
+            results[name] = ok
+
+    succeeded = sum(1 for v in results.values() if v)
+    logger.info(
+        f"Pre-create complete: {succeeded}/{len(results)} venvs ready",
+        extra={
+            "operation": "venv_precreate_complete",
+            "trace_id": trace_id,
+            "succeeded": succeeded,
+            "total": len(results),
+        },
+    )
+    return results
 
 
 def _preinstall_venv_deps(
@@ -4832,6 +7429,43 @@ MECHANICAL_EVAL_TYPES = {"exact_match", "format_compliance"}
 LLM_EVAL_TYPES = {"semantic_similarity", "contains_key_info", "subjective_quality"}
 RATE_LIMIT_INDICATORS = {"rate limit", "429", "too many requests", "quota exceeded"}
 
+# ────────────────────────────────────────────────────────────────────
+# Concurrent-session cap detection (distinct from rate limits).
+#
+# Rate limits: "you made too many requests in N seconds, back off for
+# a few seconds." Typical reset time: 1-60s.
+#
+# Concurrent-session caps: "you already have N open sessions, can't
+# open another until one closes." Typical release time: 15-30s (a
+# full conversation duration). WebSocket voice APIs and chat
+# platforms expose this. Free tiers often cap at 1 per key; paid
+# tiers at 3-10.
+#
+# The error texts are provider-specific — this set covers the common
+# English phrasings. Additive: if a real run surfaces a new phrasing,
+# add the token here. The cost of a false positive (treating a non-
+# cap error as a cap error) is one unnecessary sleep+retry; the cost
+# of a false negative (missing a cap error) is a test fails when it
+# could have waited. Bias slightly toward false positives.
+# ────────────────────────────────────────────────────────────────────
+CONCURRENT_SESSION_INDICATORS = {
+    "concurrent session",
+    "concurrent sessions",
+    "session limit",
+    "max sessions",
+    "maximum sessions",
+    "too many concurrent",
+    "concurrent connections",
+    "maximum concurrent",
+    "maximum number of concurrent calls",
+    "session in use",
+    "session already active",
+    "session is already active",
+    "concurrent call limit",
+    "concurrent conversation",
+    "active session exists",
+}
+
 EVALUATION_SYSTEM_PROMPT = """\
 You are an expert evaluator comparing an API's raw response against ground truth.
 
@@ -4915,7 +7549,33 @@ def _execute_single_test(
     """
     Execute one test case via subprocess in the harness's venv.
     Returns the harness result dict or an error dict. Never raises.
+
+    NEW-AM v6 — RACE FIX (real-run trace a4860e94, 2026-04-25):
+    Per-call unique input/output filenames eliminate the cross-test
+    contamination caused by parallel test executions sharing
+    `_test_input.json` + `_test_output.json` in the candidate's sandbox.
+
+    Pre-fix evidence: tc-001 (persona=James Whitfield) transcript showed
+    agent saying "Maria" + tc-002's phone number 555-918-4422. The pre-
+    fix used SHARED filenames `_test_input.json` and `_test_output.json`
+    in `sandbox_dir`. With AGENT6_PER_CANDIDATE_SESSION_PARALLELISM=6,
+    multiple test workers raced on the same files:
+
+      Worker tc-001: writes `{persona: James, audio_url: <James audio>}`
+      Worker tc-002: writes `{persona: Maria, audio_url: <Maria audio>}`
+                     (overwrites tc-001's input)
+      Subprocess for tc-001: reads `_test_input.json` → gets MARIA's
+                              payload → sends Maria's audio to provider
+      Result returns to tc-001's runner → transcript shows Maria's
+      content attributed to tc-001
+
+    Post-fix: each call gets a unique filename via
+    `secrets.token_hex(8)`. Subprocesses read/write per-call paths
+    via env vars `PUZZLEEVAL_TEST_INPUT_PATH` / `PUZZLEEVAL_TEST_
+    OUTPUT_PATH` (cleaner than positional args; tolerated by harnesses
+    that don't read them).
     """
+    import secrets
     error_result = {
         "output": "",
         "latency_ms": 0.0,
@@ -4926,8 +7586,12 @@ def _execute_single_test(
         "error": None,
     }
 
-    input_path = sandbox_dir / "_test_input.json"
-    output_path = sandbox_dir / "_test_output.json"
+    # Per-call unique filenames — race-safe under parallel execution.
+    call_id = secrets.token_hex(8)
+    input_filename = f"_test_input_{call_id}.json"
+    output_filename = f"_test_output_{call_id}.json"
+    input_path = sandbox_dir / input_filename
+    output_path = sandbox_dir / output_filename
 
     try:
         input_path.write_text(json.dumps(adapted_input), encoding="utf-8")
@@ -4951,6 +7615,11 @@ def _execute_single_test(
     # plugin (it gets bytes back). Belt-and-braces: the plugin now also
     # accepts the b64 string directly, so older harnesses that
     # base64-encoded themselves still work.
+    #
+    # NEW-AM v6: filenames are now templated via the `_INPUT_FILE_NAME`
+    # / `_OUTPUT_FILE_NAME` placeholders so each subprocess reads/writes
+    # its own per-call file (eliminates the parallel-test race on
+    # _test_input.json that bled tc-002's persona into tc-001).
     exec_script = (
         'import sys, json, base64\n'
         'sys.path.insert(0, ".")\n'
@@ -4967,10 +7636,10 @@ def _execute_single_test(
         '        return [_bytes_safe(v) for v in obj]\n'
         '    return obj\n'
         '\n'
-        'input_data = json.loads(open("_test_input.json", encoding="utf-8").read())\n'
+        'input_data = json.loads(open("' + input_filename + '", encoding="utf-8").read())\n'
         'result = harness.run(input_data)\n'
         'safe = _bytes_safe(result)\n'
-        'with open("_test_output.json", "w", encoding="utf-8") as f:\n'
+        'with open("' + output_filename + '", "w", encoding="utf-8") as f:\n'
         '    json.dump(safe, f, default=str)\n'
     )
 
@@ -5034,6 +7703,160 @@ def _is_rate_limit_error(error_msg: str | None) -> bool:
     return any(indicator in lower for indicator in RATE_LIMIT_INDICATORS)
 
 
+def _is_concurrent_session_error(error_msg: str | None) -> bool:
+    """Check if an error message indicates the provider's concurrent-
+    session cap was exceeded (distinct from rate limits).
+
+    See CONCURRENT_SESSION_INDICATORS for the token list + rationale.
+    Case-insensitive substring match. Returns False for None/empty.
+    """
+    if not error_msg:
+        return False
+    lower = error_msg.lower()
+    return any(indicator in lower for indicator in CONCURRENT_SESSION_INDICATORS)
+
+
+def _execute_test_with_session_retry(
+    sandbox_dir: Path,
+    payload: dict,
+    credentials: dict[str, str] | None,
+    timeout: int,
+    logger: logging.Logger,
+    trace_id: str,
+    candidate_name: str,
+) -> dict:
+    """Execute a single harness call, retrying on concurrent-session-cap
+    errors with exponential backoff.
+
+    The problem this solves: when per-candidate session parallelism
+    (default 3) exceeds a provider's concurrent-session cap (free tier
+    often = 1), some harness calls fail with "maximum concurrent
+    sessions exceeded" or similar. The right fallback is to WAIT for
+    a prior session to release, not to mark the test as errored.
+
+    Semantics:
+      - First call: immediate, no wait
+      - On success or non-session error: return immediately (no retry)
+      - On session-cap error: sleep exponential(attempt) + retry, up to
+        AGENT6_SESSION_MAX_RETRIES times
+      - Final failure after N retries: return the last error result
+
+    Thread safety: no shared state — safe to call from ThreadPoolExecutor
+    workers. Each concurrent worker that hits the cap will independently
+    back off and retry, which naturally serializes multiple concurrent
+    offenders through the provider's session slot availability.
+
+    Distinct from RATE_LIMIT retry (faster backoff, different reset
+    timescale) — session caps release on conversation-completion
+    timescales while rate limits reset in 1-60 seconds.
+    """
+    result = _execute_single_test(sandbox_dir, payload, credentials, timeout)
+
+    for attempt in range(1, AGENT6_SESSION_MAX_RETRIES + 1):
+        if result.get("success"):
+            return result
+        error_text = result.get("error")
+        if not _is_concurrent_session_error(error_text):
+            # Non-session errors (auth failure, timeout, schema issue)
+            # are handled elsewhere. Don't retry them here.
+            return result
+
+        wait_time = AGENT6_SESSION_RETRY_BACKOFF_BASE * (2 ** (attempt - 1))
+        logger.info(
+            f"concurrent session cap hit for {candidate_name}, "
+            f"attempt {attempt}/{AGENT6_SESSION_MAX_RETRIES}, "
+            f"waiting {wait_time}s for a slot to free up",
+            extra={
+                "operation": "session_cap_retry",
+                "trace_id": trace_id,
+                "candidate_name": candidate_name,
+                "attempt": attempt,
+                "wait_seconds": wait_time,
+                "error_fragment": str(error_text)[:200] if error_text else "",
+            },
+        )
+        time.sleep(wait_time)
+        result = _execute_single_test(sandbox_dir, payload, credentials, timeout)
+
+    # After all retries, if still failing with session error, log + return
+    if not result.get("success") and _is_concurrent_session_error(result.get("error")):
+        logger.warning(
+            f"concurrent session cap still blocking after "
+            f"{AGENT6_SESSION_MAX_RETRIES} retries for {candidate_name}; "
+            f"accepting the failure",
+            extra={
+                "operation": "session_cap_retry_exhausted",
+                "trace_id": trace_id,
+                "candidate_name": candidate_name,
+            },
+        )
+    return result
+
+
+def _run_single_test_with_rate_limit(
+    tc: TestCase,
+    sandbox_dir: Path,
+    harness: TestHarness,
+    credentials: dict[str, str] | None,
+    logger: logging.Logger,
+    trace_id: str,
+    rate_limiter: "GlobalProviderLimiter | None",
+    upstream_provider: str | None,
+) -> dict:
+    """Execute a single single-turn test case with rate-limit discipline.
+
+    Extracted from the original sequential loop body so both the
+    sequential and parallel paths share the same rate-limit +
+    rate-limit-retry semantics. Returns the harness result dict
+    (same shape as ``_execute_single_test``).
+
+    Thread-safety: this function has no shared mutable state. The
+    rate_limiter has its own internal lock (per GlobalProviderLimiter
+    contract). Subprocess spawning via ``_execute_single_test`` is
+    thread-safe — each test gets its own subprocess PID.
+    """
+    adapted = _adapt_test_input(tc, harness)
+
+    # Gap 13 + 25: pace calls to respect per-candidate + upstream limits
+    if rate_limiter is not None:
+        waited = rate_limiter.acquire(harness.candidate_name, upstream_provider)
+        if waited > 0.5:
+            logger.info(
+                f"rate_limiter waited {waited:.2f}s for {harness.candidate_name}",
+                extra={
+                    "operation": "rate_limit_wait",
+                    "trace_id": trace_id,
+                    "candidate_name": harness.candidate_name,
+                    "wait_seconds": waited,
+                    "upstream_provider": upstream_provider,
+                },
+            )
+
+    # Session-retry wrapper handles concurrent-session-cap errors
+    # (distinct from rate limits; different backoff tuning). If the
+    # cap isn't hit, this is a pass-through single call.
+    result = _execute_test_with_session_retry(
+        sandbox_dir, adapted, credentials,
+        _adaptive_test_timeout(harness),
+        logger, trace_id, harness.candidate_name,
+    )
+
+    if not result["success"] and _is_rate_limit_error(result.get("error")):
+        logger.info(
+            f"Rate limit hit for {harness.candidate_name}, backing off {AGENT6_RATE_LIMIT_BACKOFF}s",
+            extra={"operation": "rate_limit_backoff", "trace_id": trace_id},
+        )
+        time.sleep(AGENT6_RATE_LIMIT_BACKOFF)
+        if rate_limiter is not None:
+            rate_limiter.acquire(harness.candidate_name, upstream_provider)
+        result = _execute_test_with_session_retry(
+            sandbox_dir, adapted, credentials, AGENT6_TEST_TIMEOUT,
+            logger, trace_id, harness.candidate_name,
+        )
+
+    return result
+
+
 def _execute_all_tests(
     sandbox_dir: Path,
     test_cases: list[TestCase],
@@ -5049,14 +7872,26 @@ def _execute_all_tests(
     Returns list of (test_case, harness_result) tuples.
     Early aborts if error rate exceeds threshold.
 
+    Within a single candidate, tests are partitioned by modality:
+      - Multi-turn modalities (conversation, voice_conversation,
+        voice_turn) run SEQUENTIALLY. Each is owned by a plugin's
+        drive-loop with session_state that must progress monotonically.
+      - Single-turn modalities (everything else) run in PARALLEL via
+        ThreadPoolExecutor with max_workers =
+        AGENT6_PER_CANDIDATE_PARALLELISM (default 3). This cuts wall-
+        clock 2-3× on OCR / chatbot / classification evals without
+        requiring any cloud-migration redesign — it's the same
+        thread-in-container pattern that translates directly to
+        Docker / Cloud Run / managed-sandbox deployments.
+
     When ``rate_limiter`` is provided (Gap 13/25), each test call waits on
-    the per-candidate bucket AND the per-upstream bucket before firing.
+    the per-candidate bucket AND the per-upstream bucket before firing,
+    even in the parallel path. The limiter is its own pacing layer — the
+    parallelism knob is just the concurrency ceiling.
     """
+    from puzzleeval.config import AGENT6_PER_CANDIDATE_PARALLELISM
     shuffled = list(test_cases)
     random.shuffle(shuffled)
-
-    results: list[tuple[TestCase, dict]] = []
-    error_count = 0
 
     # Multi-call modalities (voice_conversation, voice_turn, conversation)
     # are owned by a plugin's drive-loop (voice_realtime / conversation_
@@ -5070,7 +7905,9 @@ def _execute_all_tests(
     # tolerated the bogus pre-call and got 6 audio artifacts via the
     # plugin; the strict ElevenLabs harness rejected it and ended up
     # with 0 audio_paths + 0 evaluation. Skip the pre-call for these
-    # modalities and let the plugin own every harness invocation.
+    # modalities and let the plugin own every harness invocation —
+    # the REAL work for multi-turn tests happens later in the
+    # evaluation phase (plugin.evaluate_output → drive_conversation).
     multi_call_input_types = {"conversation", "voice_conversation", "voice_turn"}
     multi_call_output_types = {"voice_conversation", "voice_turn"}
 
@@ -5080,15 +7917,15 @@ def _execute_all_tests(
             or (_tc.output_type or "") in multi_call_output_types
         )
 
+    # ──────────────────────────────────────────────────────────────────
+    # Phase A: instant placeholders for multi-turn tests. No network
+    # work happens here — the plugin's drive_conversation runs during
+    # evaluation. Still index these by their original shuffle position
+    # so we can stitch results in order at the end.
+    # ──────────────────────────────────────────────────────────────────
+    results_by_index: dict[int, tuple[TestCase, dict]] = {}
     for i, tc in enumerate(shuffled):
-        adapted = _adapt_test_input(tc, harness)
-
         if _is_multi_call(tc):
-            # Synthesize a placeholder result that downstream evaluation
-            # will hand to the plugin's evaluate_output. The plugin
-            # itself will drive every real harness call via its
-            # drive_conversation responder using the harness_runner
-            # injected by Agent 5.
             placeholder = {
                 "output": "",
                 "latency_ms": 0.0,
@@ -5115,69 +7952,122 @@ def _execute_all_tests(
                     "output_type": tc.output_type,
                 },
             )
-            results.append((tc, placeholder))
-            continue
+            results_by_index[i] = (tc, placeholder)
 
-        # Gap 13 + 25: pace calls to respect per-candidate and upstream limits
-        if rate_limiter is not None:
-            waited = rate_limiter.acquire(harness.candidate_name, upstream_provider)
-            if waited > 0.5:
-                logger.info(
-                    f"rate_limiter waited {waited:.2f}s for {harness.candidate_name}",
-                    extra={
-                        "operation": "rate_limit_wait",
-                        "trace_id": trace_id,
-                        "candidate_name": harness.candidate_name,
-                        "wait_seconds": waited,
-                        "upstream_provider": upstream_provider,
-                    },
-                )
+    # Shared mutable state across parallel workers. The lock guards
+    # results_by_index + error_state so parallel threads don't race
+    # on ordering or early-abort signaling.
+    state_lock = threading.Lock()
+    error_state = {"count": 0, "aborted": False}
 
-        result = _execute_single_test(
-            sandbox_dir, adapted, credentials, _adaptive_test_timeout(harness)
+    def _run_one_single_turn(i: int, tc: TestCase) -> None:
+        """Worker body for one single-turn test case.
+
+        Runs harness with rate-limit + rate-limit-retry, records the
+        result in ``results_by_index[i]``. Updates error count + flips
+        the abort flag if the error-rate threshold is crossed.
+
+        Safe to call from a ThreadPoolExecutor worker: the rate_limiter
+        has internal locking, _execute_single_test is subprocess-based
+        (no shared Python state), and all mutation of closure state
+        happens under ``state_lock``.
+        """
+        # Check abort flag before starting expensive work
+        with state_lock:
+            if error_state["aborted"]:
+                return
+
+        result = _run_single_test_with_rate_limit(
+            tc, sandbox_dir, harness, credentials, logger, trace_id,
+            rate_limiter, upstream_provider,
         )
 
-        if not result["success"] and _is_rate_limit_error(result.get("error")):
-            logger.info(
-                f"Rate limit hit for {harness.candidate_name}, backing off {AGENT6_RATE_LIMIT_BACKOFF}s",
-                extra={"operation": "rate_limit_backoff", "trace_id": trace_id},
+        with state_lock:
+            results_by_index[i] = (tc, result)
+
+            error_msg = result.get("error") or ""
+            is_incompatible = (
+                not result["success"]
+                and "INCOMPATIBLE" in error_msg.upper()
             )
-            time.sleep(AGENT6_RATE_LIMIT_BACKOFF)
-            if rate_limiter is not None:
-                rate_limiter.acquire(harness.candidate_name, upstream_provider)
-            result = _execute_single_test(
-                sandbox_dir, adapted, credentials, AGENT6_TEST_TIMEOUT
-            )
+            if not result["success"] and not is_incompatible:
+                error_state["count"] += 1
 
-        results.append((tc, result))
+            # Early-abort check: scanned across ALL tests completed so
+            # far (including multi-turn placeholders that "succeeded"
+            # trivially). The original sequential code used (i + 1) but
+            # with parallel completion order that's no longer stable.
+            # Using total_done = len(results_by_index) matches the
+            # intent ("fraction of tests seen so far that errored").
+            total_done = len(results_by_index)
+            if (
+                total_done >= AGENT6_MIN_TESTS_BEFORE_ABORT
+                and error_state["count"] / total_done > AGENT6_ERROR_ABORT_THRESHOLD
+            ):
+                if not error_state["aborted"]:
+                    logger.warning(
+                        f"Early abort for {harness.candidate_name}: "
+                        f"{error_state['count']}/{total_done} errors "
+                        f"({error_state['count']/total_done:.0%})",
+                        extra={
+                            "operation": "early_abort",
+                            "trace_id": trace_id,
+                            "candidate_name": harness.candidate_name,
+                            "error_rate": error_state["count"] / total_done,
+                        },
+                    )
+                error_state["aborted"] = True
 
-        error_msg = result.get("error") or ""
-        is_incompatible = not result["success"] and "INCOMPATIBLE" in error_msg.upper()
-        if not result["success"] and not is_incompatible:
-            error_count += 1
+    # ──────────────────────────────────────────────────────────────────
+    # Phase B: single-turn tests run in parallel via ThreadPoolExecutor.
+    # Multi-turn tests are already placeholder'd above; this phase only
+    # runs harness.run() for test cases that need a real API call at
+    # this stage. Rate limiter still paces within-bucket + per-upstream
+    # — parallelism is just the concurrency ceiling.
+    # ──────────────────────────────────────────────────────────────────
+    single_turn_work = [
+        (i, tc) for i, tc in enumerate(shuffled) if not _is_multi_call(tc)
+    ]
 
-        tests_run = i + 1
-        if (
-            tests_run >= AGENT6_MIN_TESTS_BEFORE_ABORT
-            and error_count / tests_run > AGENT6_ERROR_ABORT_THRESHOLD
-        ):
-            logger.warning(
-                f"Early abort for {harness.candidate_name}: "
-                f"{error_count}/{tests_run} errors ({error_count/tests_run:.0%})",
-                extra={
-                    "operation": "early_abort",
-                    "trace_id": trace_id,
-                    "candidate_name": harness.candidate_name,
-                    "error_rate": error_count / tests_run,
-                },
-            )
-            break
+    from puzzleeval.config import AGENT6_PER_CANDIDATE_PARALLELISM
+    parallelism = max(1, AGENT6_PER_CANDIDATE_PARALLELISM)
 
-        if i < len(shuffled) - 1 and rate_limiter is None:
-            # Only apply the blind 0.5s sleep when no smart limiter is active
-            time.sleep(0.5)
+    if parallelism == 1 or len(single_turn_work) <= 1:
+        # Sequential fallback — preserves legacy behavior when the
+        # knob is flipped to 1, and avoids ThreadPoolExecutor setup
+        # cost when there's nothing to parallelize.
+        for i, tc in single_turn_work:
+            _run_one_single_turn(i, tc)
+            # Only apply the blind 0.5s sleep when no smart limiter
+            # is active AND we're in the legacy sequential path.
+            if rate_limiter is None:
+                time.sleep(0.5)
+    else:
+        workers = min(parallelism, len(single_turn_work))
+        with ThreadPoolExecutor(
+            max_workers=workers,
+            thread_name_prefix=f"puzzleeval-tests-{harness.candidate_name[:20]}",
+        ) as executor:
+            # Submit all; as_completed to react to errors immediately
+            futures = [
+                executor.submit(_run_one_single_turn, i, tc)
+                for i, tc in single_turn_work
+            ]
+            for fut in as_completed(futures):
+                # Propagate unexpected exceptions (not normal harness
+                # failures — those land in result["error"] without
+                # raising). This matches the sequential path, which
+                # had no try/except around _execute_single_test.
+                fut.result()
 
-    return results
+    # Return results in the original shuffled order so downstream
+    # iteration is deterministic per shuffle (same order reporting,
+    # cleaner eval logs).
+    return [
+        results_by_index[i]
+        for i in range(len(shuffled))
+        if i in results_by_index
+    ]
 
 
 def _resolve_candidate_credentials(
@@ -5550,6 +8440,7 @@ def _compute_aggregate_metrics(
             "tests_skipped": 0,
             "success_rate": 0.0,
             "pass_rate": 0.0,
+            "overall_score": 0.0,
             "avg_latency_ms": 0.0,
             "p95_latency_ms": 0.0,
             "total_cost_usd": 0.0,
@@ -5590,6 +8481,19 @@ def _compute_aggregate_metrics(
     executed_count = total - tests_skipped
     successful_count = executed_count - tests_errored
 
+    # OBSERVABILITY FIX (real run 3eb3196a, 2026-04-22): overall_score was
+    # computed inline in the SSE callback (`sum(weighted_score) / len`) but
+    # never persisted to the schema. Frontend reads `overall_score` from
+    # the persisted report → always 0.0 on refresh/reopen. Compute and
+    # include here so both live and persisted paths see the same value.
+    # Mean of weighted_score across all tests (including failed/errored,
+    # which contribute 0). Range [0.0, 1.0]. `pass_rate` is binary-per-
+    # test; `overall_score` is degree-of-correctness across criteria.
+    overall_score = (
+        sum(getattr(r, "weighted_score", 0.0) or 0.0 for r in test_results) / total
+        if total > 0 else 0.0
+    )
+
     return {
         "total_tests": total,
         "tests_passed": tests_passed,
@@ -5598,6 +8502,7 @@ def _compute_aggregate_metrics(
         "tests_skipped": tests_skipped,
         "success_rate": successful_count / executed_count if executed_count > 0 else 0.0,
         "pass_rate": tests_passed / successful_count if successful_count > 0 else 0.0,
+        "overall_score": round(overall_score, 4),
         "avg_latency_ms": round(avg_latency, 2),
         "p95_latency_ms": round(p95_latency, 2),
         "total_cost_usd": round(total_cost, 6),
@@ -6364,6 +9269,49 @@ def run_implement_test_env_agent(
                 upstream_provider=upstream_by_name.get(harness.candidate_name),
             )
 
+            # ─────────────────────────────────────────────────────────
+            # Background audio-merge join (item 5 of
+            # PLAN_VOICE_RUN_OPTIMIZATIONS.md)
+            # ─────────────────────────────────────────────────────────
+            # The voice_realtime plugin submits per-test audio merges
+            # to a daemon thread pool to free worker threads at
+            # conversation-end (instead of conversation-end + 70s
+            # merge-time). We now block until every pending merge for
+            # this candidate's tests resolves (or times out at
+            # PUZZLEEVAL_VOICE_MERGE_TIMEOUT_S, default 60s). For each
+            # resolved merge, patch the merged_audio_path + role-
+            # 'conversation' audio entry into the matching test result
+            # by session_token. No-op when no voice tests ran in this
+            # candidate (wait_for_pending_merges returns {}).
+            try:
+                from puzzleeval.tool_plugins import get_plugin
+                voice_plugin = get_plugin("voice_realtime")
+            except Exception:  # noqa: BLE001
+                voice_plugin = None
+            if voice_plugin is not None and hasattr(
+                voice_plugin, "wait_for_pending_merges",
+            ):
+                merge_results = voice_plugin.wait_for_pending_merges()
+                if merge_results:
+                    for _tc, _r in raw_results:
+                        sess = _r.get("session_token") if isinstance(_r, dict) else None
+                        if not sess or sess not in merge_results:
+                            continue
+                        merged = merge_results[sess]
+                        if not merged:
+                            continue
+                        _r["merged_audio_path"] = merged
+                        # Prepend the merged conversation entry so UIs
+                        # that play "first audio" default to the full
+                        # call. Match the role tagging used by
+                        # voice_realtime's pre-bg-merge code path.
+                        existing = _r.get("audio_paths", []) or []
+                        _r["audio_paths"] = [
+                            {"role": "conversation",
+                             "path": merged,
+                             "token": sess}
+                        ] + existing
+
             eval_items = []
             test_case_results = []
 
@@ -6473,12 +9421,20 @@ def run_implement_test_env_agent(
                 reasoning: str,
                 tools_used_additions: list[str],
                 audio_paths_additions: list[dict] | None = None,
+                verdict_detail: dict | None = None,
+                tool_runner_cost_usd: float = 0.0,
             ) -> None:
                 """Apply a verdict's numerics back onto the TestCaseResult.
 
                 Shared between deterministic + tool_runner paths so the
                 weighted-score + telemetry fields end up identical
                 regardless of strategy.
+
+                ``verdict_detail`` carries the plugin's full detail dict —
+                used to extract rubric_verdict + transcript for agentic
+                conversational tests. Both fields land on the TCR when
+                present so the EvaluationReport assembler + frontend can
+                render the rubric breakdown + transcript view.
                 """
                 tcr_target.criteria_scores = [
                     CriterionScore(
@@ -6512,10 +9468,227 @@ def run_implement_test_env_agent(
                         + list(audio_paths_additions)
                     )
 
+                # ── Per-test cost + latency aggregation (NEW-AM gap fix) ──
+                # Real-run audit (2026-04-25, trace 8ded6706) showed every
+                # TestCaseResult had `cost_usd: None` and `latency_ms: 0`
+                # despite agentic conversational tests genuinely costing
+                # ~$0.03-0.10/test (user simulator turns + rubric judge call).
+                # Pre-fix: eval_cost was accumulated per-CANDIDATE only; the
+                # per-TEST breakdown was lost, so test_cost_usd reported
+                # $0.00 in summaries even when ~$0.50/run was actually spent.
+                #
+                # General fix: when verdict_detail carries the plugin-side
+                # cost components (simulator_cost_usd, judge_cost_usd —
+                # populated by voice_realtime + conversation_simulator
+                # agentic paths), sum them with the harness-side cost
+                # (already on tcr_target.cost_usd from harness.run()) and
+                # the tool_runner Claude cost. Same shape for latency.
+                if isinstance(verdict_detail, dict) or tool_runner_cost_usd:
+                    test_cost = float(getattr(tcr_target, "cost_usd", None) or 0.0)
+                    if isinstance(verdict_detail, dict):
+                        test_cost += float(verdict_detail.get("simulator_cost_usd") or 0.0)
+                        test_cost += float(verdict_detail.get("judge_cost_usd") or 0.0)
+                    # tool_runner's own Claude cost (from picking + invoking
+                    # plugins) — passed in as a separate arg so the per-test
+                    # number reflects ALL Anthropic spend on this test, not
+                    # just the harness/plugin breakdown.
+                    test_cost += float(tool_runner_cost_usd or 0.0)
+                    if test_cost > 0:
+                        tcr_target.cost_usd = round(test_cost, 6)
+
+                    # Latency: prefer plugin-reported total_duration_s,
+                    # fall back to harness latency_ms. Multi-turn voice
+                    # conversations are dominated by per-turn latency
+                    # accumulation; single-turn tests by the one harness
+                    # call. Either way, surfacing wall-clock per test
+                    # lets the operator spot slow tests in the report
+                    # without parsing transcripts.
+                    if isinstance(verdict_detail, dict):
+                        plugin_dur_s = verdict_detail.get("total_duration_s")
+                        if plugin_dur_s is not None:
+                            try:
+                                tcr_target.latency_ms = round(float(plugin_dur_s) * 1000, 2)
+                            except (TypeError, ValueError):
+                                pass
+
+                # ── Agentic conversational eval — rubric_verdict + transcript ──
+                # Plugins that ran the agentic path attach these to their
+                # verdict.detail dict (see voice_realtime._drive_conversation_
+                # agentic + conversation_simulator._evaluate_agentic). We
+                # surface BOTH onto the TestCaseResult so:
+                #   - report.py's _extract_test_evidence reads them into
+                #     TestEvidence (frontend renders the rubric breakdown)
+                #   - Downstream analysis can correlate per-criterion
+                #     scores with specific turns
+                # Non-conversational tests pass verdict_detail={} or without
+                # these keys — the getattr chain safely skips.
+                if isinstance(verdict_detail, dict):
+                    raw_verdict = verdict_detail.get("rubric_verdict")
+                    if isinstance(raw_verdict, dict):
+                        try:
+                            from puzzleeval.schemas import RubricVerdict as _RV
+                            tcr_target.rubric_verdict = _RV.model_validate(raw_verdict)
+                        except Exception as _exc:  # noqa: BLE001
+                            # Malformed verdict dict — log but don't fail
+                            # the test; the other signals still flow.
+                            logger.debug(
+                                "rubric_verdict validation failed: %s", _exc,
+                            )
+                    raw_transcript = verdict_detail.get("transcript")
+                    if isinstance(raw_transcript, list):
+                        from puzzleeval.schemas import ConversationTurn as _CT
+                        clean_turns = []
+                        for t in raw_transcript:
+                            if isinstance(t, dict) and "role" in t and "text" in t:
+                                try:
+                                    clean_turns.append(_CT.model_validate(t))
+                                except Exception:  # noqa: BLE001
+                                    # Skip malformed entries; partial
+                                    # transcript is still useful.
+                                    pass
+                        if clean_turns:
+                            tcr_target.transcript = clean_turns
+
+            # ──────────────────────────────────────────────────────────
+            # Shared lock for evaluation phase mutations.
+            #
+            # Both _run_deterministic and _run_tool_runner now run their
+            # per-item work in parallel via ThreadPoolExecutor. The
+            # expensive parts (plugin.evaluate_output, evaluate_with_
+            # tool_runner — each can take 15-30s for multi-turn
+            # conversations) happen OUTSIDE this lock. The lock only
+            # guards the fast shared-state mutations that follow:
+            #   - eval_cost accumulation (+=)
+            #   - plugin_handled_ids.add(...)
+            #   - tcr_target = next(...) lookup + _promote_verdict_to_tcr
+            #     (which mutates the TCR object in test_case_results)
+            #
+            # Thread safety reasoning:
+            #   - rate_limiter has its own internal lock
+            #   - plugin.evaluate_output / evaluate_with_tool_runner are
+            #     pure with respect to test_case_results (they return a
+            #     verdict; mutation happens AFTER under the lock)
+            #   - subprocess execution inside drive_conversation is
+            #     thread-safe (each subprocess has its own PID)
+            #   - voice_realtime + conversation_simulator plugins are
+            #     thread-local on session_dir + locked on _token_to_audio
+            #     (already audited per AD-004)
+            # ──────────────────────────────────────────────────────────
+            eval_state_lock = threading.Lock()
+
+            # Multi-turn vs single-turn split — drives which parallelism
+            # knob applies. Multi-turn tests open a separate provider
+            # session each (WebSocket / conversation_id / etc.) and run
+            # 15-30s of harness.run() calls; we cap their concurrency at
+            # SESSION_PARALLELISM (default 2) to stay inside common
+            # free-tier session caps. Single-turn tests are short
+            # API+LLM-judge round-trips; they get the higher PARALLELISM
+            # cap (default 3).
+            from puzzleeval.config import (
+                AGENT6_PER_CANDIDATE_PARALLELISM,
+                AGENT6_PER_CANDIDATE_SESSION_PARALLELISM,
+            )
+            _multi_turn_input = {"conversation", "voice_conversation", "voice_turn"}
+            _multi_turn_output = {"voice_conversation", "voice_turn"}
+
+            def _is_multi_turn_eval(_tc) -> bool:
+                return (
+                    (getattr(_tc, "input_type", "") or "") in _multi_turn_input
+                    or (getattr(_tc, "output_type", "") or "") in _multi_turn_output
+                )
+
+            def _dispatch_eval_items_in_parallel(items, worker):
+                """Run ``worker(item)`` for every item, parallelized by modality.
+
+                Multi-turn items run at SESSION_PARALLELISM; single-turn
+                items run at PARALLELISM. Both buckets dispatch
+                concurrently inside themselves but the buckets run
+                sequentially to keep log ordering clean — the expensive
+                bucket (multi-turn) typically finishes after the
+                single-turn bucket, so total wall-clock is near
+                max(bucket_a_time, bucket_b_time).
+
+                Thread-local session_dir propagation (AD-004 + real-run
+                trace 94271de4 fix): ``set_session_dir`` was called on
+                the OUTER candidate-level thread above (line ~7255),
+                but voice_realtime stores it in ``threading.local()``
+                so the new ThreadPoolExecutor worker threads spawned
+                here don't inherit it. Without this re-set, voice
+                artifacts wrote to %TEMP%/puzzleeval_voice/ instead of
+                ``runs/<trace>/harnesses/<slug>/voice/`` — the backend
+                audio-streaming containment check then 404'd every
+                playback request from the frontend. The wrapper below
+                re-applies set_session_dir on each worker thread's
+                first call, restoring AD-004 across the parallelism
+                boundary.
+                """
+                # Capture the session dir from the outer thread so
+                # every worker can re-apply it on its own thread-local.
+                _worker_voice_session_dir = sandbox_dir / "voice"
+
+                def _worker_with_session_dir(item):
+                    # Re-set session_dir on this thread's local. Cheap
+                    # (~10 plugins, each is a setattr); idempotent;
+                    # safe to call from any thread.
+                    try:
+                        from puzzleeval.tool_plugins import list_plugins as _lp
+                        for _p in _lp():
+                            if hasattr(_p, "set_session_dir"):
+                                try:
+                                    _p.set_session_dir(_worker_voice_session_dir)
+                                except Exception:  # noqa: BLE001
+                                    pass
+                    except Exception:  # noqa: BLE001
+                        pass  # plugin discovery failure is best-effort
+                    return worker(item)
+
+                multi_turn = [it for it in items if _is_multi_turn_eval(it[0])]
+                single_turn = [it for it in items if not _is_multi_turn_eval(it[0])]
+
+                # Single-turn first — usually finishes fast
+                if single_turn:
+                    workers = max(1, min(
+                        AGENT6_PER_CANDIDATE_PARALLELISM, len(single_turn),
+                    ))
+                    if workers == 1:
+                        for it in single_turn:
+                            _worker_with_session_dir(it)
+                    else:
+                        with ThreadPoolExecutor(
+                            max_workers=workers,
+                            thread_name_prefix=f"puzzleeval-eval-st-{harness.candidate_name[:16]}",
+                        ) as ex:
+                            futures = [ex.submit(_worker_with_session_dir, it) for it in single_turn]
+                            for fut in as_completed(futures):
+                                fut.result()  # propagate exceptions
+
+                if multi_turn:
+                    workers = max(1, min(
+                        AGENT6_PER_CANDIDATE_SESSION_PARALLELISM, len(multi_turn),
+                    ))
+                    if workers == 1:
+                        for it in multi_turn:
+                            _worker_with_session_dir(it)
+                    else:
+                        with ThreadPoolExecutor(
+                            max_workers=workers,
+                            thread_name_prefix=f"puzzleeval-eval-mt-{harness.candidate_name[:16]}",
+                        ) as ex:
+                            futures = [ex.submit(_worker_with_session_dir, it) for it in multi_turn]
+                            for fut in as_completed(futures):
+                                fut.result()
+
             def _run_deterministic() -> None:
-                """Legacy enum-based dispatch path. Mutates eval_items in place."""
+                """Legacy enum-based dispatch path. Mutates eval_items in place.
+
+                Per-item work runs in parallel via _dispatch_eval_items_
+                in_parallel — multi-turn evals at SESSION_PARALLELISM,
+                single-turn at PARALLELISM. Shared state mutations are
+                guarded by eval_state_lock.
+                """
                 from puzzleeval.modality import detect_for_test_case
-                for eval_item in list(eval_items):
+
+                def _process_one(eval_item) -> None:
                     tc_eval, result_eval, criteria_eval = eval_item
                     reqs = detect_for_test_case(
                         input_type=tc_eval.input_type,
@@ -6523,7 +9696,7 @@ def run_implement_test_env_agent(
                     )
                     evaluator = next(iter(reqs.output_evaluators), None)
                     if evaluator is None:
-                        continue
+                        return
                     runner_for_plugin = None
                     if evaluator.capabilities().requires_harness_runner:
                         creds_for_runner = creds
@@ -6561,7 +9734,10 @@ def run_implement_test_env_agent(
                                     _t=timeout_for_runner,
                                     _ctx=tc_ctx,
                                     _default=_default_ctx,
-                                    _it=tc_input_type):
+                                    _it=tc_input_type,
+                                    _logger=logger,
+                                    _trace_id=input_data.trace_id,
+                                    _cn=candidate.name):
                             if not isinstance(payload, dict):
                                 payload = {"payload": payload}
                             merged = dict(payload)
@@ -6580,9 +9756,29 @@ def run_implement_test_env_agent(
                             )
                             if "input_type" not in merged and _it:
                                 merged["input_type"] = _it
-                            return _execute_single_test(_sd, merged, _c, _t)
+                            # Session-cap retry: if the provider returns
+                            # "max concurrent sessions" on this per-turn
+                            # call, the wrapper waits for a slot and
+                            # retries before returning. See
+                            # _execute_test_with_session_retry for the
+                            # full semantics. Transparent to the plugin's
+                            # drive-loop — it sees a longer latency on
+                            # the affected turn but no error.
+                            return _execute_test_with_session_retry(
+                                _sd, merged, _c, _t,
+                                _logger, _trace_id, _cn,
+                            )
                         runner_for_plugin = _runner
                     try:
+                        # Pass agentic-eval context through to the plugin.
+                        # Conversational plugins (voice_realtime,
+                        # conversation_simulator) detect persona+goal+rubric
+                        # and route to the agentic drive loop. When absent,
+                        # plugins fall back to their scripted path. This
+                        # is the SINGLE wiring seam that makes
+                        # Agent 3's persona/goal/rubric actually reach
+                        # evaluation time. See schemas.TestCase for the
+                        # per-test override semantics.
                         verdict = evaluator.evaluate_output(
                             response=result_eval.get("raw_response") or result_eval.get("output"),
                             expected=tc_eval.expected_output,
@@ -6592,20 +9788,28 @@ def run_implement_test_env_agent(
                                 for c in criteria_eval
                             ],
                             harness_runner=runner_for_plugin,
+                            persona=getattr(tc_eval, "persona", None),
+                            goal=getattr(tc_eval, "goal", None),
+                            constraints=getattr(tc_eval, "constraints", None) or [],
+                            rubric=getattr(tc_eval, "rubric", None) or [],
+                            max_turns=getattr(tc_eval, "max_turns", 6),
+                            evaluation_mode=getattr(tc_eval, "evaluation_mode", "auto"),
+                            trace_id=input_data.trace_id,
+                            # Pass input_context directly so the plugin
+                            # (+ rubric_judge downstream) can read the
+                            # agent's system prompt as ground truth for
+                            # scope/policy scoring. Without this, the
+                            # judge has to guess what "in scope" means.
+                            input_context=getattr(tc_eval, "input_context", None) or {},
                         )
                     except Exception as exc:
                         logger.warning(
                             f"plugin {evaluator.name} crashed evaluating {tc_eval.id}: {exc}; falling back to LLM judge",
                             extra={"operation": "plugin_eval_crash", "trace_id": input_data.trace_id},
                         )
-                        continue
+                        return  # parallel worker — return, not continue
                     if verdict.fallback_reason:
-                        continue
-                    tcr_target = next(
-                        (t for t in test_case_results if t.test_case_id == tc_eval.id), None,
-                    )
-                    if tcr_target is None:
-                        continue
+                        return
                     # Pull audio artifacts if the plugin captured any.
                     # Priority order (same as plugin_tool_runner.py —
                     # kept consistent so either eval strategy produces
@@ -6656,15 +9860,36 @@ def run_implement_test_env_agent(
                                 f"{evaluator.name} artifacts fetch failed: {exc}",
                                 extra={"operation": "plugin_artifacts_failed", "trace_id": input_data.trace_id},
                             )
-                    _promote_verdict_to_tcr(
-                        tcr_target, criteria_eval,
-                        score=verdict.score,
-                        passed=verdict.passed,
-                        reasoning=verdict.reasoning,
-                        tools_used_additions=[evaluator.name],
-                        audio_paths_additions=audio_artifacts,
-                    )
-                    plugin_handled_ids.add(tc_eval.id)
+
+                    # ── Shared-state mutation: LOCK ──
+                    # test_case_results lookup + TCR mutation +
+                    # plugin_handled_ids.add must be atomic. Two parallel
+                    # workers could otherwise race on the same test_case_id
+                    # and double-promote. Fast (<1ms) — no performance
+                    # concern from holding the lock here.
+                    with eval_state_lock:
+                        tcr_target = next(
+                            (t for t in test_case_results if t.test_case_id == tc_eval.id), None,
+                        )
+                        if tcr_target is None:
+                            return
+                        _promote_verdict_to_tcr(
+                            tcr_target, criteria_eval,
+                            score=verdict.score,
+                            passed=verdict.passed,
+                            reasoning=verdict.reasoning,
+                            tools_used_additions=[evaluator.name],
+                            audio_paths_additions=audio_artifacts,
+                            verdict_detail=detail if isinstance(detail, dict) else None,
+                        )
+                        plugin_handled_ids.add(tc_eval.id)
+
+                # Dispatch every item to the parallel runner. Multi-turn
+                # evals run at SESSION_PARALLELISM (2); single-turn at
+                # PARALLELISM (3). Both inside this single candidate
+                # thread — cross-candidate parallelism is the outer
+                # ThreadPoolExecutor in run_implement_test_env_agent.
+                _dispatch_eval_items_in_parallel(list(eval_items), _process_one)
 
             def _run_tool_runner() -> None:
                 """Claude-driven plugin dispatch via tool_runner. Mutates eval_items.
@@ -6688,7 +9913,8 @@ def run_implement_test_env_agent(
                 sandbox_for_runner = sandbox_dir
                 timeout_for_runner = _adaptive_test_timeout(harness)
 
-                for eval_item in list(eval_items):
+                def _process_one(eval_item) -> None:
+                    nonlocal eval_cost
                     tc_eval, result_eval, criteria_eval = eval_item
                     # H3 fix: only inject harness_runner when the modality
                     # actually needs multi-call orchestration. Widening the
@@ -6724,7 +9950,10 @@ def run_implement_test_env_agent(
                                     _t=timeout_for_runner,
                                     _ctx=tc_ctx,
                                     _default=_default_ctx,
-                                    _it=tc_input_type):
+                                    _it=tc_input_type,
+                                    _logger=logger,
+                                    _trace_id=input_data.trace_id,
+                                    _cn=candidate.name):
                             if not isinstance(payload, dict):
                                 payload = {"payload": payload}
                             merged = dict(payload)
@@ -6743,7 +9972,18 @@ def run_implement_test_env_agent(
                             )
                             if "input_type" not in merged and _it:
                                 merged["input_type"] = _it
-                            return _execute_single_test(_sd, merged, _c, _t)
+                            # Session-cap retry: if the provider returns
+                            # "max concurrent sessions" on this per-turn
+                            # call, the wrapper waits for a slot and
+                            # retries before returning. See
+                            # _execute_test_with_session_retry for the
+                            # full semantics. Transparent to the plugin's
+                            # drive-loop — it sees a longer latency on
+                            # the affected turn but no error.
+                            return _execute_test_with_session_retry(
+                                _sd, merged, _c, _t,
+                                _logger, _trace_id, _cn,
+                            )
                         runner_for_this = _runner
 
                     verdict = evaluate_with_tool_runner(
@@ -6760,35 +10000,72 @@ def run_implement_test_env_agent(
                         input_type=tc_eval.input_type,
                         output_type=tc_eval.output_type,
                         trace_id=input_data.trace_id,
+                        # Agentic conversational context — threaded through
+                        # to EvalContext → plugin.evaluate_output so
+                        # persona/goal/rubric actually reach the plugin's
+                        # agentic drive path. Without these, multi-turn
+                        # tests silently fall back to scripted mode.
+                        persona=getattr(tc_eval, "persona", None),
+                        goal=getattr(tc_eval, "goal", None),
+                        constraints=getattr(tc_eval, "constraints", None) or [],
+                        rubric=getattr(tc_eval, "rubric", None) or [],
+                        max_turns=getattr(tc_eval, "max_turns", 6),
+                        evaluation_mode=getattr(tc_eval, "evaluation_mode", "auto"),
+                        input_context=getattr(tc_eval, "input_context", None) or {},
                     )
-                    # C4 fix: accumulate Claude cost from each tool_runner
-                    # invocation into the candidate's evaluation_cost_usd.
-                    # Prior to this, tool_runner cost vanished from the
-                    # report's total_test_cost_usd.
-                    eval_cost += float(verdict.cost_usd or 0.0)
-                    if verdict.fallback_reason:
-                        logger.info(
-                            "tool_runner fallback for %s: %s",
-                            tc_eval.id, verdict.fallback_reason,
-                            extra={"operation": "tool_runner_fallback",
-                                   "trace_id": input_data.trace_id},
+                    # ── Shared-state mutation: LOCK ──
+                    # eval_cost, plugin_handled_ids, and TCR mutation must
+                    # be atomic. Two parallel workers could otherwise
+                    # double-count eval_cost or double-promote a TCR.
+                    # The expensive work (evaluate_with_tool_runner) ran
+                    # OUTSIDE this lock; we're only holding it for the
+                    # fast mutations (<1ms).
+                    with eval_state_lock:
+                        # C4 fix: accumulate Claude cost from each tool_
+                        # runner invocation into evaluation_cost_usd.
+                        eval_cost += float(verdict.cost_usd or 0.0)
+                        if verdict.fallback_reason:
+                            logger.info(
+                                "tool_runner fallback for %s: %s",
+                                tc_eval.id, verdict.fallback_reason,
+                                extra={"operation": "tool_runner_fallback",
+                                       "trace_id": input_data.trace_id},
+                            )
+                            return  # parallel worker — return, not continue
+                        tcr_target = next(
+                            (t for t in test_case_results if t.test_case_id == tc_eval.id), None,
                         )
-                        continue
-                    tcr_target = next(
-                        (t for t in test_case_results if t.test_case_id == tc_eval.id), None,
-                    )
-                    if tcr_target is None:
-                        continue
-                    tools_used = ["tool_runner"] + list(verdict.tools_invoked)
-                    _promote_verdict_to_tcr(
-                        tcr_target, criteria_eval,
-                        score=verdict.score,
-                        passed=verdict.passed,
-                        reasoning=verdict.reasoning,
-                        tools_used_additions=tools_used,
-                        audio_paths_additions=verdict.artifacts,
-                    )
-                    plugin_handled_ids.add(tc_eval.id)
+                        if tcr_target is None:
+                            return
+                        tools_used = ["tool_runner"] + list(verdict.tools_invoked)
+                        _promote_verdict_to_tcr(
+                            tcr_target, criteria_eval,
+                            score=verdict.score,
+                            passed=verdict.passed,
+                            reasoning=verdict.reasoning,
+                            tools_used_additions=tools_used,
+                            audio_paths_additions=verdict.artifacts,
+                            # Tool-runner verdicts carry their plugin's detail
+                            # dict under `.verdict_detail` (see
+                            # plugin_tool_runner.ToolRunnerVerdict fix).
+                            verdict_detail=getattr(verdict, "verdict_detail", None),
+                            # Pass the tool_runner Claude cost so the per-test
+                            # cost_usd reflects ALL Anthropic spend on this
+                            # test, not just plugin-side simulator+judge.
+                            # Pre-NEW-AM this cost was tracked only at the
+                            # candidate-aggregate level (eval_cost), so each
+                            # test's cost_usd showed None even when ~$0.10
+                            # was genuinely spent.
+                            tool_runner_cost_usd=float(verdict.cost_usd or 0.0),
+                        )
+                        plugin_handled_ids.add(tc_eval.id)
+
+                # Dispatch every item to the parallel runner. Multi-turn
+                # evals (WebSocket voice conversations, chat loops) run at
+                # SESSION_PARALLELISM (default 2); single-turn evals
+                # (OCR, chatbot single-turn, classification) run at
+                # PARALLELISM (default 3).
+                _dispatch_eval_items_in_parallel(list(eval_items), _process_one)
 
             # Initialize eval_cost BEFORE dispatch so tool_runner's nonlocal
             # reference can accumulate into it. The llm-judge path at the
@@ -6916,6 +10193,7 @@ def run_implement_test_env_agent(
                 tests_skipped=metrics["tests_skipped"],
                 success_rate=metrics["success_rate"],
                 pass_rate=metrics["pass_rate"],
+                overall_score=metrics["overall_score"],
                 avg_latency_ms=metrics["avg_latency_ms"],
                 p95_latency_ms=metrics["p95_latency_ms"],
                 total_cost_usd=metrics["total_cost_usd"],
@@ -6944,7 +10222,12 @@ def run_implement_test_env_agent(
                     "pass_rate": metrics.get("pass_rate", 0),
                     "avg_latency_ms": metrics.get("avg_latency_ms", 0),
                     "total_cost_usd": metrics.get("total_cost_usd", 0),
-                    "overall_score": sum(tcr.weighted_score for tcr in run.test_results) / max(len(run.test_results), 1),
+                    # Read from the same source as the persisted schema
+                    # field — previously this was inlined as
+                    # `sum(weighted_score)/len` here but NOT persisted,
+                    # causing live/refreshed UI inconsistency. Now both
+                    # SSE and persisted JSON read the same computed value.
+                    "overall_score": metrics.get("overall_score", 0.0),
                     "test_results": [
                         {
                             "test_case_id": tcr.test_case_id,

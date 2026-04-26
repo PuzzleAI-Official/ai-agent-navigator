@@ -349,7 +349,7 @@ The builder agent does its own research in Phase 1 (no separate research sub-age
 **The harness objective:** A thin API client that sends input (file or text) to the service and returns the raw response. The harness does NOT parse, extract, or interpret results — that is the LLM judge's job.
 
 **The flow per candidate:**
-1. **PHASE 1: RESEARCH** (Sonnet 4.6) — Server-side web_search and web_fetch to find API docs. Write api_spec.txt with INPUT_COMPATIBILITY, ROUTING_TABLE, PYTHON_EXAMPLES, DOC_MAP, DOC_REFERENCES. Agent knows ALL test case input forms upfront.
+1. **PHASE 1: RESEARCH** (Sonnet 4.6) — Server-side web_search and web_fetch to find API docs. Write api_spec.txt with INPUT_COMPATIBILITY, ROUTING_TABLE, WORKING_EXAMPLE (any language — Python / curl / JS / Go / raw HTTP), DOC_MAP, DOC_REFERENCES. Agent knows ALL test case input forms upfront.
 2. **PHASE 2: BUILD** (Opus 4.7) — Write harness.py as a thin API client for all compatible input forms. Incompatible forms return `success=False, error="INCOMPATIBLE"`. Smoke test verifies structure. `ask_research` available for debugging.
 3. **PHASE 3: VALIDATE** (Opus 4.7) — Live API validation required. Credentials are injected into the build sandbox. Run real API calls with test files (staged before build). Fix failures with full API context.
 4. **HARNESS_COMPLETE** — Signal completion. Milestone message on smoke test pass.

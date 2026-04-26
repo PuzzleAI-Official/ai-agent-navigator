@@ -183,7 +183,10 @@ Only REJECT when there is genuinely ZERO evidence of any API existing across ALL
 - Never reject based on pricing alone — paid APIs are still accessible.
 
 ## Output Format
-Write your findings as structured text with these exact labels:
+
+You produce TWO blocks per candidate.
+
+### Block 1 — Findings (text, with these exact labels)
 
 CANDIDATE: {name}
 DETERMINATION: PASS or REJECT
@@ -196,6 +199,121 @@ CONFIRMED_CAPABILITIES: Comma-separated list of capabilities found in docs
 RATE_LIMITS: Any rate limit info found (or "not_found")
 DATA_FORMATS: What input/output formats the API accepts (or "not_found")
 NOTES: Any caveats, uncertainty, or additional context for Agent 5
+
+### Block 2 — Build-Readiness Checklist (JSON inside fenced code block)
+
+**REQUIRED — emit this block on every PASS verdict.** This is the
+structured handoff to Agent 5. Without it, Agent 5 falls back to
+full-research mode and re-does the work you just did. Emit a fenced
+```json block labelled `BUILD_READINESS_CHECKLIST` immediately after
+the findings:
+
+```json BUILD_READINESS_CHECKLIST
+{
+  "provider_surface": [
+    {
+      "name": "POST /v1/example",
+      "purpose": "one-sentence what it does",
+      "relevance_to_use_case": "primary",
+      "selection_note": "matches the workflow step's role best because X"
+    },
+    {
+      "name": "POST /v1/alternative",
+      "purpose": "...",
+      "relevance_to_use_case": "alternative",
+      "selection_note": "could work but X reason favors the primary"
+    }
+  ],
+  "selected_endpoint": "POST /v1/example",
+  "selection_justification": "one paragraph explaining why this endpoint over the alternatives",
+  "endpoint_path":         {"status": "confirmed", "value": "https://api.example.com/v1/example", "source_url": "https://docs.example.com/reference"},
+  "auth_method":           {"status": "confirmed", "value": "Bearer token in Authorization header", "source_url": "https://docs.example.com/auth"},
+  "request_body_shape":    {"status": "confirmed", "value": "{\"input\":\"string\",\"options\":{...}}", "source_url": "https://docs.example.com/reference"},
+  "response_body_shape":   {"status": "confirmed", "value": "{\"id\":\"...\",\"output\":\"...\",\"usage\":{...}}", "source_url": "https://docs.example.com/reference"},
+  "auth_refresh":          {"status": "unknown", "reasoning": "docs do not address long-lived sessions"},
+  "error_response_schema": {"status": "inferred", "value": "{\"error\":{\"type\":\"...\",\"message\":\"...\"}}", "reasoning": "docs show one example but no full schema"},
+  "rate_limit_signal":     {"status": "confirmed", "value": "X-RateLimit-Remaining header + 429 with Retry-After", "source_url": "https://docs.example.com/rate-limits"},
+  "async_pattern":         {"status": "confirmed", "value": "synchronous request/response", "source_url": "https://docs.example.com/reference"},
+  "content_type_quirks":   {"status": "confirmed", "value": "application/json only", "source_url": "https://docs.example.com/reference"},
+  "sandbox_availability":  {"status": "unknown", "reasoning": "docs do not mention sandbox; production-only inferred"}
+}
+```
+
+### Build-Readiness Checklist — instructions
+
+The ten fields below correspond to the ten questions a HARNESS BUILDER
+must answer to write working code. Each field has three possible
+states:
+  - "confirmed" — answered from authoritative docs. MUST include
+    `source_url` pointing at the doc that confirms it. Strongly include
+    a `value` (concrete URL / header name / JSON skeleton).
+  - "inferred" — your best guess from search snippets or related
+    pages. Include `reasoning` explaining what evidence supported the
+    guess. `source_url` is optional.
+  - "unknown" — docs did not cover this. Include `reasoning` saying
+    why ('docs paywalled', 'sparse SDK-only docs', 'not in any reference
+    page'). NEVER fabricate a value when status is unknown.
+
+THE FOUR NON-NEGOTIABLES (must be `confirmed` for Verified Pass):
+  1. endpoint_path        — concrete URL or template
+  2. auth_method          — header name + value format, or OAuth flow
+  3. request_body_shape   — JSON skeleton (or multipart fields, or query params)
+  4. response_body_shape  — JSON skeleton with path to primary output
+
+THE SIX CONDITIONAL FIELDS (mark `unknown` with reasoning if not in docs):
+  5. auth_refresh         — refresh-token flow or "static (no refresh)"
+  6. error_response_schema — at minimum the 401 / 429 shape
+  7. rate_limit_signal    — header name + retry-after format
+  8. async_pattern        — sync / polling / streaming / webhook + protocol
+  9. content_type_quirks  — multipart, SSE, binary, ndjson framing
+ 10. sandbox_availability — sandbox base URL when side-effects matter
+
+### Provider surface — instructions
+
+`provider_surface` enumerates the endpoints in this provider's API
+that PLAUSIBLY relate to the user's use case. Cap at ~5 entries to
+avoid bloat on providers with huge catalogs (e.g. AWS, Google Cloud).
+
+For each endpoint:
+  - `relevance_to_use_case = "primary"`: the one you'd build against
+    for THIS workflow step. Exactly one is typical; zero is acceptable
+    only when no relevant endpoint exists (then DETERMINATION = REJECT).
+  - `relevance_to_use_case = "alternative"`: could plausibly cover the
+    same step. Useful for the reviewer to see what was considered.
+  - `relevance_to_use_case = "unrelated"`: exists in the surface but
+    doesn't cover the step. Listed for transparency only.
+
+`selected_endpoint` MUST match a `name` in `provider_surface` tagged
+"primary".
+
+`selection_justification` is a short paragraph explaining WHY the
+selected endpoint beats the alternatives. Reference the workflow step's
+role and any relevant alternative names. This is the artifact that
+catches "wrong endpoint matched for the use case" failures (e.g., TTS
+selected when ConvAI WebSocket was the correct choice).
+
+### Three-state outcome (rejection rules)
+
+Your DETERMINATION value combines with the checklist's `is_verified_pass`
+state to produce one of three outcomes downstream:
+
+  - Verified Pass: DETERMINATION=PASS AND the four non-negotiables are
+    all `confirmed`. Candidate flows to Agent 5 with a populated
+    checklist.
+  - Verified Reject: DETERMINATION=REJECT (only when you found
+    DEFINITIVE evidence the candidate is bad: docs explicitly say "no
+    public API", endpoint returns documented 404, deprecated with no
+    replacement, the relevant API is enterprise-only / no self-service).
+    Candidate is filtered out before Agent 5.
+  - Inconclusive: DETERMINATION=PASS but one or more non-negotiables
+    are `inferred` or `unknown`. This is a LEGITIMATE outcome for
+    sparsely-documented providers — the candidate still flows to Agent 5,
+    which attempts to confirm via its own research; the runtime test is
+    the final arbiter. Do NOT mark such candidates REJECT.
+
+NEVER reject a candidate for "I couldn't find docs in 6 fetches". That
+is system-side scarcity, not evidence of badness. PASS with `unknown`
+fields and let Agent 5 take it from there.
 """
 
 
@@ -218,9 +336,17 @@ STRUCTURE_SYSTEM_PROMPT = """You are a data structuring assistant. Take the scre
    - screening_notes should summarize the evidence trail
    - **relevance_score MUST be copied EXACTLY from the Original Candidate Data — do NOT change it. It is Agent 2's score, not yours to modify.**
    - **adoption_difficulty MUST be copied EXACTLY from the Original Candidate Data.**
+   - **checklist** (BuildReadinessChecklist) MUST be populated by transcribing the
+     `BUILD_READINESS_CHECKLIST` JSON block emitted in that candidate's
+     findings. Copy field-for-field. If the JSON block is missing or
+     malformed, set checklist to a sentinel with `populated_by`
+     `"system_failure"` and every field's status `"unknown"` (Agent 5 will
+     handle full-research mode). NEVER fabricate checklist values that
+     weren't in the verification findings.
 3. For rejected candidates (DETERMINATION: REJECT):
    - rejection_reason should be specific and evidence-based
    - rejection_category must be one of the allowed values
+   - checklist field is not used (rejected candidates don't reach Agent 5)
 4. total_candidates_screened must equal len(validated) + len(rejected)
 
 ## Field Guidelines
@@ -228,6 +354,30 @@ STRUCTURE_SYSTEM_PROMPT = """You are a data structuring assistant. Take the scre
 auth_method: One of "api_key", "oauth2", "bearer_token", "basic_auth", "no_auth", "unknown"
 api_access_method: One of "free_signup", "free_tier", "trial", "sandbox", "open", "paid_only"
 rejection_category: One of "no_api_access", "no_public_docs", "capability_mismatch", "rate_limit_insufficient", "no_free_tier", "enterprise_only", "deprecated", "region_restricted"
+
+## BuildReadinessChecklist Field Guidelines
+
+The checklist's nested fields use these enums:
+
+  FieldStatus.status:               "confirmed" | "inferred" | "unknown"
+  EndpointSummary.relevance_to_use_case: "primary" | "alternative" | "unrelated"
+  BuildReadinessChecklist.populated_by:
+    "agent_4" — populated from the verification findings (normal path)
+    "system_failure" — JSON block missing/malformed, sentinel emitted
+    (the other two values, "agent_5" and "agent_5_after_research",
+     are written by Agent 5 later; don't use them here)
+
+Required behaviors when transcribing:
+  - Preserve every checklist field. Don't drop "unknown" entries to make
+    the JSON look cleaner.
+  - When the verification findings contain a `BUILD_READINESS_CHECKLIST`
+    fenced JSON block, parse it and copy the contents into the
+    `checklist` field as-is. Set `populated_by` to "agent_4".
+  - When the JSON block is missing, malformed, or empty, set every
+    FieldStatus to {"status": "unknown", "reasoning": "<why>"} and
+    `populated_by` to "system_failure". This is the system-failure
+    sentinel — the candidate is NOT rejected (per the three-state
+    rejection model); Agent 5 handles it as full-research mode.
 
 ## Screening Summary
 Write a brief overview: how many candidates were screened, how many passed, how many rejected, and any notable patterns (e.g., "3 of 5 candidates have free tiers suitable for testing").
@@ -272,9 +422,27 @@ WEB_SEARCH_TOOL = {
 # content each time, so there's no repeated context to cache.
 
 # Max tokens per call type.
-# Verification is concise — Claude reads a page and writes ~500-1000 tokens of findings.
-# Structuring formats all findings into JSON (~2000-3000 tokens output).
-VERIFICATION_MAX_TOKENS = 4096
+# Verification produces TWO outputs per candidate: (1) findings text
+# (~500-1000 tokens — PASS/REJECT, evidence, auth_method, etc.) and
+# (2) the BUILD_READINESS_CHECKLIST JSON block (~600-900 tokens — ten
+# fields plus provider_surface). Adaptive thinking blocks add another
+# ~1000-3000 tokens of reasoning between tool calls.
+#
+# Token budget history:
+#   - 4096: original — JSON block reliably truncated (trace 73a9d605
+#     every candidate fell to system_failure sentinel)
+#   - 12288 (NEW-AK): mostly worked but failed on rich-docs candidates
+#     (real-run trace 4427591c, 2026-04-25: OpenAI Realtime SIP had
+#     so much rich data — 9 capabilities, 5 user_selectable_params,
+#     full interaction_model, detailed pricing/rate_limits — that the
+#     findings + structured fields consumed the budget, leaving the
+#     fenced JSON block truncated. Sentinel checklist returned →
+#     no pre-render fast path → Agent 5 had to do full Sonnet research)
+#   - 16384 (NEW-AM): bumped to address the rich-docs failure mode.
+#     Adds <$0.05 per candidate when budget actually used (Sonnet
+#     output rate $15/MTok × 4K extra tokens = $0.06 worst case),
+#     $0 otherwise. Still well below Sonnet's 64K per-call cap.
+VERIFICATION_MAX_TOKENS = 16384
 # Structuring must output ALL validated/rejected candidates with rich
 # enrichment fields (16 fields per ScreenedCandidate × up to 7 candidates).
 # 4096 tokens is too small — causes truncated JSON. 16384 gives plenty of
@@ -314,6 +482,162 @@ MAX_PARALLEL_VERIFICATIONS = int(
 # the candidate's details from Agent 2 and the user's sub-tasks for
 # capability matching.
 # ============================================================================
+
+# ============================================================================
+# [CORE] Build-readiness checklist extraction
+# ============================================================================
+# The verification prompt asks Claude to emit two blocks per candidate:
+#   1. Findings text (PASS/REJECT + EVIDENCE / AUTH_METHOD / etc.)
+#   2. A fenced ```json BUILD_READINESS_CHECKLIST block holding the
+#      structured handoff to Agent 5.
+#
+# We pull the checklist deterministically from the FINDINGS text (per-
+# candidate) rather than relying on the structuring LLM to copy it
+# field-for-field. The structuring LLM is great at filling enums and
+# rephrasing prose, but it occasionally drops nested JSON when the
+# total output approaches the grammar-budget cap. Parsing the JSON
+# block here gives us a guaranteed checklist on every Verified Pass.
+#
+# Per AD-007: contract enforcement lives in deterministic code, not
+# prompts. Both layers exist (prompt teaches the format; parser
+# enforces it), defense in depth.
+# ============================================================================
+
+import json as _json
+import re as _re_screening
+
+# Matches the fenced JSON block. We allow either a language hint
+# ("json") or just the label, and we accept variations in spacing /
+# casing of the label (Claude sometimes title-cases or uses spaces).
+_CHECKLIST_FENCE_PATTERN = _re_screening.compile(
+    r"```(?:json\s*)?BUILD_READINESS_CHECKLIST\s*\n(.*?)\n```",
+    _re_screening.DOTALL | _re_screening.IGNORECASE,
+)
+
+
+def _extract_checklist_from_findings(
+    findings_text: str,
+    candidate_name: str,
+) -> "BuildReadinessChecklist":
+    """Parse the BUILD_READINESS_CHECKLIST JSON block out of one
+    candidate's findings text and return a validated checklist.
+
+    Falls back to `default_unknown_checklist` (system_failure sentinel)
+    on any of: no fence found, malformed JSON, Pydantic validation
+    failure. The fallback is intentional — per the three-state rejection
+    model, system failures NEVER reject the candidate; instead Agent 5
+    receives the sentinel and falls back to full-research mode.
+
+    The reason string captures WHY the sentinel was emitted so Agent 5
+    can see it and adjust expectations.
+    """
+    from puzzleeval.schemas import (
+        BuildReadinessChecklist,
+        default_unknown_checklist,
+    )
+
+    match = _CHECKLIST_FENCE_PATTERN.search(findings_text or "")
+    if not match:
+        return default_unknown_checklist(
+            reason=(
+                f"agent 4 produced no BUILD_READINESS_CHECKLIST block "
+                f"for {candidate_name}"
+            ),
+        )
+
+    raw_json = match.group(1).strip()
+    try:
+        parsed = _json.loads(raw_json)
+    except _json.JSONDecodeError as exc:
+        return default_unknown_checklist(
+            reason=(
+                f"BUILD_READINESS_CHECKLIST JSON for {candidate_name} "
+                f"failed to parse: {exc}"
+            ),
+        )
+
+    # Ensure populated_by defaults to "agent_4" when the LLM omitted it
+    # (common — the JSON template doesn't include the meta field).
+    parsed.setdefault("populated_by", "agent_4")
+
+    try:
+        checklist = BuildReadinessChecklist.model_validate(parsed)
+    except Exception as exc:  # noqa: BLE001 — pydantic ValidationError catch-all
+        return default_unknown_checklist(
+            reason=(
+                f"BUILD_READINESS_CHECKLIST for {candidate_name} failed "
+                f"schema validation: {type(exc).__name__}: {str(exc)[:200]}"
+            ),
+        )
+
+    # Stamp last_updated_at to "now" if the LLM didn't supply one.
+    if not checklist.last_updated_at:
+        from datetime import datetime, timezone
+        checklist.last_updated_at = datetime.now(timezone.utc).isoformat()
+
+    return checklist
+
+
+def _attach_checklists_to_result(
+    result: "Agent4Result",
+    findings_by_name: dict[str, str],
+    logger,
+    trace_id: str,
+) -> None:
+    """Patch each ScreenedCandidate with its extracted checklist.
+
+    Mutates `result.validated_candidates` in place. For candidates whose
+    findings text is missing or has no parseable checklist block, the
+    sentinel from `default_unknown_checklist` is attached so the field
+    is never None on a validated candidate (downstream Agent 5 contract:
+    if checklist is None, treat as full-research; if checklist is a
+    sentinel, also treat as full-research but with a richer reason
+    string for diagnostics).
+
+    Logs one INFO line per candidate summarizing the outcome
+    (confirmed-count / total) plus a WARNING when the sentinel had to
+    be used.
+    """
+    from puzzleeval.schemas import BUILD_READINESS_FIELDS
+
+    for cand in result.validated_candidates:
+        findings = findings_by_name.get(cand.name, "")
+        checklist = _extract_checklist_from_findings(findings, cand.name)
+        cand.checklist = checklist
+
+        confirmed = sum(
+            1 for n in BUILD_READINESS_FIELDS
+            if getattr(checklist, n).status == "confirmed"
+        )
+        if checklist.populated_by == "system_failure":
+            logger.warning(
+                f"Sentinel checklist attached for {cand.name}: "
+                f"{checklist.endpoint_path.reasoning}",
+                extra={
+                    "operation": "screening_checklist_sentinel",
+                    "trace_id": trace_id,
+                    "candidate_name": cand.name,
+                    "reason": checklist.endpoint_path.reasoning,
+                    "verified_pass": False,
+                },
+            )
+        else:
+            logger.info(
+                f"Checklist attached for {cand.name}: "
+                f"{confirmed}/{len(BUILD_READINESS_FIELDS)} fields confirmed, "
+                f"verified_pass={checklist.is_verified_pass()}",
+                extra={
+                    "operation": "screening_checklist_attached",
+                    "trace_id": trace_id,
+                    "candidate_name": cand.name,
+                    "confirmed_count": confirmed,
+                    "total_fields": len(BUILD_READINESS_FIELDS),
+                    "verified_pass": checklist.is_verified_pass(),
+                    "has_provider_surface": checklist.has_provider_surface(),
+                    "selected_endpoint": checklist.selected_endpoint,
+                },
+            )
+
 
 def _build_candidate_message(
     candidate: Candidate,
@@ -500,6 +824,84 @@ def _verify_single_candidate(
             operation=f"screening_verify_{candidate_label}_iter{continuation}",
         )
         candidate_cost += iter_cost
+
+        # [doc handoff] Persist web_fetch / web_search content to the
+        # candidate's future sandbox directory so Agent 5's Phase-1 STEP 1
+        # reads local files instead of re-fetching the same URLs. Saves
+        # ~3-5s per candidate and immunizes Agent 5 from CF/WAF blocks
+        # that hit Agent 4's second verifier pass. See
+        # puzzleeval/web_doc_cache.py for the full handoff rationale.
+        #
+        # We resolve the sandbox dir via `candidate_sandbox_dir()` — the
+        # single source of truth both agents agree on. If the dir doesn't
+        # exist yet (it shouldn't — Agent 5 creates it later), the helper
+        # mkdirs it. Agent 5's `harness_base.mkdir(parents=True,
+        # exist_ok=True)` tolerates the dir being pre-existing.
+        #
+        # The helper swallows per-block extraction errors: one malformed
+        # web_fetch_tool_result doesn't poison the screening call. If
+        # nothing is extractable (e.g., CF blocked the fetch so the block
+        # is an error shape), saved_now is empty — no logging noise.
+        try:
+            from puzzleeval.web_doc_cache import (
+                candidate_sandbox_dir,
+                save_web_fetches_to_sandbox,
+            )
+            _handoff_dir = candidate_sandbox_dir(
+                input_data.trace_id, candidate.name
+            )
+            _existing = sum(
+                1 for p in _handoff_dir.iterdir()
+                if _handoff_dir.exists()
+                and p.is_file()
+                and p.name.startswith("fetched_docs_")
+                and p.name.endswith(".txt")
+            ) if _handoff_dir.exists() else 0
+            # Diagnostic: what block types does this response carry?
+            # This tells us at a glance whether Agent 4's verification
+            # used web_fetch (saveable), web_search-only (saveable
+            # snippets), or just text reasoning (nothing to save).
+            # Previously ran silently — first real run (trace 2b2b9d1f)
+            # showed ZERO saved files and ZERO logs so we had no way to
+            # diagnose. Now every attempt logs BEFORE + AFTER.
+            block_types: dict[str, int] = {}
+            for block in getattr(response, "content", []) or []:
+                bt = getattr(block, "type", "unknown")
+                block_types[bt] = block_types.get(bt, 0) + 1
+            saved_now = save_web_fetches_to_sandbox(
+                response, _handoff_dir, existing_count=_existing,
+            )
+            logger.info(
+                f"Agent 5 doc handoff attempted for {candidate.name}: "
+                f"saved {len(saved_now)} file(s), "
+                f"existing {_existing}, block_types={block_types}",
+                extra={
+                    "operation": f"screening_doc_handoff_{candidate_label}",
+                    "trace_id": input_data.trace_id,
+                    "candidate_name": candidate.name,
+                    "handoff_dir": str(_handoff_dir),
+                    "files_saved": saved_now,
+                    "existing_count": _existing,
+                    "block_types": block_types,
+                    "saved_count": len(saved_now),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — doc handoff must not
+            # break verification. Promoted to WARNING (was debug) so
+            # real-run diagnostics don't get filtered out by uvicorn's
+            # default INFO log level. If the save fails (disk full,
+            # perms, malformed response), verification continues
+            # unaffected; Agent 5 just re-fetches as before.
+            logger.warning(
+                f"Doc handoff FAILED for {candidate.name}: {type(exc).__name__}: {exc}",
+                extra={
+                    "operation": f"screening_doc_handoff_failed_{candidate_label}",
+                    "trace_id": input_data.trace_id,
+                    "candidate_name": candidate.name,
+                    "error_type": type(exc).__name__,
+                    "error_msg": str(exc)[:300],
+                },
+            )
 
         # [cost tracking] Accumulate web search usage
         server_tool_use = getattr(response.usage, "server_tool_use", None)
@@ -755,7 +1157,14 @@ Structure these findings into the required JSON format. Every candidate must app
     # ★ CORE: Call Claude with structured output to format findings
     # Wrapped in parse_with_fallback for the same grammar-budget reason as
     # Agents 1 / 2 — Agent4Result includes ScreenedCandidate[] with deep
-    # enrichment fields and can hit Anthropic's compiled-grammar size cap.
+    # enrichment fields (now also BuildReadinessChecklist with 10 nested
+    # FieldStatus + EndpointSummary[]) and reliably exceeds Anthropic's
+    # compiled-grammar size cap.
+    #
+    # ``prefer_non_strict=True``: skips the doomed strict attempt that
+    # always 400s on this schema. Saves ~30-60s + one wasted API call
+    # per Agent 4 run. Non-strict path produces an identical shim
+    # object; downstream consumers don't branch.
     step2_start = time.time()
     try:
         from puzzleeval.agent_preamble import with_preamble
@@ -769,6 +1178,7 @@ Structure these findings into the required JSON format. Every candidate must app
             output_format=Agent4Result,
             extra={},
             trace_id=input_data.trace_id,
+            prefer_non_strict=True,
         )
 
     # [error handling] Structuring failures are fatal — we need the final output
@@ -799,6 +1209,27 @@ Structure these findings into the required JSON format. Every candidate must app
             message=f"Anthropic API error during screening structuring: {e}",
             agent_name="screening", trace_id=input_data.trace_id,
         )
+    except Exception as e:
+        # StructuredOutputFallbackError (no tool_use block — non-strict
+        # path equivalent of the strict-path "parsed_output is None"
+        # check below). Surface as AgentOutputError so the caller
+        # contract is unchanged. Imported lazily to avoid an import
+        # cycle through structured_output.
+        from puzzleeval.structured_output import StructuredOutputFallbackError
+        if isinstance(e, StructuredOutputFallbackError):
+            logger.error(
+                "Structured output fallback failed (structuring step)",
+                extra={
+                    "operation": "output_validation",
+                    "trace_id": input_data.trace_id,
+                    "error": str(e),
+                },
+            )
+            raise AgentOutputError(
+                message=f"Screening structuring returned no parsed output. {e}",
+                agent_name="screening", trace_id=input_data.trace_id,
+            )
+        raise
 
     # [logging] Log structuring call metrics
     structure_cost = log_llm_call(
@@ -832,12 +1263,63 @@ Structure these findings into the required JSON format. Every candidate must app
     # Helps operators spot providers whose docs are consistently WAF/Cloudflare gated.
     result.web_fetch_blocks = total_web_fetch_blocks
 
+    # ─────────────────────────────────────────────────────────────────
+    # CHECKLIST POST-PROCESS (deterministic, AD-007 defense-in-depth)
+    # ─────────────────────────────────────────────────────────────────
+    # The structuring LLM is asked to copy each candidate's
+    # BUILD_READINESS_CHECKLIST JSON block from findings into
+    # ScreenedCandidate.checklist. To make the contract robust against
+    # transcription drift (the structuring step occasionally drops
+    # nested JSON when output approaches the grammar-budget cap), we
+    # OVERWRITE the checklist deterministically from the per-candidate
+    # findings text. Single source of truth: each candidate's findings
+    # block produced by _verify_single_candidate.
+    #
+    # When the JSON block is missing or malformed for a given
+    # candidate, _extract_checklist_from_findings returns the sentinel
+    # (default_unknown_checklist with populated_by="system_failure").
+    # The candidate is NEVER rejected for this — Agent 5 handles the
+    # sentinel by falling back to full-research mode (per the
+    # three-state rejection model).
+    findings_by_name = {
+        candidates[i].name: findings_by_index[i]
+        for i in range(len(candidates))
+    }
+    _attach_checklists_to_result(
+        result, findings_by_name, logger, input_data.trace_id,
+    )
+
+    # ─────────────────────────────────────────────────────────────────
+    # CHECKLIST OBSERVABILITY METRICS
+    # ─────────────────────────────────────────────────────────────────
+    # Aggregate counters surface "did Agent 4 deliver real checklists
+    # this run, or did it sentinel-out?" without grepping per-candidate
+    # logs. These flow up via pipeline metadata for run-level rollup.
+    verified_pass_count = sum(
+        1 for c in result.validated_candidates
+        if c.checklist is not None and c.checklist.is_verified_pass()
+    )
+    inconclusive_count = sum(
+        1 for c in result.validated_candidates
+        if c.checklist is not None
+        and not c.checklist.is_verified_pass()
+        and c.checklist.populated_by != "system_failure"
+    )
+    sentinel_count = sum(
+        1 for c in result.validated_candidates
+        if c.checklist is not None
+        and c.checklist.populated_by == "system_failure"
+    )
+
     logger.info("Agent 4 completed", extra={
         "operation": "agent_complete",
         "trace_id": input_data.trace_id,
         "validated_count": len(result.validated_candidates),
         "rejected_count": len(result.rejected_candidates),
         "web_fetch_blocks": total_web_fetch_blocks,
+        "checklist_verified_pass_count": verified_pass_count,
+        "checklist_inconclusive_count": inconclusive_count,
+        "checklist_sentinel_count": sentinel_count,
     })
 
     return result

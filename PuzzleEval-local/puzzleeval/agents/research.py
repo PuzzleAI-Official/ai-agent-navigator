@@ -850,6 +850,15 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
     # non-strict tool-call shape and validate the JSON through Pydantic
     # post-hoc — same final object, no hard failure.
     #
+    # ``prefer_non_strict=True``: Agent2Result's schema (list[Candidate]
+    # with ~15 fields each, including nested PricingBreakdown +
+    # InteractionModel + UserSelectableParam[]) reliably overflows
+    # Anthropic's compiled-grammar budget — every Agent 2 run hit the
+    # 400 then fell back to non-strict. Skipping the doomed strict
+    # attempt saves ~30-60s per run plus one wasted API call. The
+    # non-strict path is what we already do successfully; this just
+    # stops trying strict first.
+    #
     # Retry on transient 5xx via retry_on_transient_5xx: Anthropic
     # occasionally returns HTTP 500 "Internal server error" for seconds at
     # a time, and the SDK's internal max_retries=3 happens within
@@ -872,6 +881,7 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
                 output_format=Agent2Result,
                 extra={},
                 trace_id=input_data.trace_id,
+                prefer_non_strict=True,
             )
 
         structure_response = retry_on_transient_5xx(
@@ -913,6 +923,27 @@ def run_research_agent(input_data: Agent2Input) -> Agent2Result:
             ),
             agent_name="research", trace_id=input_data.trace_id,
         )
+    except Exception as e:
+        # StructuredOutputFallbackError (no tool_use block, parser couldn't
+        # extract a result) is the non-strict-path equivalent of the
+        # strict-path "parsed_output is None" check below. Surface as
+        # AgentOutputError so the contract for callers is unchanged.
+        # Imported lazily to avoid an import cycle through structured_output.
+        from puzzleeval.structured_output import StructuredOutputFallbackError
+        if isinstance(e, StructuredOutputFallbackError):
+            logger.error(
+                "Structured output fallback failed (Step 2: structuring)",
+                extra={
+                    "operation": "output_validation",
+                    "trace_id": input_data.trace_id,
+                    "error": str(e),
+                },
+            )
+            raise AgentOutputError(
+                message=f"Structuring step returned no parsed output. {e}",
+                agent_name="research", trace_id=input_data.trace_id,
+            )
+        raise
 
     # [logging] Log Step 2 call metrics
     step2_cost = log_llm_call(

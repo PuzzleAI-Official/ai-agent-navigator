@@ -50,7 +50,7 @@ Post-loop (Python, parallel across candidates): Run ALL test cases → LLM judge
 3. **Let the agent do what it's good at.** Research, code, debug. Let infrastructure do loops and metrics.
 4. **Behavioral instructions over prescriptive rules.** Shape reasoning patterns, don't write recipes.
 5. **Live validation IS verification.** If the live API call works, accept the harness. No separate verification scripts or cosmetic code review.
-6. **Comprehensive research output.** api_spec.txt includes INPUT_COMPATIBILITY, ROUTING_TABLE, PYTHON_EXAMPLES, DOC_REFERENCES, DOC_MAP, API_LIMITATIONS — everything downstream needs.
+6. **Comprehensive research output.** api_spec.txt includes INPUT_COMPATIBILITY, ROUTING_TABLE, WORKING_EXAMPLE (any language — Python / curl / JS / Go / raw HTTP), DOC_REFERENCES, DOC_MAP, API_LIMITATIONS — everything downstream needs.
 7. **Context engineering.** `max_content_tokens: 15000` on web_fetch, server-side `clear_tool_uses` + `compact`, automatic prompt caching (83-86% hit rate).
 8. **Accurate cost tracking.** Uses `response.usage.iterations[]` to track executor vs advisor costs separately.
 9. **Credentials flow to build sandbox.** Test files staged before build, credentials injected into sandbox env vars. The builder agent can run live API calls during Phase 3.

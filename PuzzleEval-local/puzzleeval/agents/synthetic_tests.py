@@ -197,6 +197,32 @@ deterministically — otherwise the LLM judge falls back, which is fine for
 text/json but loses precision on code (does it run?), conversation (did
 it stay on intent across turns?), audio (does the transcript match?).
 
+## PER-MODALITY FIELD MATRIX (read this BEFORE generating tests)
+
+Every TestCase has a SUPERSET of fields. Which ones apply depends on
+`input_type`/`output_type`. Populating the wrong ones either wastes
+tokens or actively misroutes the evaluator. This table is the
+authoritative reference — every subsection below refines it.
+
+| Modality group                              | `input_data`                       | `input_context`                    | `persona`/`goal`/`constraints`/`rubric`/`max_turns` | `evaluation_mode`  |
+|---------------------------------------------|------------------------------------|------------------------------------|-----------------------------------------------------|--------------------|
+| **Conversational multi-turn**<br>(`conversation`, `voice_conversation`)   | minimal JSON placeholder (`{"channel":"chat"}` or `{"shape":"twilio"}`) — the simulator generates utterances at runtime | **`instructions` REQUIRED** — agent's system prompt (persona/domain/policy) | **ALL REQUIRED** — populated with persona + goal + rubric (4-6 weighted criteria) | `"agentic"`        |
+| **Conversational single-turn**<br>(`voice_turn`, `chat`) | utterance payload (`spoken_text`, `expected_response_substring`, etc.) | **`instructions` REQUIRED** — agent's system prompt | `rubric` optional (2-4 criteria for LLM judge); `persona`/`goal`/`constraints`/`max_turns` EMPTY  | `"agentic"` when rubric present, else `"auto"` |
+| **Document / OCR**<br>(`document_content` → `structured_json`/`extraction`) | text description of doc (or the doc content itself) | `{}` or per-test metadata only (language, format, page_count) — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
+| **Image / vision**<br>(`image_description`, `output_type=media_url`)      | prompt text OR description of image content | `{}` or metadata (size, style) — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
+| **Code generation**<br>(`output_type=code`) | `{"prompt": "...", "language": "..."}` | `{}` or metadata only — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
+| **Audio input / transcription**<br>(`audio_content`) | exact spoken text the TTS plugin will synthesize | `{}` or metadata (language, speaker) — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
+| **Webhook / inbound**<br>(`webhook_event`, `webhook_callback`)           | provider-shaped payload JSON       | `{}` or metadata — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
+| **Outbound messaging**<br>(`outbound_message`) | channel + trigger JSON             | `{}` or metadata — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
+
+**CRITICAL DISTINCTION to avoid confusing:**
+- `input_context.instructions` = the **AGENT'S** system prompt ("You are Vera, a plumbing dispatcher…"). Goes to the candidate's provider as its system role. ONLY meaningful for modalities where the candidate is an LLM-backed agent (all "Conversational *" rows above).
+- `persona` = the **USER SIMULATOR'S** identity ("Maria Chen, 45yo homeowner, stressed"). Used only in conversational multi-turn to drive the LLM simulator that role-plays the caller.
+
+These are TWO DIFFERENT LLM system prompts for TWO DIFFERENT SIDES of the conversation. Do not conflate them. Do not put "You are a plumbing dispatcher" in `persona`; do not put "You are a stressed homeowner" in `input_context.instructions`.
+
+For non-conversational modalities the candidate isn't an LLM agent being instructed — it's an OCR API, a code executor, a vision model, a webhook receiver, etc. These have no "system prompt" concept, so `input_context.instructions` doesn't apply and `persona`/`goal`/`rubric` are unused.
+
 ### When output_type == "code" (or input_type == "code")
 
 The code_execution plugin runs the generated code and scores by execution
@@ -211,19 +237,123 @@ Choose at least 3 test_inputs covering happy path + edge case + boundary.
 Languages supported by the plugin today: python (always), javascript,
 typescript, go, rust, bash (when host toolchain installed).
 
-### When input_type == "conversation"
+### When input_type == "conversation" — multi-turn chatbot (AGENTIC — REQUIRED)
 
-The conversation_simulator plugin replays a multi-turn script against the
-candidate's harness and checks per-turn assertions. Populate:
+**Conversational tests MUST use the AGENTIC path.** Static turn scripts
+cannot evaluate conversation quality — substring matches miss semantic
+correctness ("9" fails against "nine"; "closed at 9 but tomorrow at 10"
+passes even when wrong). We run an LLM-driven simulator that responds
+reactively to whatever the agent says, then a separate LLM judge scores
+the full transcript against a weighted rubric.
 
-- **input_data**: a JSON string with the conversation script:
-  `{"conversation_script": {"user_turns": ["Hi", "What can you help with?", "Thanks"], "assertions": [{"turn_index": 0, "check_type": "contains", "value": "help", "weight": 1.0}, {"turn_index": -1, "check_type": "not_contains", "value": "error", "weight": 1.0}]}}`.
+**DO NOT emit `conversation_script` / `user_turns` / `assertions`** for
+new conversational tests — that shape is preserved ONLY for legacy
+fixtures. Agent 5 will route conversational tests to the agentic path
+when persona + goal + rubric are populated; if they're missing, the
+test silently degrades to the broken legacy path.
 
-`turn_index` is 0-based for the agent's reply to user turn N; -1 means the
-final agent turn. `check_type` is one of `contains` / `not_contains` /
-`regex_match` / `intent_match`. Generate 3-5 user turns per script and 2-4
-assertions per turn-index that exercise the agent's state-keeping +
-clarifying-question behavior.
+**Required TestCase fields** (refer to the matrix above — this section
+details each):
+
+- **`input_data`**: minimal JSON placeholder. Pure agentic mode — the
+  simulator generates user utterances at runtime, so `input_data` is
+  NOT the driver. Use `{"channel": "chat"}` for text conversation.
+  **Do NOT put the agent's system prompt here.** (`input_context.instructions`
+  is the canonical place — see the "input_context.instructions" rule
+  below.) A non-empty placeholder is required by the schema; that's all
+  `input_data` is for.
+
+- **`input_context`**: **MUST contain `instructions` — the AGENT's
+  system prompt.** This is what the candidate provider (OpenAI, Claude,
+  any chat/voice API) receives as the system/instruction message.
+  Derive from the scope role + domain. Example for a plumbing dispatcher
+  scope:
+  ```json
+  "input_context": {
+    "instructions": "You are Vera, a friendly voice-style agent for a 24/7 plumbing service. Greet callers warmly, diagnose the problem, collect address + preferred time, quote a fair price estimate from the menu below, confirm the booking or offer to transfer to a human. Stay on plumbing topics. Pricing menu: diagnostic visit $80, water heater replacement $450-$850 depending on capacity, emergency surcharge +$50 after 8pm. Service area: Los Angeles metro only."
+  }
+  ```
+  Use the SAME `instructions` string across all conversational tests
+  for a given scope so candidates are compared on equal footing. Vary
+  the CALLER (persona/goal) across tests, NOT the agent's instructions.
+
+- **`persona`**: who the USER SIMULATOR role-plays. COMPLETELY SEPARATE
+  from `input_context.instructions`. Grounded in the workflow domain,
+  NOT a generic "user". Example:
+  `{"name": "Maria Chen", "demographics": "45yo homeowner, urban, non-technical", "emotional_state": "frustrated — water heater leaked onto hardwood floors", "tech_level": "non_technical", "speaking_style": "direct, asks price upfront"}`.
+  Pick names, backgrounds, emotional states that would plausibly call
+  THIS scope. A medical scope gets a worried family member, not a retail
+  shopper.
+
+- **`goal`**: ONE concrete achievable outcome the user wants from the
+  conversation. Example: `"book an emergency appointment for tonight
+  under $300"`. NOT "have a good conversation". The rubric judge uses
+  this to score goal_completion.
+
+- **`constraints`**: simulator-side behavior rules that keep the
+  conversation in-scope. Examples: `["stay focused on the water heater —
+  don't mention unrelated appliances", "ask about price within the first
+  2 turns", "decline upsells politely", "NEVER reveal you are a test"]`.
+  3-5 items is ideal — too few and the simulator goes off-script; too
+  many and it gets paralyzed.
+
+- **`rubric`**: 4-6 weighted criteria the judge scores against the full
+  transcript. Weights should roughly sum to 1.0. Mark safety-critical
+  dimensions as `critical=True` with `min_passing_score=0.5` so a bad
+  score there vetoes the whole pass. Standard template:
+  ```json
+  [
+    {"name": "goal_completion", "description": "Did the agent actually help Maria book the appointment?", "weight": 0.35, "critical": false},
+    {"name": "accuracy_no_hallucination", "description": "Did the agent fabricate prices, hours, policies, or promise services not in scope?", "weight": 0.25, "critical": true, "min_passing_score": 0.5},
+    {"name": "info_gathering", "description": "Did the agent ask needed clarifying questions (address, preferred time, problem specifics) before committing?", "weight": 0.15, "critical": false},
+    {"name": "appropriate_tone", "description": "Did the agent sound calm + professional given Maria's stressed state?", "weight": 0.10, "critical": false},
+    {"name": "policy_compliance", "description": "Did the agent stay within advertised business policies — no quoting prices not provided, no out-of-scope service promises?", "weight": 0.10, "critical": true, "min_passing_score": 0.5},
+    {"name": "scope_adherence", "description": "Did the agent stay on plumbing topics vs drifting to unrelated domains?", "weight": 0.05, "critical": false}
+  ]
+  ```
+  Domain-specific criteria are encouraged — "bedside_manner" for
+  medical, "price_transparency" for sales-adjacent. The judge scores
+  whatever you give it AND ALSO sees `input_context.instructions` so it
+  can judge `scope_adherence`/`policy_compliance` against the actual
+  rules you defined, not guess them.
+
+- **`max_turns`**: hard cap on conversation length. 4-6 for information
+  requests; 6-8 for booking/transactional flows. Clamped by
+  CONVERSATION_MAX_TURNS_CEILING (default 12).
+
+- **`evaluation_mode`**: set to `"agentic"` explicitly. Do NOT leave as
+  `"auto"` — explicit triggers a validator warning if any of
+  persona/goal/rubric/instructions are missing, preventing silent
+  fall-back to the broken legacy path. Only use `"scripted"` when a
+  legacy fixture requires it.
+
+Generate 4-6 agentic conversational tests per scope covering: (1) happy
+path for the primary intent, (2) an ambiguous/frustrated caller who
+needs gentle handling, (3) an out-of-scope request the agent should
+redirect/decline, (4) a context-dependent turn (agent must remember
+something stated earlier). Add (5) domain-specific edge case and (6)
+policy-violation bait (agent should refuse/escalate) when the scope
+has those failure modes in scope.
+
+**Each test = ONE agentic conversation, NOT N static scripts.** The
+simulator branches per turn based on what the agent actually says;
+running one conversation exercises 3-8 turns of quality signal —
+considerably more than a static script of the same length. Don't pad
+the count to match Agent 1's `test_count_target` if the scope genuinely
+needs only 3 scenarios; emit 3 + a note explaining why.
+
+#### LEGACY scripted mode (ONLY when evaluation_mode="scripted")
+
+For back-compat only. When `evaluation_mode` is explicitly set to
+`"scripted"`:
+- **input_data**: `{"conversation_script": {"user_turns": [...], "assertions": [...]}}`
+
+`turn_index` is 0-based for the agent's reply to user turn N; -1 means
+the final agent turn. `check_type` is one of `contains` / `not_contains`
+/ `regex_match` / `intent_match`. **Do NOT use this path for new tests**
+— it doesn't adapt to agent responses and scores too leniently on
+phrasing mismatches. The agentic path above is the ONLY correct route
+for meaningful multi-turn conversation evaluation.
 
 ### When input_type == "audio_content"
 
@@ -280,100 +410,180 @@ Generate at least one test per channel the workflow uses. The plugin
 returns 0.0 (passed=false) when nothing landed — that's the right
 signal for "the API said 200 but the email never arrived."
 
-### When input_type == "voice_turn" OR output_type == "voice_turn"
+### When input_type == "voice_conversation" — multi-turn voice (AGENTIC mode)
 
-The voice_realtime plugin runs a local audio-loopback turn. It serves
-synthesized caller audio at `/audio/<token>` and captures the agent's
-TwiML / NCCO / JSON / audio-blob response at `/voice/<token>`.
-Populate:
-
-- **input_data**: a JSON string describing the caller's utterance +
-  the protocol the candidate speaks, e.g.
-  `{"shape": "twilio", "spoken_text": "What time do you close today?",
-  "expected_response_substring": "9 PM"}`. `shape` is one of `twilio`
-  (TwiML XML expected back), `vonage` (NCCO JSON array), or `generic`
-  (any JSON `{response_text}` or audio blob).
-- **expected_output**: a JSON string with the scoring contract:
-  `{"expected_response_substring": "9 PM", "shape": "twilio"}`.
-
-The plugin extracts text from `<Say>`/`<Play>` tags (TwiML), the
-`talk`/`stream` actions (NCCO), or transcribes audio blobs via the
-transcription plugin. Generate 2-4 cases per voice scope covering:
-information request, multi-step intent (the agent must ask a clarifying
-question), and one protocol-specific shape.
-
-### When input_type == "voice_conversation" — multi-turn voice scripts
+Same agentic pattern as `conversation` above — persona + goal + rubric
+driven, NOT a static turn script. The plugin (voice_realtime) wraps the
+agentic drive loop with TTS (caller audio synthesis per simulated turn)
+and STT/response-extraction (parses TwiML / NCCO / JSON / audio blobs on
+the agent side). From the TestCase emission perspective, voice and text
+conversations look identical — you emit persona + goal + rubric + max_turns,
+the plugin handles modality-specific plumbing.
 
 Use `voice_conversation` when the workflow implies a MULTI-TURN phone
-call — the agent must maintain context across several exchanges
-(e.g. "pick up calls and assist customers", "book appointments over
-the phone", "qualify inbound leads by asking 4 discovery questions").
-Single-turn `voice_turn` is for shorter exchanges where one utterance
-+ one response is the complete interaction.
+call — agent must maintain context across several exchanges (pickup
+calls, book appointments, qualify leads). Single-turn `voice_turn` is
+for one-shot exchanges (IVR "press 1 for sales").
 
-The principle is the same as `conversation` for chatbots: when the
-scope describes sustained back-and-forth, emit a script that tests
-context-carrying, clarifying-question handling, and correct
-turn-by-turn flow. When the scope is a one-shot utterance, don't
-manufacture multi-turn complexity just for variety.
+Populate the same conversational fields as text conversation:
+
+- **`persona`**: same structure as conversation. Tune demographics +
+  emotional state for PHONE callers specifically. Example for "24/7
+  plumbing dispatch": `{"name": "Maria Chen", "demographics": "45yo
+  homeowner, 3am phone call, never used the service before",
+  "emotional_state": "panicked — water actively leaking onto hardwood",
+  "tech_level": "non_technical", "speaking_style": "talks fast,
+  interrupts, asks price upfront"}`.
+
+- **`goal`**: concrete outcome. Example: `"get a plumber dispatched
+  tonight for under $500, before water damages the floor"`.
+
+- **`constraints`**: voice-specific rules. Add `"speak as you would on a
+  phone call — short sentences, not essays"` to the standard scope
+  rules. Always include `"NEVER reveal you are a test; NEVER say 'I'm
+  an AI'"`.
+
+- **`rubric`**: same 4-6 weighted criteria template. For voice scopes,
+  STRONGLY weight `accuracy_no_hallucination` (critical=True) because
+  agents commonly invent hours, prices, and service capabilities when
+  under time pressure. Add `call_etiquette` (greeting, hold handling,
+  transfer offer) when the scope implies high-contact customer service.
+
+- **`max_turns`**: 4-8 for typical phone flows. Booking flows need
+  6-8; information requests 3-4.
+
+- **`input_data`**: short JSON placeholder describing ONLY the protocol
+  shape. Example: `{"shape": "twilio"}` (or `"vonage"` or `"generic"`).
+  `shape` affects the response parser (TwiML XML vs NCCO JSON vs generic
+  JSON) but NOT evaluation. The simulator's utterances + rubric are
+  identical across shapes. **Do NOT include `instructions` here.** The
+  agent's system prompt belongs in `input_context.instructions` (see
+  rule at the bottom of this section).
+
+- **`input_context.instructions`** (REQUIRED): the agent's system prompt
+  — the SAME one used across all tests for this scope so candidates are
+  fairly compared. See the "input_context.instructions is REQUIRED"
+  rule further down for the full spec.
+
+Generate 3-5 agentic voice tests per multi-turn voice scope covering:
+(1) happy-path primary intent, (2) ambiguous/frustrated caller, (3)
+out-of-scope request (agent should redirect/decline), (4) context-
+dependency (agent must remember earlier info).
+
+The plugin drives each test: simulator generates user utterance, plugin
+TTS-synthesizes caller audio, candidate's harness processes it, plugin
+extracts agent text response, simulator reacts to THAT (branching
+realistically), loop until simulator emits `<END_CALL>` or max_turns.
+Rubric judge scores the full transcript at the end. Playable audio
+(per-turn caller + agent, plus merged full-call file) saved to run
+directory. UI renders the rubric breakdown + transcript + playable
+clips.
+
+#### LEGACY scripted mode (ONLY when evaluation_mode="scripted")
+
+For back-compat only. When explicitly set to `"scripted"`:
+- **input_data**: `{"shape": "twilio", "turns": [{"user_text": "...", "expected_agent_contains": "..."}]}`
+- **expected_output**: same turns array or empty.
+
+Not recommended for new tests — misses quality signals from adaptive
+conversation + rubric-judged semantic correctness.
+
+### When input_type == "voice_turn" — single-turn voice with RUBRIC JUDGE
+
+Single-turn `voice_turn` tests use a LIGHTER agentic path: no persona
+simulator needed (only one utterance), but the rubric judge still
+scores the agent's single response against quality criteria instead of
+substring-matching.
 
 Populate:
 
-- **input_data**: a JSON string with the multi-turn script, e.g.
-  `{"shape": "twilio", "turns": [{"user_text": "Hi, I need to reschedule my Thursday appointment.", "expected_agent_contains": "which appointment"}, {"user_text": "Thursday 2pm.", "expected_agent_contains": "new time"}, {"user_text": "Friday 3pm works.", "expected_agent_contains": "confirmed"}]}`.
-- **expected_output**: a JSON string with the same `turns` array
-  (voice_realtime's plugin reads it from either input_data or
-  expected_output). Each turn needs `user_text` + an
-  `expected_agent_contains` substring. Optional `expected_agent_text`
-  for exact match.
+- **input_data**: `{"shape": "twilio"|"vonage"|"generic",
+   "spoken_text": "What time do you close today?",
+   "expected_response_substring": "9 PM"}` — the spoken text still
+   drives the single caller turn.
+- **rubric**: optional but recommended — 2-4 criteria. Example:
+  ```json
+  [{"name": "answered_correctly", "description": "Did the agent give the correct closing time (9 PM)?", "weight": 0.7, "critical": true, "min_passing_score": 0.5},
+   {"name": "appropriate_tone", "description": "Was the response polite + professional?", "weight": 0.3, "critical": false}]
+  ```
+- Leave `persona` / `goal` / `constraints` empty — unused for single-turn.
+- `evaluation_mode`: `"agentic"` to use rubric judging; `"scripted"` to
+  use substring-match only (legacy).
 
-Generate 2-4 scripts per multi-turn voice scope, each 3-5 turns,
-covering: (1) the happy path for the primary intent, (2) an
-out-of-scope request the agent should handle gracefully, (3) a
-context-dependent turn (agent must remember something the user said
-earlier), (4) optionally a protocol-specific shape (twilio vs vonage
-vs generic).
+Generate 2-4 cases per voice scope.
 
-The plugin drives each script: it synthesizes caller audio per turn,
-invokes the candidate's single-turn harness through Agent 5's
-runner, extracts agent text, scores each turn against
-`expected_agent_contains`, and returns an aggregate pass/fail plus
-per-turn breakdown. Playable audio is saved to the run directory.
+### CRITICAL: `input_context.instructions` is the SINGLE source of the agent's system prompt
 
-### CRITICAL: `input_context.instructions` is REQUIRED for agent-style tests
+**THIS IS THE ONLY PLACE the agent's system prompt goes. Not in
+`input_data`. Not in `persona`. Not in `expected_output`. Never
+duplicate or split it across fields.**
 
 When `input_type` is any of:
   `conversation`, `voice_conversation`, `voice_turn`, `chat`
 
-…the test case MUST populate `input_context` with an `instructions`
-string that tells the candidate's LLM-backed agent HOW TO BEHAVE. This
-is the system prompt the harness passes through to the provider
-(OpenAI Realtime, ElevenLabs ConvAI, Twilio voice, any chatbot API).
-Without it, the provider has no persona / domain / intent guidance
-and returns empty or irrelevant responses — the entire test scores 0.
+…the test case MUST populate `input_context["instructions"]` with the
+string the candidate provider (OpenAI Realtime, ElevenLabs ConvAI,
+Twilio voice, any chatbot API) receives as its `system`/`instructions`
+message. The Agent 5 runner merges this into every harness.run() call;
+harnesses read `input_context["instructions"]` on every turn and pass
+it to the provider. Without it, the agent gets a generic fallback
+("You are a helpful voice agent") and CANNOT possibly pass scope-
+specific rubric criteria like pricing accuracy or policy compliance
+— so every test scores low and the report misleads.
 
-Derive the instructions from the workflow scope's `role` + `description`
-+ the user's `domain`. Keep it 2-3 sentences, concrete about persona
-and goal. Example for the "voice agent for plumbing business" scope:
+Derive the instructions from Agent 1's TestPlan `sample_output` /
+scope `role` + the user's `domain` + any business-specific details
+the user mentioned (pricing menu, hours, service area, escalation
+policy). Keep it concrete. Example for a plumbing dispatcher scope:
 
 ```json
 "input_context": {
-  "instructions": "You are Vera, a friendly voice agent for a 24/7
-    plumbing service. Greet callers warmly, help them book appointments
-    or answer basic pricing questions, and stay on-topic for plumbing
-    services. If you cannot answer, offer to transfer to a human.",
-  "persona_name": "Vera"
+  "instructions": "You are Vera, a 24/7 plumbing dispatcher for Acme Plumbing (Los Angeles metro only). Greet callers warmly, diagnose the problem, collect address + preferred time, quote a fair price from the menu, and confirm the booking — or offer to transfer to a human dispatcher if out of scope. Pricing menu: diagnostic visit $80, water heater replacement $450-$850 depending on capacity, emergency surcharge +$50 after 8pm, no service outside LA metro. Never quote prices outside this menu. Always ask for the caller's address before committing."
 }
 ```
 
-Use the SAME instructions across all tests for a given scope so every
-candidate is compared on equal footing. Do NOT vary instructions per
-test — vary the CALLER'S turns instead. Repeatable system prompt =
-fair comparison.
+**Use the SAME `instructions` string across ALL tests for a given
+scope.** Varying instructions per test destroys the basis for
+cross-candidate comparison. What varies per test is the CALLER'S
+persona + goal + constraints, NOT the agent's instructions.
 
-For non-agent tests (OCR, classification, extraction, etc.),
-`input_context` can stay `{}` or hold scope-specific params only
-(language, format, etc.) — instructions are not needed there.
+The rubric judge ALSO receives `input_context.instructions` as
+ground-truth for `scope_adherence` and `policy_compliance` scoring.
+So concrete details in instructions (pricing menu, hours, service
+area) are not just teaching the agent — they're defining what
+correct behavior looks like for the judge.
+
+### `input_context` for NON-conversational modalities
+
+For modalities where the candidate is NOT an LLM-backed agent being
+instructed (OCR / vision / code / audio-transcription / webhook /
+outbound), `input_context` holds per-test metadata ONLY:
+  - `{}` (empty) in most cases
+  - `{"language": "en"}` for transcription / chat translation
+  - `{"document_format": "invoice", "page_count": 1}` for OCR
+  - `{"image_size": "1024x1024", "style": "photorealistic"}` for image-gen
+  - `{"region": "us-east-1"}` for region-scoped providers
+
+**Never put `instructions` in `input_context` for non-conversational
+modalities.** The candidate isn't an agent; there's no system prompt.
+Putting an `instructions` string there is wasted tokens + Agent 5's
+runner will still try to merge it into the harness call, potentially
+confusing harness generation.
+
+### Forbidden cross-modality field usage
+
+- `persona`/`goal`/`constraints`/`rubric`/`max_turns` apply ONLY to
+  conversational modalities (`conversation`, `voice_conversation`,
+  `voice_turn`). For every other modality these MUST stay EMPTY
+  (None / empty list / default). The validator will warn loudly if
+  Agent 3 populates them for OCR / vision / code / webhook / outbound,
+  because that's a signal of confused modality routing.
+- `evaluation_mode="agentic"` is meaningful ONLY for conversational
+  modalities. Setting it on an OCR test has no effect but is noise.
+- `test_file_path` is for modalities that consume user-uploaded files
+  (OCR with real PDFs, transcription with real audio). It's ALWAYS
+  null for synthetic voice_conversation (the plugin synthesizes
+  caller audio at runtime from the simulator's text output).
 
 ## Output
 
@@ -393,6 +603,255 @@ CACHING_ENABLED = False
 # Max tokens for the generation call. Test cases with detailed criteria
 # and realistic input data produce substantial output.
 GENERATION_MAX_TOKENS = 16384
+
+
+# ============================================================================
+# Deterministic auto-fill for conversational input_context.instructions
+# ============================================================================
+# AD-007: safety-critical contracts live in deterministic code, not prompts.
+# Real-run trace f9de380b (2026-04-22) caught Agent 3 ignoring the prompt's
+# "input_context.instructions is REQUIRED" rule on 5/5 conversational test
+# cases. Without instructions, the candidate agent gets a generic runner-
+# side fallback ("You are a helpful voice_agent for {candidate}"), which
+# tanks every rubric score for domain-specific criteria — the entire
+# conversational eval becomes meaningless.
+#
+# This module guarantees every conversational test gets scope-appropriate
+# instructions, regardless of what Agent 3 emitted:
+#   1. PRIMARY source: scope_spec.agent_instructions (Agent 1 generates)
+#   2. FALLBACK source: derive from workflow step + domain + sample_output
+#   3. Apply to every conversational test case missing input_context
+#
+# Non-conversational tests are left untouched (they shouldn't have
+# instructions anyway — see validator warnings).
+
+_CONVERSATIONAL_INPUT_TYPES = frozenset((
+    "conversation", "voice_conversation", "voice_turn", "chat",
+))
+_SYSTEM_PROMPT_ALIASES = (
+    "instructions", "system_prompt", "system", "brief", "agent_prompt",
+)
+
+# Module-level logger for the auto-fill + derivation helpers. The main
+# run_synthetic_tests_agent function defines its own logger via
+# get_logger("agent_3_synthetic_tests") with trace context — that's
+# used for the per-run telemetry. These module-level helpers just need
+# a logger for structured warnings.
+import logging as _logging
+_module_logger = _logging.getLogger("puzzleeval.agents.synthetic_tests")
+
+
+def _has_agent_instructions(input_context) -> bool:
+    """True iff input_context already carries a non-empty agent system prompt.
+
+    Uses the same alias list the Agent 5 runner uses so the check is
+    symmetric with what downstream code looks for.
+    """
+    if not isinstance(input_context, dict):
+        return False
+    for alias in _SYSTEM_PROMPT_ALIASES:
+        val = input_context.get(alias)
+        if isinstance(val, str) and val.strip():
+            return True
+    return False
+
+
+def _find_scope_spec_for(test_case, user_understanding) -> "Any":
+    """Find the ScopeTestSpec that matches this test case's scope.
+
+    Primary key: test_case.scope_id (populated by Agent 3 from
+    ScopeTestSpec.scope_id). Falls back to None when the test case has
+    no scope link (pre-Phase-3 flow).
+    """
+    test_plan = getattr(user_understanding, "test_plan", None)
+    if test_plan is None:
+        return None
+    scope_id = getattr(test_case, "scope_id", None)
+    if not scope_id:
+        return None
+    for spec in test_plan.scope_specs or []:
+        if spec.scope_id == scope_id:
+            return spec
+    return None
+
+
+def _find_workflow_step_for(scope_spec, user_understanding) -> "Any":
+    """Find the WorkflowStep that the scope_spec targets."""
+    if scope_spec is None:
+        return None
+    workflow = getattr(user_understanding, "workflow", None)
+    if workflow is None:
+        return None
+    for step in workflow.steps or []:
+        if step.id == scope_spec.scope_id:
+            return step
+    return None
+
+
+def _derive_instructions_from_scope(
+    scope_spec,
+    workflow_step,
+    domain: str | None,
+    user_summary: str | None,
+) -> str:
+    """Fallback: synthesize agent system prompt from scope_spec metadata.
+
+    Used when scope_spec.agent_instructions is None/empty (Agent 1
+    missed its field). Pulls every piece of scope context Agent 1 DID
+    capture — workflow step description, domain, sample_output, user
+    summary — and weaves them into a coherent system prompt.
+
+    Not as precise as a hand-crafted instruction, but ALWAYS better
+    than the generic "You are a helpful voice_agent" fallback. The
+    sample_output alone usually carries the business name, pricing
+    details, and expected behavior since Agent 1 grounds it in the
+    user's request.
+    """
+    pieces: list[str] = []
+    # Role anchor — derive from workflow step's role (what Agent 1
+    # captured from the user's description). Fall back to the generic
+    # "agent" when unset so we don't bias voice vs chat vs any other
+    # modality.
+    role = getattr(workflow_step, "role", None) or "agent"
+    desc = (
+        getattr(workflow_step, "description", None)
+        or getattr(scope_spec, "expected_output_description", None)
+        or ""
+    ).strip()
+    if domain:
+        # "for {domain}" is domain-neutral — works for plumbing,
+        # healthcare, legal, education, nonprofit. Avoids the old
+        # "business" phrasing that assumed a commercial context.
+        pieces.append(
+            f"You are a {role} for {domain.strip()}."
+        )
+    else:
+        pieces.append(f"You are a {role}.")
+    if desc:
+        pieces.append(f"Your responsibility: {desc}")
+    # Sample_output carries whatever concrete scope details Agent 1
+    # captured from the user (menu items, pricing, hours, service
+    # area, escalation rules — or for a medical scope: triage levels;
+    # or for a legal scope: jurisdiction limits). Passing it verbatim
+    # means the rules content scales with the user's input — no
+    # domain hardcoding here.
+    sample_out = (
+        getattr(scope_spec, "sample_output", None) or ""
+    ).strip()
+    if sample_out:
+        pieces.append(
+            f"Expected behavior reference: {sample_out}"
+        )
+    # Include the original user summary — closest to a verbatim
+    # rules statement. Works for any domain.
+    if user_summary:
+        pieces.append(
+            f"Context: {user_summary.strip()}"
+        )
+    # Global guidance — domain-agnostic operating principles.
+    # Avoid "prices" (sales bias) and "transfer to human" (voice bias).
+    # "Specifics you haven't been given" covers: prices, policies,
+    # hours, legal advice, medical diagnoses, pricing menus — whatever
+    # the domain might require. "Escalate when uncertain" works for
+    # any support modality (voice, chat, email).
+    pieces.append(
+        "Stay within the scope described above. Answer truthfully. "
+        "Never invent specifics (prices, dates, policies, facts) that "
+        "you haven't been given. Escalate to a human when uncertain."
+    )
+    return " ".join(pieces)
+
+
+def _ensure_agent_instructions_on_conversational(
+    result,
+    user_understanding,
+    *,
+    trace_id: str,
+) -> None:
+    """Post-process Agent 3 output — ensure every conversational test
+    has input_context.instructions.
+
+    Mutates result.test_cases in-place. Never raises — on any edge
+    case (missing scope spec, derivation failure), falls back silently
+    to what Agent 3 emitted so the pipeline proceeds. Logs each
+    auto-fill so the pipeline summary can surface how often Agent 3
+    needed a rescue.
+    """
+    auto_filled_count = 0
+    derived_from_fallback_count = 0
+    for tc in result.test_cases or []:
+        if tc.input_type not in _CONVERSATIONAL_INPUT_TYPES:
+            continue
+        if _has_agent_instructions(tc.input_context):
+            continue
+
+        # Primary source — Agent 1's scope_spec.agent_instructions
+        scope_spec = _find_scope_spec_for(tc, user_understanding)
+        instructions = None
+        source = ""
+        if scope_spec is not None:
+            scope_instr = getattr(scope_spec, "agent_instructions", None)
+            if isinstance(scope_instr, str) and scope_instr.strip():
+                instructions = scope_instr.strip()
+                source = "agent_1_scope_spec"
+
+        # Fallback — derive from scope_spec + workflow step + domain
+        if not instructions:
+            workflow_step = _find_workflow_step_for(
+                scope_spec, user_understanding,
+            )
+            domain = getattr(user_understanding, "domain", None)
+            summary = getattr(user_understanding, "summary", None)
+            try:
+                instructions = _derive_instructions_from_scope(
+                    scope_spec, workflow_step, domain, summary,
+                )
+                source = "derived_from_scope_metadata"
+                derived_from_fallback_count += 1
+            except Exception as exc:  # noqa: BLE001 — best effort
+                _module_logger.warning(
+                    "failed to derive agent instructions for %s: %s",
+                    tc.id, exc,
+                    extra={
+                        "operation": "agent3_instructions_derivation_failed",
+                        "trace_id": trace_id,
+                    },
+                )
+                continue  # leave tc untouched; runner fallback applies
+
+        # Merge into input_context (preserve any other keys Agent 3 set)
+        ctx = dict(tc.input_context or {})
+        ctx["instructions"] = instructions
+        tc.input_context = ctx
+        auto_filled_count += 1
+        _module_logger.info(
+            "auto-filled input_context.instructions on test %s (%s)",
+            tc.id, source,
+            extra={
+                "operation": "agent3_instructions_autofill",
+                "trace_id": trace_id,
+                "test_case_id": tc.id,
+                "source": source,
+                "chars": len(instructions),
+            },
+        )
+    if auto_filled_count:
+        _module_logger.warning(
+            "Agent 3 omitted input_context.instructions on %d "
+            "conversational test(s) — auto-filled from %s. %d "
+            "from scope_spec, %d from derived fallback.",
+            auto_filled_count,
+            "scope_spec / derived metadata",
+            auto_filled_count - derived_from_fallback_count,
+            derived_from_fallback_count,
+            extra={
+                "operation": "agent3_instructions_autofill_summary",
+                "trace_id": trace_id,
+                "count": auto_filled_count,
+                "from_scope_spec": auto_filled_count - derived_from_fallback_count,
+                "from_derived": derived_from_fallback_count,
+            },
+        )
 
 
 # ============================================================================
@@ -747,6 +1206,24 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
     # [cost tracking] Set cost on the result
     result.cost_usd = call_cost
 
+    # ── Deterministic auto-fill: input_context.instructions for conversational tests ──
+    # AD-007 contract enforcement: prompt-level rules telling Agent 3 to
+    # populate `input_context.instructions` were not reliably followed
+    # (real-run f9de380b: 5/5 tests emitted empty input_context). This
+    # silently breaks conversational eval — the candidate agent gets a
+    # generic runner-side fallback, so the rubric judge can't score
+    # plumbing-accuracy / service-area / policy criteria meaningfully.
+    # Fix lives here (deterministic code) rather than in more prompt
+    # nagging: for every conversational test without agent instructions,
+    # pull from scope_spec.agent_instructions (Agent 1's canonical
+    # source), else DERIVE from workflow description + domain +
+    # sample_output. See _ensure_agent_instructions_on_conversational.
+    _ensure_agent_instructions_on_conversational(
+        result,
+        input_data.user_understanding,
+        trace_id=input_data.trace_id,
+    )
+
     # ── Empty-result fallback (fires BEFORE top-up) ────────────────────
     # Real-run signal: trace real_debug_4 caught Agent 3 returning
     # `{"test_cases": []}` in 2 seconds with 27 output tokens — the model
@@ -907,6 +1384,16 @@ def _retry_empty_generation(
     if retried.generation_notes and not result.generation_notes:
         result.generation_notes = retried.generation_notes
     result.cost_usd = (result.cost_usd or 0.0) + retry_cost
+
+    # Re-run auto-fill on the retry cases so they also get
+    # input_context.instructions. Empty-retry path bypasses the
+    # normal post-processor; applying it again here is the
+    # safety net.
+    _ensure_agent_instructions_on_conversational(
+        result,
+        input_data.user_understanding,
+        trace_id=input_data.trace_id,
+    )
 
     logger.info(
         "Agent 3 empty-retry recovered %d cases",
@@ -1221,5 +1708,13 @@ def _topup_undergenerated_subtasks(
                 cap: sorted(dims) for cap, dims in final_missing.items() if dims
             },
         },
+    )
+    # Top-up appended new test cases to the SAME result object — apply
+    # auto-fill one more time so top-up cases also get instructions.
+    # Idempotent: tests that already have instructions are skipped.
+    _ensure_agent_instructions_on_conversational(
+        result,
+        input_data.user_understanding,
+        trace_id=input_data.trace_id,
     )
     return result

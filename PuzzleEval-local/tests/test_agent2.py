@@ -218,7 +218,7 @@ class TestHelpers:
 
     def test_build_research_message_includes_subtasks(self):
         """The research message should include all sub-tasks and keywords."""
-        from puzzleeval.agents.research import _build_research_message
+        from puzzleeval.agents.agent2.core import _build_research_message
 
         user_understanding = _make_user_understanding()
         message = _build_research_message(user_understanding)
@@ -240,7 +240,7 @@ class TestHelpers:
 
     def test_build_research_message_handles_missing_constraints(self):
         """Should handle missing optional constraints gracefully."""
-        from puzzleeval.agents.research import _build_research_message
+        from puzzleeval.agents.agent2.core import _build_research_message
 
         user_understanding = UserUnderstandingOutput(
             summary="Need AI for document processing",
@@ -264,7 +264,7 @@ class TestHelpers:
 
     def test_extract_text_from_response_text_only(self):
         """Should extract text from a response with only text blocks."""
-        from puzzleeval.agents.research import _extract_text_from_response
+        from puzzleeval.agents.agent2.core import _extract_text_from_response
 
         mock_response = MagicMock()
         block1 = MagicMock()
@@ -281,7 +281,7 @@ class TestHelpers:
 
     def test_extract_text_from_response_mixed_blocks(self):
         """Should skip non-text blocks (tool_use, tool_result, etc.)."""
-        from puzzleeval.agents.research import _extract_text_from_response
+        from puzzleeval.agents.agent2.core import _extract_text_from_response
 
         mock_response = MagicMock()
 
@@ -309,7 +309,7 @@ class TestHelpers:
 
     def test_extract_text_from_response_empty(self):
         """Should return empty string when no text blocks exist."""
-        from puzzleeval.agents.research import _extract_text_from_response
+        from puzzleeval.agents.agent2.core import _extract_text_from_response
 
         mock_response = MagicMock()
         tool_block = MagicMock()
@@ -388,7 +388,7 @@ class TestResearchAgent:
         mock_response.usage.server_tool_use = None
         return mock_response
 
-    @patch("puzzleeval.agents.research.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent2.core.anthropic.Anthropic")
     def test_valid_input_produces_result(self, mock_anthropic_class):
         """Valid input should produce a valid Agent2Result."""
         expected_result = _make_agent2_result()
@@ -411,7 +411,7 @@ class TestResearchAgent:
             trace_id="test-research-001",
         )
 
-        from puzzleeval.agents.research import run_research_agent
+        from puzzleeval.agents.agent2.core import run_research_agent
         result = run_research_agent(input_data)
 
         assert len(result.candidates) == 5
@@ -433,7 +433,7 @@ class TestResearchAgent:
         assert "web_search_20250305" in tool_types
         assert len(tools) == 1  # Only web search, no fetch
 
-    @patch("puzzleeval.agents.research.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent2.core.anthropic.Anthropic")
     def test_step1_api_error_raises_agent_error(self, mock_anthropic_class):
         """API error in Step 1 should raise AgentAPIError."""
         import anthropic as anthropic_module
@@ -452,12 +452,12 @@ class TestResearchAgent:
             trace_id="test-research-002",
         )
 
-        from puzzleeval.agents.research import run_research_agent
+        from puzzleeval.agents.agent2.core import run_research_agent
 
         with pytest.raises(AgentAPIError, match="Failed to connect"):
             run_research_agent(input_data)
 
-    @patch("puzzleeval.agents.research.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent2.core.anthropic.Anthropic")
     def test_step2_none_output_raises_output_error(self, mock_anthropic_class):
         """If Step 2 returns None parsed output, should raise AgentOutputError."""
         from puzzleeval.exceptions import AgentOutputError
@@ -480,12 +480,12 @@ class TestResearchAgent:
             trace_id="test-research-003",
         )
 
-        from puzzleeval.agents.research import run_research_agent
+        from puzzleeval.agents.agent2.core import run_research_agent
 
         with pytest.raises(AgentOutputError, match="no parsed output"):
             run_research_agent(input_data)
 
-    @patch("puzzleeval.agents.research.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent2.core.anthropic.Anthropic")
     def test_pause_turn_continues_then_finishes(self, mock_anthropic_class):
         """If Step 1 returns pause_turn, should continue and then finish."""
         expected_result = _make_agent2_result()
@@ -511,7 +511,7 @@ class TestResearchAgent:
             trace_id="test-research-pause",
         )
 
-        from puzzleeval.agents.research import run_research_agent
+        from puzzleeval.agents.agent2.core import run_research_agent
         result = run_research_agent(input_data)
 
         assert len(result.candidates) == 5
@@ -519,7 +519,7 @@ class TestResearchAgent:
         # (after pause_turn) + Step 2 structuring (non-strict path).
         assert mock_client.messages.create.call_count == 3
 
-    @patch("puzzleeval.agents.research.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent2.core.anthropic.Anthropic")
     def test_empty_research_raises_output_error(self, mock_anthropic_class):
         """If Step 1 returns no text content, should raise AgentOutputError."""
         from puzzleeval.exceptions import AgentOutputError
@@ -546,7 +546,7 @@ class TestResearchAgent:
             trace_id="test-research-004",
         )
 
-        from puzzleeval.agents.research import run_research_agent
+        from puzzleeval.agents.agent2.core import run_research_agent
 
         with pytest.raises(AgentOutputError, match="no text findings"):
             run_research_agent(input_data)
@@ -596,30 +596,30 @@ class TestPhase4DualSearchConfig:
     """web_search tool config scales with blueprint size."""
 
     def test_single_scope_uses_single_search_max(self):
-        from puzzleeval.agents.research import _build_web_search_tool, SINGLE_SEARCH_MAX_USES
+        from puzzleeval.agents.agent2.core import _build_web_search_tool, SINGLE_SEARCH_MAX_USES
         blueprint = _make_linear_blueprint(1)
         tool = _build_web_search_tool(blueprint)
         assert tool["max_uses"] == SINGLE_SEARCH_MAX_USES  # 1-scope → legacy cap
 
     def test_no_blueprint_uses_single_search_max(self):
-        from puzzleeval.agents.research import _build_web_search_tool, SINGLE_SEARCH_MAX_USES
+        from puzzleeval.agents.agent2.core import _build_web_search_tool, SINGLE_SEARCH_MAX_USES
         tool = _build_web_search_tool(None)
         assert tool["max_uses"] == SINGLE_SEARCH_MAX_USES  # legacy path
 
     def test_two_scope_uses_n_plus_one(self):
-        from puzzleeval.agents.research import _build_web_search_tool
+        from puzzleeval.agents.agent2.core import _build_web_search_tool
         blueprint = _make_linear_blueprint(2)
         tool = _build_web_search_tool(blueprint)
         assert tool["max_uses"] == 3  # N+1 = 2+1
 
     def test_five_scope_uses_n_plus_one(self):
-        from puzzleeval.agents.research import _build_web_search_tool
+        from puzzleeval.agents.agent2.core import _build_web_search_tool
         blueprint = _make_linear_blueprint(5)
         tool = _build_web_search_tool(blueprint)
         assert tool["max_uses"] == 6  # N+1 = 5+1
 
     def test_huge_blueprint_caps_at_ceiling(self):
-        from puzzleeval.agents.research import (
+        from puzzleeval.agents.agent2.core import (
             _build_web_search_tool,
             DUAL_SEARCH_MAX_USES_CEILING,
         )
@@ -629,7 +629,7 @@ class TestPhase4DualSearchConfig:
 
     def test_disabled_flag_reverts_to_single_pass(self, monkeypatch):
         # Flip the diagnostic flag off → every blueprint size uses single-pass.
-        from puzzleeval.agents import research as research_module
+        from puzzleeval.agents.agent2 import core as research_module
         monkeypatch.setattr(research_module, "RESEARCH_DUAL_SEARCH_ENABLED", False)
         blueprint = _make_linear_blueprint(5)
         tool = research_module._build_web_search_tool(blueprint)
@@ -640,7 +640,7 @@ class TestPhase4ResearchMessage:
     """_build_research_message includes blueprint context for dual search."""
 
     def test_blueprint_section_rendered_for_multi_scope(self):
-        from puzzleeval.agents.research import _build_research_message
+        from puzzleeval.agents.agent2.core import _build_research_message
         uo = _make_user_understanding_with_blueprint(3)
         msg = _build_research_message(uo)
         # Blueprint header + each step id + role present
@@ -654,7 +654,7 @@ class TestPhase4ResearchMessage:
         assert "4 searches total" in msg
 
     def test_blueprint_section_absent_when_no_workflow(self):
-        from puzzleeval.agents.research import _build_research_message
+        from puzzleeval.agents.agent2.core import _build_research_message
         uo = _make_user_understanding()  # no blueprint (workflow=None)
         msg = _build_research_message(uo)
         # Single-scope fallback text appears; dual-search instructions absent.
@@ -663,7 +663,7 @@ class TestPhase4ResearchMessage:
         assert "4 searches total" not in msg
 
     def test_single_scope_blueprint_uses_legacy_tail(self):
-        from puzzleeval.agents.research import _build_research_message
+        from puzzleeval.agents.agent2.core import _build_research_message
         uo = _make_user_understanding_with_blueprint(1)
         msg = _build_research_message(uo)
         # Blueprint IS shown (agent knows covers=step_1) but pool target is legacy.
@@ -693,7 +693,7 @@ class TestPhase4CoverageNormalization:
         )
 
     def test_dedup_merges_coverage_sets(self):
-        from puzzleeval.agents.research import _normalize_coverage
+        from puzzleeval.agents.agent2.core import _normalize_coverage
         c1 = self._make_candidate("Zapier", ["step_1", "step_2"])
         c2 = self._make_candidate("Zapier", ["step_2", "step_3"])  # dup with additional scope
         out = _normalize_coverage([c1, c2], ["step_1", "step_2", "step_3"])
@@ -704,21 +704,21 @@ class TestPhase4CoverageNormalization:
             assert out[0].coverage_confidence[sid] == "claimed"
 
     def test_dedup_case_insensitive_name(self):
-        from puzzleeval.agents.research import _normalize_coverage
+        from puzzleeval.agents.agent2.core import _normalize_coverage
         c1 = self._make_candidate("Mindee", ["step_1"])
         c2 = self._make_candidate("mindee", ["step_2"])  # same tool, different case
         out = _normalize_coverage([c1, c2], ["step_1", "step_2"])
         assert len(out) == 1
 
     def test_hallucinated_step_ids_dropped(self):
-        from puzzleeval.agents.research import _normalize_coverage
+        from puzzleeval.agents.agent2.core import _normalize_coverage
         c = self._make_candidate("X", ["step_1", "step_99"])  # step_99 not in blueprint
         out = _normalize_coverage([c], ["step_1", "step_2"])
         assert out[0].covers_step_ids == sorted({"step_1"})
         assert "step_99" not in out[0].coverage_confidence
 
     def test_single_scope_autofill(self):
-        from puzzleeval.agents.research import _normalize_coverage
+        from puzzleeval.agents.agent2.core import _normalize_coverage
         # Candidate emitted with empty covers — normalizer should fill.
         c = self._make_candidate("X", [], conf={})
         out = _normalize_coverage([c], ["step_1"])
@@ -726,7 +726,7 @@ class TestPhase4CoverageNormalization:
         assert out[0].coverage_confidence == {"step_1": "claimed"}
 
     def test_legacy_flow_leaves_coverage_empty(self):
-        from puzzleeval.agents.research import _normalize_coverage
+        from puzzleeval.agents.agent2.core import _normalize_coverage
         c = self._make_candidate("X", [], conf={})
         out = _normalize_coverage([c], [])  # no blueprint
         assert out[0].covers_step_ids == []
@@ -735,7 +735,7 @@ class TestPhase4CoverageNormalization:
     def test_verified_confidence_clamped_to_claimed(self):
         # Agent 2 cannot produce "verified" — it doesn't fetch docs. If the
         # LLM tries to claim otherwise, normalizer clamps it back.
-        from puzzleeval.agents.research import _normalize_coverage
+        from puzzleeval.agents.agent2.core import _normalize_coverage
         c = self._make_candidate(
             "X", ["step_1"],
             conf={"step_1": "verified"},  # bogus — Agent 2 never verifies
@@ -744,7 +744,7 @@ class TestPhase4CoverageNormalization:
         assert out[0].coverage_confidence["step_1"] == "claimed"
 
     def test_keeps_higher_relevance_score_on_dedup(self):
-        from puzzleeval.agents.research import _normalize_coverage
+        from puzzleeval.agents.agent2.core import _normalize_coverage
         c1 = self._make_candidate("X", ["step_1"])
         c1.relevance_score = 0.6
         c2 = self._make_candidate("X", ["step_2"])

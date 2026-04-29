@@ -202,64 +202,24 @@ LOG_OUTPUT_PATH = os.environ.get("PUZZLEEVAL_LOG_PATH", None)
 
 
 # ---------------------------------------------------------------------------
-# Model Pricing (USD per token)
+# Pricing tables — canonical home is `puzzleeval.telemetry.pricing_tables`.
 # ---------------------------------------------------------------------------
-# Used to calculate cost estimates in logs. These prices are from Anthropic's
-# pricing page — update them if pricing changes.
-# Format: { "model_name": (input_price_per_token, output_price_per_token) }
-# ---------------------------------------------------------------------------
-MODEL_PRICING = {
-    # Opus 4.7: $5 / 1M input, $25 / 1M output
-    "claude-opus-4-7": (5.0 / 1_000_000, 25.0 / 1_000_000),
-    # Opus 4.5: $5 / 1M input, $25 / 1M output
-    "claude-opus-4-5": (5.0 / 1_000_000, 25.0 / 1_000_000),
-    # Opus 4.1: $15 / 1M input, $75 / 1M output
-    "claude-opus-4-1": (15.0 / 1_000_000, 75.0 / 1_000_000),
-    # Sonnet 4.6: $3 / 1M input, $15 / 1M output
-    "claude-sonnet-4-6": (3.0 / 1_000_000, 15.0 / 1_000_000),
-    # Sonnet 4.5: $3 / 1M input, $15 / 1M output
-    "claude-sonnet-4-5-20250929": (3.0 / 1_000_000, 15.0 / 1_000_000),
-    # Haiku 4.5: $1 / 1M input, $5 / 1M output
-    "claude-haiku-4-5-20251001": (1.0 / 1_000_000, 5.0 / 1_000_000),
-}
-
-
-# ---------------------------------------------------------------------------
-# Cache Pricing Multipliers
-# ---------------------------------------------------------------------------
-# Prompt caching has different write costs depending on TTL:
-#   5-min TTL: 1.25x base input price for writes
-#   1-hour TTL: 2.00x base input price for writes
-#   Cache reads (hits): 0.10x base input price (same for both TTLs)
+# Re-exported here so legacy callers (`from puzzleeval.config import
+# MODEL_PRICING`) keep working. New code should import directly from
+# `puzzleeval.telemetry` or `puzzleeval.telemetry.pricing_tables`.
 #
-# Source: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
+# To update pricing, edit `puzzleeval/telemetry/pricing_tables.py` — that
+# is the single source of truth. The CI guard
+# `tests/test_pricing_table_completeness.py` asserts every model name
+# referenced in the codebase has an entry in the canonical table.
 # ---------------------------------------------------------------------------
-CACHE_WRITE_MULTIPLIER_5M = 1.25
-CACHE_WRITE_MULTIPLIER_1H = 2.00
-CACHE_READ_MULTIPLIER = 0.10
-
-
-# ---------------------------------------------------------------------------
-# Minimum Cacheable Tokens
-# ---------------------------------------------------------------------------
-# The API silently ignores cache_control if the prefix is below this threshold.
-# No error is raised — the request just runs at full price without caching.
-#
-# This means: our ~800-token system prompt ALONE won't be cached on Opus 4.7.
-# Caching only kicks in when total cached prefix (system + file + history)
-# exceeds the threshold. A user who uploads a PDF will easily hit it.
-# A user with just a short text prompt may not — and that's fine, the cost
-# of ~800 uncached tokens is negligible.
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Web Search Pricing
-# ---------------------------------------------------------------------------
-# Anthropic charges $10 per 1,000 web searches = $0.01 per search.
-# This is in ADDITION to standard token costs for search-generated content.
-# Web fetch has NO additional cost — just standard token costs.
-# Used in logging to calculate total cost per Agent 2 run.
-# ---------------------------------------------------------------------------
-WEB_SEARCH_PRICE_PER_SEARCH = 0.01
+from puzzleeval.telemetry.pricing_tables import (
+    CACHE_READ_MULTIPLIER,
+    CACHE_WRITE_MULTIPLIER_1H,
+    CACHE_WRITE_MULTIPLIER_5M,
+    MODEL_PRICING,
+    WEB_SEARCH_PRICE_PER_SEARCH,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -942,14 +902,9 @@ CACHE_CLEAR_TOOL_USES_TRIGGER = int(
 )
 
 
-MIN_CACHEABLE_TOKENS = {
-    "claude-opus-4-7": 4096,
-    "claude-opus-4-5": 4096,
-    "claude-opus-4-1": 1024,
-    "claude-sonnet-4-6": 2048,
-    "claude-sonnet-4-5-20250929": 1024,
-    "claude-haiku-4-5-20251001": 4096,
-}
+# MIN_CACHEABLE_TOKENS — canonical home is puzzleeval.telemetry.pricing_tables.
+# Re-exported for back-compat with existing call sites.
+from puzzleeval.telemetry.pricing_tables import MIN_CACHEABLE_TOKENS  # noqa: E402, F401
 
 
 # ---------------------------------------------------------------------------

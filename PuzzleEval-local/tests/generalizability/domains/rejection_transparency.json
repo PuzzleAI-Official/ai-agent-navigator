@@ -1,0 +1,14 @@
+{
+  "name": "rejection_transparency",
+  "input": "OCR invoices, verify tax IDs, then generate compliance reports.",
+  "expected_scopes": ["ocr", "tax_verify", "compliance"],
+  "min_candidates_per_scope": 1,
+  "max_cost_usd": 25.0,
+  "per_scope_assertions": {
+    "ocr": {"min_top_pass_rate": 0.80, "min_candidates_tested": 2},
+    "tax_verify": {"min_top_pass_rate": 0.0, "min_candidates_tested": 1},
+    "compliance": {"min_top_pass_rate": 0.70, "min_candidates_tested": 1}
+  },
+  "expected_rejections_min": 1,
+  "notes": "Tests drop-on-reject transparency. tax_verify scope likely to have rejections (niche providers with no public APIs)."
+}

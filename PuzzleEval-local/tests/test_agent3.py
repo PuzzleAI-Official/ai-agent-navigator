@@ -272,7 +272,7 @@ class TestHelpers:
 
     def test_build_generation_message_includes_subtasks(self):
         """The generation message should include all sub-tasks and domain."""
-        from puzzleeval.agents.synthetic_tests import _build_generation_message
+        from puzzleeval.agents.agent3.core import _build_generation_message
 
         user_understanding = _make_user_understanding()
         message = _build_generation_message(user_understanding)
@@ -290,7 +290,7 @@ class TestHelpers:
 
     def test_build_generation_message_calculates_target_count(self):
         """Should calculate target case count based on sub-task count."""
-        from puzzleeval.agents.synthetic_tests import _build_generation_message
+        from puzzleeval.agents.agent3.core import _build_generation_message
 
         user_understanding = _make_user_understanding()  # 2 sub-tasks, no workflow
         message = _build_generation_message(user_understanding)
@@ -300,7 +300,7 @@ class TestHelpers:
 
     def test_build_generation_message_workflow_bonus(self):
         """Should add bonus cases when workflow_summary is present."""
-        from puzzleeval.agents.synthetic_tests import _build_generation_message
+        from puzzleeval.agents.agent3.core import _build_generation_message
 
         user_understanding = _make_user_understanding()
         user_understanding.workflow_summary = "Invoice processing workflow with 5 steps"
@@ -311,7 +311,7 @@ class TestHelpers:
 
     def test_build_generation_message_handles_missing_constraints(self):
         """Should handle missing optional constraints gracefully."""
-        from puzzleeval.agents.synthetic_tests import _build_generation_message
+        from puzzleeval.agents.agent3.core import _build_generation_message
 
         user_understanding = UserUnderstandingOutput(
             summary="Need AI for document processing",
@@ -335,7 +335,7 @@ class TestHelpers:
 
     def test_build_generation_message_min_clamp(self):
         """Single sub-task should still produce at least 10 target cases."""
-        from puzzleeval.agents.synthetic_tests import _build_generation_message
+        from puzzleeval.agents.agent3.core import _build_generation_message
 
         user_understanding = UserUnderstandingOutput(
             summary="Need AI chatbot",
@@ -377,7 +377,7 @@ class TestSyntheticTestsAgent:
         mock_response.usage.cache_read_input_tokens = 0
         return mock_response
 
-    @patch("puzzleeval.agents.synthetic_tests.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent3.core.anthropic.Anthropic")
     def test_valid_input_produces_result(self, mock_anthropic_class):
         """Valid input should produce a valid Agent3Result."""
         expected_result = _make_agent3_result()
@@ -393,7 +393,7 @@ class TestSyntheticTestsAgent:
             trace_id="test-agent3-001",
         )
 
-        from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
+        from puzzleeval.agents.agent3.core import run_synthetic_tests_agent
         result = run_synthetic_tests_agent(input_data)
 
         assert len(result.test_cases) == 3
@@ -403,7 +403,7 @@ class TestSyntheticTestsAgent:
         # Verify messages.parse was called (single step, not two)
         assert mock_client.messages.parse.call_count == 1
 
-    @patch("puzzleeval.agents.synthetic_tests.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent3.core.anthropic.Anthropic")
     def test_api_connection_error_raises_agent_error(self, mock_anthropic_class):
         """API connection error should raise AgentAPIError."""
         import anthropic as anthropic_module
@@ -420,12 +420,12 @@ class TestSyntheticTestsAgent:
             trace_id="test-agent3-002",
         )
 
-        from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
+        from puzzleeval.agents.agent3.core import run_synthetic_tests_agent
 
         with pytest.raises(AgentAPIError, match="Failed to connect"):
             run_synthetic_tests_agent(input_data)
 
-    @patch("puzzleeval.agents.synthetic_tests.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent3.core.anthropic.Anthropic")
     def test_rate_limit_error_raises_rate_limit_error(self, mock_anthropic_class):
         """Rate limit error should raise AgentRateLimitError."""
         import anthropic as anthropic_module
@@ -444,12 +444,12 @@ class TestSyntheticTestsAgent:
             trace_id="test-agent3-003",
         )
 
-        from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
+        from puzzleeval.agents.agent3.core import run_synthetic_tests_agent
 
         with pytest.raises(AgentRateLimitError, match="Rate limit"):
             run_synthetic_tests_agent(input_data)
 
-    @patch("puzzleeval.agents.synthetic_tests.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent3.core.anthropic.Anthropic")
     def test_none_output_raises_output_error(self, mock_anthropic_class):
         """If parsed output is None, should raise AgentOutputError."""
         from puzzleeval.exceptions import AgentOutputError
@@ -466,12 +466,12 @@ class TestSyntheticTestsAgent:
             trace_id="test-agent3-004",
         )
 
-        from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
+        from puzzleeval.agents.agent3.core import run_synthetic_tests_agent
 
         with pytest.raises(AgentOutputError, match="no parsed output"):
             run_synthetic_tests_agent(input_data)
 
-    @patch("puzzleeval.agents.synthetic_tests.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent3.core.anthropic.Anthropic")
     def test_uses_default_model(self, mock_anthropic_class):
         """Should use DEFAULT_MODEL for the structured output call."""
         expected_result = _make_agent3_result()
@@ -487,7 +487,7 @@ class TestSyntheticTestsAgent:
             trace_id="test-agent3-005",
         )
 
-        from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
+        from puzzleeval.agents.agent3.core import run_synthetic_tests_agent
         from puzzleeval.config import DEFAULT_MODEL
 
         run_synthetic_tests_agent(input_data)

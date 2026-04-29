@@ -9,21 +9,221 @@ An AI agent evaluation platform. Users describe what they need AI to do in plain
 
 Target users: SMBs (small/medium businesses) who are overwhelmed by AI options and don't have the technical ability to evaluate them.
 
-## Current State (as of 2026-04-25)
+## Current State (as of 2026-04-28)
 
-**Production-ready for local hosting. Voice-run wall-clock projected
-~13 min and dropping toward ~7 min once NEW-AM pre-rendered api_spec
-fast path lands on next real run. Per-test cost+latency tracking
-finally accurate (was None/0 across the board). Build-phase observability
-overhauled — every URL/query/file/exit code captured per turn,
-conversation_log saved incrementally, build_phases summary derives
-phase boundaries from turn data.
-1,388 tests passing (core + API + generalizability bench).
-Zero regressions. TypeScript clean.**
+**Production-ready for local hosting. Architecture cleanup (Phases 4-8)
+COMPLETE — Agent 5's monolithic 8,946-LoC `implement_test_env.py` shrank
+to 4,710 LoC with 8 single-purpose `agent5/*` modules holding the
+extracted helpers. Agents 1-4 converted to per-agent package structure
+matching Agent 5; their prompts now live as markdown templates in
+`templates/*.md` directories. Legacy single-file paths preserved as
+comprehensive shims for full back-compat across all 19 importer files.
+1,737 core tests passing (was 1,388 before refactor — +349 net,
+including +209 helper-level tests for 6 new modules and -6 redundant
+source-grep tests removed in Phase 8). 37 API tests pass. Mock pipeline
+E2E green. Zero behavior regressions across the entire refactor.**
 
-> **NEW-AM — Per-test tracking + checklist-driven build skip** (this session,
-> documented below). NEW-AL (voice-run wall-clock) + NEW-AK (build-readiness
-> checklist) preserved below.
+> **NEW-AO — Architecture cleanup: per-agent package structure +
+> aggressive test cleanup** (current session — Phases 4-8, documented
+> below). NEW-AN (Agent 5 conservative cleanup) → NEW-AM (per-test
+> tracking) → earlier passes preserved below.
+
+### NEW-AO — Architecture cleanup completed (2026-04-28)
+
+Five phases of structural cleanup landed across the session, each
+gated on behavior preservation (34 behavior-pinning tests + 4
+production gates green at every checkpoint):
+
+**Phase 4 Path A + B** — extract Agent 5 inline subsystems:
+- `agent5/turn_blocks.py` (284 LoC): orphan scrubber + turn_log
+  dict builder + per-turn SSE progress emitter.
+- `agent5/api_call.py` (448 LoC): Anthropic API call boundary with
+  retry + PTL recovery + rate-limit backoff. `BuilderAPICallContext`
+  frozen dataclass replaces 15-kwarg signature; `APICallOutcome`
+  tagged union (Success/Failure) makes flow explicit.
+- `agent5/dispatch_helpers.py` (468 LoC): 8 pure predicates +
+  formatters extracted from the dispatch loop — smoke detection,
+  harness signal detection, phase transition trigger, error
+  classification (auth/endpoint/format/other), reassessment
+  message builder, ask_research enrichment.
+- 33 new helper-level tests for api_call + 76 for dispatch_helpers
+  + 27 baseline behavior tests pinning the high-risk extractions
+  before they happened.
+
+**Phase 5** — move `_build_single_harness` to `agent5/build_loop.py`:
+- 1,304 LoC function relocated to canonical home; legacy
+  `_build_single_harness` becomes 25-line delegation shim.
+- `BuildContext` frozen dataclass + `BuildLoopState` mutable
+  dataclass introduced (33 helper tests pinning their contracts).
+- Lazy imports inside `build_single_harness` resolve the
+  build_loop ↔ implement_test_env circular-import concern.
+
+**Phase 6** — extract test execution + LLM evaluation:
+- `agent5/execution.py` (828 LoC, 9 functions): `execute_all_tests`
+  + `execute_single_test` + session-retry + rate-limit retry +
+  aggregate metrics + plugin synthesis.
+- `agent5/evaluation.py` (348 LoC, 4 functions): `evaluate_with_llm`
+  (LLM judge), `build_evaluation_prompt`, `evaluate_mechanical`
+  (mechanical fallback path), `compute_weighted_score`.
+- `EVALUATION_SYSTEM_PROMPT` move-to-disk SKIPPED (only 24 lines
+  — wheel packaging risk outweighed value).
+
+**Phase 7** — per-agent package structure for Agents 1-4:
+- 5 new packages: `agents/agent1/`, `agents/agent2/`, `agents/agent3/`,
+  `agents/agent3f/`, `agents/agent4/`. Each has
+  `__init__.py` + `core.py` + `templates/*.md`.
+- 7 prompt constants extracted from inline triple-quoted Python
+  strings into markdown files (Agent 1: 1 prompt; Agents 2 + 4:
+  2 prompts each; Agents 3 + 3F: 1 prompt each).
+- 5 legacy single-file paths replaced with comprehensive
+  re-export shims that mirror EVERY module attribute (public +
+  private) from canonical core.py — preserves 19 importer files
+  unchanged.
+- `pyproject.toml` `package-data` extended for all 5 new template
+  dirs.
+- Reusable script `scripts/_phase7_restructure.py` handled the
+  mechanical moves.
+
+**Phase 8** — aggressive test cleanup:
+- 6 source-grep tests deleted (each had a behavior-test
+  replacement explicitly cited in deletion comment):
+  * `test_agent5_wires_model_fallback` (→ test_api_call.py::TestSuccessPath)
+  * `test_enrichment_path_still_runs_post_spec` (→ test_dispatch_helpers.py::TestEnrichResearchQuestion)
+  * `test_agent5_context_management_shape_matches_anthropic_schema` (→ test_api_call.py::TestContextManagementEdits)
+  * `test_clear_thinking_edit_has_no_trigger_field` (→ same)
+  * `test_clear_thinking_edit_is_first_in_edits_list` (→ test_api_call.py::test_clear_thinking_is_first)
+  * `test_phase_transition_fires_on_patch_api_spec` (→ test_dispatch_helpers.py::TestDetectPhaseTransition)
+- 4 source-grep tests RETAINED as Category A guards (no full
+  replacement; they pin structural invariants behavior tests
+  don't cover): `test_agent5_system_prompt_has_cache_control`,
+  `test_agent5_builder_calls_helper_gated_by_flag`,
+  `test_total_cache_breakpoints_within_anthropic_limit`,
+  `test_in_loop_failure_sites_pass_accumulated_cost`.
+
+**Cumulative LoC reduction:**
+
+| Module | Before refactor | After Phase 8 |
+|---|---|---|
+| `implement_test_env.py` | 8,946 | 4,710 (-47%) |
+| Agents 1-4 (legacy paths) | 5,574 | 120 (5× 24-line shims) |
+| `_build_single_harness` (Agent 5 entry) | 1,962 | 25 (delegation shim) |
+
+**New canonical homes (8,304 LoC + 1,367 LoC markdown):**
+- `agent5/`: api_call (448), build_loop (1,643), dispatch_helpers
+  (468), evaluation (348), execution (828), turn_blocks (284),
+  + earlier extractions (sandbox, costing, prompts, playbooks,
+  tools, verification, research_subagent, telemetry,
+  initial_message, conversation_log)
+- `agent[1234,3f]/core.py`: 4,285 LoC across 5 modules
+- `templates/*.md`: 1,367 LoC across 7 markdown files
+
+**Architectural invariants preserved at every step:**
+- AD-007 honored throughout: prompts as markdown teach patterns;
+  Python in `core.py` enforces contracts deterministically.
+- Back-compat: all 19 importer files unchanged. Comprehensive
+  shims mirror every module attribute (public + private) so
+  `from puzzleeval.agents.research import _normalize_coverage`
+  still works alongside `from ... import RESEARCH_SYSTEM_PROMPT`.
+- AD-002 trigger preserved: in-prompt modality gating still
+  active for Agents 1-4 (no playbook router needed yet).
+- Cross-module identity: `_VENV_CREATE_LOCKS` test still pins
+  R2 invariant.
+- No import cycles: verified via mock pipeline E2E at every
+  phase boundary.
+
+**Bugs caught + classified per Codex discipline (zero latent
+production bugs across all 5 phases):**
+- 5 wrong-expectations in Phase 4 baseline tests (test code, not
+  prod) — all fixed before any extraction landed.
+- 2 missing standard-library imports in Phase 5 (my extraction
+  bug; caught by behavior tests, fixed in 2 minutes).
+- ~30 source-grep tests broke during Phases 5/6/7 because they
+  read literal file paths that became shims; all retargeted via
+  `_agent5_combined_source()` helper or per-test path updates.
+- Each failure explicitly classified as wrong-expectation
+  (test issue) vs latent-bug (prod issue); only test issues
+  surfaced; classification log embedded in deletion/retarget
+  comments.
+
+**Phase fingerprints / how to verify the refactor on disk:**
+- `wc -l puzzleeval/agents/implement_test_env.py` shows ≤5,000 LoC
+  (was 8,946).
+- Every `agents/agentN/` package has `__init__.py + core.py +
+  templates/*.md`.
+- Legacy paths (`user_understanding.py`, etc.) are 24-line shims
+  reading `dir(_core)` and copying attributes.
+- `agent5/` has 14+ single-purpose modules (api_call, build_loop,
+  dispatch_helpers, evaluation, execution, turn_blocks, etc.).
+
+**Diagnostic flags / rollback:**
+- No flags added during refactor — every change behavior-preserving.
+- Rollback path per phase: `git revert` the phase's commit; the
+  legacy shim + back-compat surface means downstream code keeps
+  working through the revert.
+
+> **NEW-AN — Agent 5 architecture cleanup: local playbooks + extracted subsystems (2026-04-27)** (previous session — initial conservative cleanup that NEW-AO completed). NEW-AM (per-test tracking) and earlier passes preserved below.
+
+### NEW-AN — Agent 5 architecture cleanup: local playbooks + extracted subsystems (2026-04-27)
+
+This session started the conservative Agent 5 architecture cleanup for
+production/cloud readiness. The goal is to separate Agent 5's deterministic
+backbone from modality/capability guidance without breaking the public entry
+point or the existing runtime behavior.
+
+**Decision update: local PuzzleEval playbooks are now active.** Earlier notes
+treated a PuzzleEval-owned playbook loader as deferred. That trigger has now
+fired: Agent 5's prompt/contracts had become too large and too tangled to keep
+as inline Python constants. Native Anthropic Agent Skills remain rejected for
+this product because they require the container/code-execution/files beta path
+and do not fit PuzzleEval's self-hosted credential + local sandbox model. The
+implemented approach is local markdown playbooks loaded deterministically by
+test-case modality/capability metadata.
+
+**What changed:**
+
+  * `puzzleeval.agents.implement_test_env` remains the compatibility entry
+    point and still exports existing public names such as
+    `BUILDER_SYSTEM_PROMPT`, `_dispatch_tool`, `_tool_patch_file`, and
+    `_calculate_call_cost`.
+  * The 55 KB `BUILDER_SYSTEM_PROMPT` literal moved to the packaged template
+    `puzzleeval/agents/agent5/templates/builder_system_prompt.md`.
+  * Voice/streaming/live-test capability contracts moved to local markdown
+    playbooks under `puzzleeval/capability_playbooks/`.
+  * `puzzleeval.agents.agent5.playbooks` selects and caches playbooks in a
+    deterministic order from `input_type` / `output_type`.
+  * `puzzleeval.agents.agent5.prompts` owns packaged prompt loading plus OS
+    and capability placeholder rendering.
+  * `puzzleeval.agents.agent5.tools` now owns write/patch/read/run custom-tool
+    dispatch for builder sandboxes; old `_tool_*` names forward to it.
+  * `puzzleeval.agents.agent5.costing` now owns token/cache/advisor/server-tool
+    cost accounting; old `_calculate_call_cost` forwards to it.
+  * `puzzleeval/agents/agent5/ARCHITECTURE.md` documents the backbone vs
+    playbook boundary, module ownership, and cloud migration rules.
+  * `puzzleeval-api/pytest.ini` restricts API pytest collection to real tests
+    so generated `runs/` harnesses are not collected.
+  * Root `.gitignore` no longer hides all of `PuzzleEval-local`; source files
+    now surface as untracked instead of silently ignored, while runtime output
+    (`runs/`, caches, venvs, egg-info, provider registry) stays ignored.
+
+**Production stance.** Playbooks may teach patterns, but safety-critical
+contracts remain in deterministic Python. Keep the compatibility facade until
+module-level behavior tests cover the extracted owner. Do not mass-rewrite
+source-grep tests just because a path changed; migrate tests only when the
+ownership actually moved.
+
+**Verification after this cleanup:**
+
+  * Core: `1414 passed, 39 deselected`
+  * API: `37 passed`
+  * Frontend Vitest: `1 passed`
+  * Frontend production build: passed, with existing Browserslist/chunk-size
+    warnings
+
+**Next recommended step.** Before deeper extraction, classify and track the
+newly visible real source/test/doc files under `PuzzleEval-local`. The broad
+ignore rule previously hid important production code (`tool_plugins`,
+`plugin_tool_runner.py`, report/evaluator helpers, newer tests/docs). A cloud
+build or CI job must not depend on untracked local files.
 
 ### NEW-AM — Per-test tracking + checklist-driven build skip (2026-04-25)
 

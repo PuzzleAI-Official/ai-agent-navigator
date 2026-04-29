@@ -49,6 +49,15 @@ dependencies = [
     # generated images for evaluation; openapi_harness to fetch openapi.json
     # specs during the auto-generation fastpath).
     "requests>=2.31.0",
+
+    # PyYAML — parses YAML frontmatter on capability playbook markdown files.
+    # Required by puzzleeval/capability_playbooks/_loader.py to extract
+    # ContractMetadata (selectors, priority, applies_to_agents, etc.) from
+    # each contract before composition. Pure-Python alternative considered
+    # but rejected: PyYAML is the industry standard, well-tested, and the
+    # frontmatter spec we follow is intentionally close to Anthropic Skills
+    # format (which also uses YAML).
+    "pyyaml>=6.0",
 ]
 
 # Dev dependencies — only needed for running tests, not for production.
@@ -82,6 +91,18 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 include = ["puzzleeval*"]
 exclude = ["runs*", "bench*", "test_data*", "tests*", "puzzleeval.egg-info*"]
+
+[tool.setuptools.package-data]
+puzzleeval = [
+    "capability_playbooks/*.md",
+    "agents/agent5/templates/*.md",
+    # Phase 7: per-agent template directories.
+    "agents/agent1/templates/*.md",
+    "agents/agent2/templates/*.md",
+    "agents/agent3/templates/*.md",
+    "agents/agent3f/templates/*.md",
+    "agents/agent4/templates/*.md",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

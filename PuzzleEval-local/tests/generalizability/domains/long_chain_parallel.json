@@ -1,0 +1,15 @@
+{
+  "name": "long_chain_parallel",
+  "input": "OCR invoices AND verify tax IDs AND categorize expenses in parallel, then merge all results and sync to bookkeeping system.",
+  "expected_scopes": ["ocr", "tax_verify", "categorize", "merge", "bookkeeping_sync"],
+  "min_candidates_per_scope": 1,
+  "max_cost_usd": 40.0,
+  "per_scope_assertions": {
+    "ocr": {"min_top_pass_rate": 0.75, "min_candidates_tested": 2},
+    "tax_verify": {"min_top_pass_rate": 0.60, "min_candidates_tested": 1},
+    "categorize": {"min_top_pass_rate": 0.70, "min_candidates_tested": 1},
+    "merge": {"min_top_pass_rate": 0.60, "min_candidates_tested": 1},
+    "bookkeeping_sync": {"min_top_pass_rate": 0.60, "min_candidates_tested": 1}
+  },
+  "notes": "5-scope fan-out/fan-in DAG. Tests DAG topology preservation and parallel scope handling."
+}

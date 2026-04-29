@@ -1,0 +1,12 @@
+{
+  "name": "scope_under_capacity",
+  "input": "Transcribe Mandarin audio recordings and translate to English.",
+  "expected_scopes": ["transcribe", "translate"],
+  "min_candidates_per_scope": 0,
+  "max_cost_usd": 15.0,
+  "per_scope_assertions": {
+    "transcribe": {"min_top_pass_rate": 0.0, "min_candidates_tested": 0},
+    "translate": {"min_top_pass_rate": 0.70, "min_candidates_tested": 2}
+  },
+  "notes": "Tests scope under-capacity handling. Mandarin transcription is niche \u2014 transcribe scope may end with 0 tested candidates. Run must still complete."
+}

@@ -1,0 +1,11 @@
+{
+  "name": "chatbot_simple",
+  "input": "I need a customer support chatbot for my e-commerce store.",
+  "expected_scopes": ["chatbot"],
+  "min_candidates_per_scope": 3,
+  "max_cost_usd": 12.0,
+  "per_scope_assertions": {
+    "chatbot": {"min_top_pass_rate": 0.80, "min_candidates_tested": 3}
+  },
+  "notes": "Single-scope regression baseline."
+}

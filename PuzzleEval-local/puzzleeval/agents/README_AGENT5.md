@@ -13,6 +13,17 @@
 
 ## Current Architecture (2026-04-10)
 
+### Cleanup Boundary (2026-04-26)
+
+`puzzleeval.agents.implement_test_env` remains the public compatibility
+entry point, but new Agent 5 code should land under
+`puzzleeval.agents.agent5`. The first extracted subsystem is capability
+playbook loading: modality-specific prompt contracts now live in
+`puzzleeval/capability_playbooks/*.md` and are selected deterministically
+from test-case input/output types. These are local PuzzleEval playbooks,
+not native Anthropic Skills, and safety-critical checks still belong in
+Python code.
+
 ### What Agent 5 Does Now
 1. **Builds** a thin Python API client harness for each AI service candidate (sends file/text, returns raw response)
 2. **Validates** the harness with live API calls (credentials injected into build sandbox)

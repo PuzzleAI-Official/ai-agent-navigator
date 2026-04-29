@@ -1,0 +1,12 @@
+{
+  "name": "translation_chain",
+  "input": "Translate product descriptions from English to Spanish, then format for our website CMS.",
+  "expected_scopes": ["translate", "format"],
+  "min_candidates_per_scope": 2,
+  "max_cost_usd": 18.0,
+  "per_scope_assertions": {
+    "translate": {"min_top_pass_rate": 0.85, "min_candidates_tested": 2},
+    "format": {"min_top_pass_rate": 0.70, "min_candidates_tested": 2}
+  },
+  "notes": "2-scope translate + format pattern."
+}

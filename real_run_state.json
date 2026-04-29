@@ -1,0 +1,27 @@
+{
+  "run_id": "4c0b57ae",
+  "trace_id": "749b09b1-49ed-4fa2-bc4d-d9e633ea876f",
+  "status": "completed",
+  "stage": "results",
+  "candidates": [],
+  "cost_usd": 8.776767,
+  "pipeline_progress": {
+    "current_agent": null,
+    "agents_completed": [],
+    "harnesses_building": [],
+    "harnesses_completed": [],
+    "harnesses_failed": [],
+    "test_progress": 0.0
+  },
+  "quota": {
+    "plan": "free",
+    "credits_remaining": null,
+    "credits_consumed": 0,
+    "tier_features": {
+      "search": true,
+      "testing": false,
+      "monitoring": false
+    },
+    "billing_enforced": false
+  }
+}

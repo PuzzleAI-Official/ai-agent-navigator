@@ -1,0 +1,8 @@
+{
+  "domain": "invoice_workflow",
+  "status": "validated",
+  "config_valid": true,
+  "scopes_tested": 3,
+  "max_cost_usd": 30.0,
+  "timestamp": "2026-04-16T01:20:34.511167+00:00"
+}

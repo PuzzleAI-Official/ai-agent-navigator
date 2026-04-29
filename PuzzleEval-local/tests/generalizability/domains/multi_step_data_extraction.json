@@ -1,0 +1,14 @@
+{
+  "name": "multi_step_data_extraction",
+  "input": "Scrape real estate listings, extract property details, classify by type, then push to our database API.",
+  "expected_scopes": ["scrape", "extract", "classify", "sync"],
+  "min_candidates_per_scope": 2,
+  "max_cost_usd": 35.0,
+  "per_scope_assertions": {
+    "scrape": {"min_top_pass_rate": 0.70, "min_candidates_tested": 2},
+    "extract": {"min_top_pass_rate": 0.75, "min_candidates_tested": 2},
+    "classify": {"min_top_pass_rate": 0.70, "min_candidates_tested": 2},
+    "sync": {"min_top_pass_rate": 0.65, "min_candidates_tested": 2}
+  },
+  "notes": "4-scope workflow \u2014 exercises longest DAG."
+}

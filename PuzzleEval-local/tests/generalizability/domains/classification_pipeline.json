@@ -1,0 +1,12 @@
+{
+  "name": "classification_pipeline",
+  "input": "Classify incoming customer emails by intent, then route to the right department.",
+  "expected_scopes": ["classify", "route"],
+  "min_candidates_per_scope": 2,
+  "max_cost_usd": 18.0,
+  "per_scope_assertions": {
+    "classify": {"min_top_pass_rate": 0.80, "min_candidates_tested": 2},
+    "route": {"min_top_pass_rate": 0.70, "min_candidates_tested": 2}
+  },
+  "notes": "2-scope classify + route pattern."
+}

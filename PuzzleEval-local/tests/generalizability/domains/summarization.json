@@ -1,0 +1,11 @@
+{
+  "name": "summarization",
+  "input": "Summarize long meeting transcripts into bullet-point action items.",
+  "expected_scopes": ["summarize"],
+  "min_candidates_per_scope": 3,
+  "max_cost_usd": 12.0,
+  "per_scope_assertions": {
+    "summarize": {"min_top_pass_rate": 0.80, "min_candidates_tested": 3}
+  },
+  "notes": "Single-scope summarization baseline."
+}

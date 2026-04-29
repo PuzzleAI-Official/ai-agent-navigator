@@ -81,9 +81,9 @@ def _make_agent3_result() -> Agent3Result:
 
 class TestHelpers:
 
-    @patch("puzzleeval.agents.synthetic_tests_file.parse_file")
+    @patch("puzzleeval.agents.agent3f.core.parse_file")
     def test_build_file_message_includes_context(self, mock_parse):
-        from puzzleeval.agents.synthetic_tests_file import _build_file_message
+        from puzzleeval.agents.agent3f.core import _build_file_message
 
         mock_parse.return_value = "Invoice text content here"
 
@@ -98,9 +98,9 @@ class TestHelpers:
         assert "accounting" in full_text.lower()
         assert "test.txt" in full_text
 
-    @patch("puzzleeval.agents.synthetic_tests_file.parse_file")
+    @patch("puzzleeval.agents.agent3f.core.parse_file")
     def test_build_file_message_handles_text_files(self, mock_parse):
-        from puzzleeval.agents.synthetic_tests_file import _build_file_message
+        from puzzleeval.agents.agent3f.core import _build_file_message
 
         mock_parse.return_value = "CSV data here"
 
@@ -110,9 +110,9 @@ class TestHelpers:
         full_text = " ".join(b["text"] for b in text_blocks)
         assert "CSV data here" in full_text
 
-    @patch("puzzleeval.agents.synthetic_tests_file.parse_file")
+    @patch("puzzleeval.agents.agent3f.core.parse_file")
     def test_build_file_message_handles_binary_files(self, mock_parse):
-        from puzzleeval.agents.synthetic_tests_file import _build_file_message
+        from puzzleeval.agents.agent3f.core import _build_file_message
 
         # Simulate a PDF content block
         mock_parse.return_value = {
@@ -126,9 +126,9 @@ class TestHelpers:
         assert len(doc_blocks) == 1
         assert doc_blocks[0]["source"]["media_type"] == "application/pdf"
 
-    @patch("puzzleeval.agents.synthetic_tests_file.parse_file")
+    @patch("puzzleeval.agents.agent3f.core.parse_file")
     def test_build_file_message_handles_parse_failure(self, mock_parse):
-        from puzzleeval.agents.synthetic_tests_file import _build_file_message
+        from puzzleeval.agents.agent3f.core import _build_file_message
         from puzzleeval.exceptions import AgentFileParseError
 
         mock_parse.side_effect = AgentFileParseError("File not found")
@@ -158,8 +158,8 @@ class TestFileTestsAgent:
         mock_response.usage.cache_read_input_tokens = 0
         return mock_response
 
-    @patch("puzzleeval.agents.synthetic_tests_file.parse_file")
-    @patch("puzzleeval.agents.synthetic_tests_file.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent3f.core.parse_file")
+    @patch("puzzleeval.agents.agent3f.core.anthropic.Anthropic")
     def test_valid_input_produces_result(self, mock_anthropic_class, mock_parse):
         expected_result = _make_agent3_result()
         mock_parse.return_value = "Invoice content"
@@ -174,7 +174,7 @@ class TestFileTestsAgent:
             test_file_paths=["/tmp/invoice.pdf"],
         )
 
-        from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
+        from puzzleeval.agents.agent3f.core import run_file_tests_agent
         result = run_file_tests_agent(input_data)
 
         assert len(result.test_cases) == 1
@@ -187,7 +187,7 @@ class TestFileTestsAgent:
         sample files still get test cases. Downstream test execution
         surfaces 'INCOMPATIBLE: file required' as a real failure when
         the API actually needs a file (Gap 3 fix in implement_test_env)."""
-        from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
+        from puzzleeval.agents.agent3f.core import run_file_tests_agent
         from puzzleeval.schemas import Agent3Result
 
         sentinel = Agent3Result(
@@ -208,8 +208,8 @@ class TestFileTestsAgent:
         mock_text_agent.assert_called_once_with(input_data)
         assert result is sentinel
 
-    @patch("puzzleeval.agents.synthetic_tests_file.parse_file")
-    @patch("puzzleeval.agents.synthetic_tests_file.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent3f.core.parse_file")
+    @patch("puzzleeval.agents.agent3f.core.anthropic.Anthropic")
     def test_api_error_raises_agent_error(self, mock_anthropic_class, mock_parse):
         import anthropic as anthropic_module
         from puzzleeval.exceptions import AgentAPIError
@@ -227,13 +227,13 @@ class TestFileTestsAgent:
             test_file_paths=["/tmp/test.pdf"],
         )
 
-        from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
+        from puzzleeval.agents.agent3f.core import run_file_tests_agent
 
         with pytest.raises(AgentAPIError, match="Failed to connect"):
             run_file_tests_agent(input_data)
 
-    @patch("puzzleeval.agents.synthetic_tests_file.parse_file")
-    @patch("puzzleeval.agents.synthetic_tests_file.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent3f.core.parse_file")
+    @patch("puzzleeval.agents.agent3f.core.anthropic.Anthropic")
     def test_none_output_raises_output_error(self, mock_anthropic_class, mock_parse):
         from puzzleeval.exceptions import AgentOutputError
 
@@ -251,7 +251,7 @@ class TestFileTestsAgent:
             test_file_paths=["/tmp/test.pdf"],
         )
 
-        from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
+        from puzzleeval.agents.agent3f.core import run_file_tests_agent
 
         with pytest.raises(AgentOutputError, match="no parsed output"):
             run_file_tests_agent(input_data)

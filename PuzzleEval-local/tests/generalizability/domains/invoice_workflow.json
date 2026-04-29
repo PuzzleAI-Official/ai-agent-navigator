@@ -1,0 +1,13 @@
+{
+  "name": "invoice_workflow",
+  "input": "Photos of invoices, extract line items, then sync to Google Sheets.",
+  "expected_scopes": ["ocr", "extract", "spreadsheet_sync"],
+  "min_candidates_per_scope": 3,
+  "max_cost_usd": 30.0,
+  "per_scope_assertions": {
+    "ocr": {"min_top_pass_rate": 0.85, "min_candidates_tested": 3},
+    "extract": {"min_top_pass_rate": 0.80, "min_candidates_tested": 2},
+    "spreadsheet_sync": {"min_top_pass_rate": 0.75, "min_candidates_tested": 2}
+  },
+  "notes": "3-scope workflow. SPA provider DocuClipper exercises Phase 1.5 content-quality detection."
+}

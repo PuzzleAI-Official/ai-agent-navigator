@@ -36,4 +36,13 @@ __pycache__/
 .pytest_cache/
 
 # PuzzleEval
-PuzzleEval-local/
+PuzzleEval-local/.env
+PuzzleEval-local/.venv/
+PuzzleEval-local/.pytest_cache/
+PuzzleEval-local/__pycache__/
+PuzzleEval-local/**/__pycache__/
+PuzzleEval-local/*.egg-info/
+PuzzleEval-local/dist/
+PuzzleEval-local/build/
+PuzzleEval-local/runs/
+PuzzleEval-local/provider_registry.json

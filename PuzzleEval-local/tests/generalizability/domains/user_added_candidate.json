@@ -1,0 +1,15 @@
+{
+  "name": "user_added_candidate",
+  "input": "Parse PDF contracts and extract key clauses.",
+  "expected_scopes": ["parse", "extract"],
+  "min_candidates_per_scope": 2,
+  "max_cost_usd": 20.0,
+  "per_scope_assertions": {
+    "parse": {"min_top_pass_rate": 0.75, "min_candidates_tested": 2},
+    "extract": {"min_top_pass_rate": 0.70, "min_candidates_tested": 2}
+  },
+  "user_added": [
+    {"name": "MyCustomParser", "covers_step_ids": ["step_1"], "provider": "Internal"}
+  ],
+  "notes": "Tests user-added candidate flow through Phase 6 \u2192 6.5."
+}

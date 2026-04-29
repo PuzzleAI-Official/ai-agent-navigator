@@ -282,7 +282,7 @@ class TestHelpers:
 
     def test_build_candidate_message_includes_candidate_info(self):
         """The candidate message should include candidate details and source URL."""
-        from puzzleeval.agents.screening import _build_candidate_message
+        from puzzleeval.agents.agent4.core import _build_candidate_message
 
         candidate = _make_sample_candidates()[0]  # Google Document AI
         input_data = Agent4Input(
@@ -300,7 +300,7 @@ class TestHelpers:
 
     def test_build_candidate_message_includes_subtasks(self):
         """The candidate message should include user sub-tasks for capability matching."""
-        from puzzleeval.agents.screening import _build_candidate_message
+        from puzzleeval.agents.agent4.core import _build_candidate_message
 
         candidate = _make_sample_candidates()[0]
         input_data = Agent4Input(
@@ -315,7 +315,7 @@ class TestHelpers:
 
     def test_build_candidate_message_handles_null_api_docs_url(self):
         """Should handle candidates with no api_docs_url gracefully."""
-        from puzzleeval.agents.screening import _build_candidate_message
+        from puzzleeval.agents.agent4.core import _build_candidate_message
 
         # EnterpriseOnlyOCR has api_docs_url=None
         candidate = _make_sample_candidates()[3]
@@ -333,7 +333,7 @@ class TestHelpers:
 
     def test_extract_text_from_response_mixed_blocks(self):
         """Should extract only text blocks, skipping tool blocks."""
-        from puzzleeval.agents.screening import _extract_text_from_response
+        from puzzleeval.agents.agent4.core import _extract_text_from_response
 
         mock_response = MagicMock()
         text_block = MagicMock()
@@ -411,7 +411,7 @@ class TestScreeningAgent:
         mock_response.usage.cache_read_input_tokens = 0
         return mock_response
 
-    @patch("puzzleeval.agents.screening.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent4.core.anthropic.Anthropic")
     def test_valid_input_produces_result(self, mock_anthropic_class):
         """Valid input should produce a valid Agent4Result.
 
@@ -443,7 +443,7 @@ class TestScreeningAgent:
             trace_id="test-screening-001",
         )
 
-        from puzzleeval.agents.screening import run_screening_agent
+        from puzzleeval.agents.agent4.core import run_screening_agent
         result = run_screening_agent(input_data)
 
         assert len(result.validated_candidates) == 3
@@ -463,7 +463,7 @@ class TestScreeningAgent:
         assert "web_fetch_20250910" in tool_types
         assert "web_search_20250305" in tool_types
 
-    @patch("puzzleeval.agents.screening.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent4.core.anthropic.Anthropic")
     def test_single_candidate_api_error_doesnt_kill_pipeline(self, mock_anthropic_class):
         """If one candidate's verification fails, others should still proceed."""
         import anthropic as anthropic_module
@@ -502,12 +502,12 @@ class TestScreeningAgent:
             trace_id="test-screening-graceful",
         )
 
-        from puzzleeval.agents.screening import run_screening_agent
+        from puzzleeval.agents.agent4.core import run_screening_agent
         # Should NOT raise — graceful degradation
         result = run_screening_agent(input_data)
         assert result is not None
 
-    @patch("puzzleeval.agents.screening.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent4.core.anthropic.Anthropic")
     def test_structure_step_none_output_raises_error(self, mock_anthropic_class):
         """If structuring returns None, should raise AgentOutputError."""
         from puzzleeval.exceptions import AgentOutputError
@@ -533,11 +533,11 @@ class TestScreeningAgent:
             trace_id="test-screening-none",
         )
 
-        from puzzleeval.agents.screening import run_screening_agent
+        from puzzleeval.agents.agent4.core import run_screening_agent
         with pytest.raises(AgentOutputError, match="no parsed output"):
             run_screening_agent(input_data)
 
-    @patch("puzzleeval.agents.screening.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent4.core.anthropic.Anthropic")
     def test_pause_turn_handled_per_candidate(self, mock_anthropic_class):
         """pause_turn during per-candidate verification should continue."""
         expected_result = _make_agent4_result()
@@ -573,14 +573,14 @@ class TestScreeningAgent:
             trace_id="test-screening-pause",
         )
 
-        from puzzleeval.agents.screening import run_screening_agent
+        from puzzleeval.agents.agent4.core import run_screening_agent
         result = run_screening_agent(input_data)
         assert result is not None
 
         # 6 create calls: candidate 0 (2 calls: pause + continue) + candidates 1-4 (4 calls)
         assert mock_client.beta.messages.create.call_count == 6
 
-    @patch("puzzleeval.agents.screening.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent4.core.anthropic.Anthropic")
     def test_structure_step_api_error_raises(self, mock_anthropic_class):
         """API error in the structuring step should raise AgentAPIError."""
         import anthropic as anthropic_module
@@ -607,7 +607,7 @@ class TestScreeningAgent:
             trace_id="test-screening-struct-fail",
         )
 
-        from puzzleeval.agents.screening import run_screening_agent
+        from puzzleeval.agents.agent4.core import run_screening_agent
         with pytest.raises(AgentAPIError, match="Failed to connect"):
             run_screening_agent(input_data)
 
@@ -617,14 +617,14 @@ class TestScreeningAgent:
         filtering pair and reverted — see research.py top-of-file
         comment for real-run evidence (container_id 400 cascades,
         3-5 min sandbox spin-up, silent hangs on non-beta endpoint)."""
-        from puzzleeval.agents.screening import WEB_FETCH_TOOL, WEB_SEARCH_TOOL
+        from puzzleeval.agents.agent4.core import WEB_FETCH_TOOL, WEB_SEARCH_TOOL
 
         assert WEB_FETCH_TOOL["type"] == "web_fetch_20250910"
         assert WEB_FETCH_TOOL["max_uses"] == 3  # docs page + homepage + follow link
         assert WEB_SEARCH_TOOL["type"] == "web_search_20250305"
         assert WEB_SEARCH_TOOL["max_uses"] == 3  # standard + capability + site-scoped
 
-    @patch("puzzleeval.agents.screening.anthropic.Anthropic")
+    @patch("puzzleeval.agents.agent4.core.anthropic.Anthropic")
     def test_verify_routes_through_beta_endpoint_with_context_management_beta(
         self, mock_anthropic_class
     ):
@@ -661,7 +661,7 @@ class TestScreeningAgent:
             trace_id="test-beta-routing",
         )
 
-        from puzzleeval.agents.screening import run_screening_agent
+        from puzzleeval.agents.agent4.core import run_screening_agent
         run_screening_agent(input_data)
 
         # Per-candidate VERIFICATION must use the beta endpoint.

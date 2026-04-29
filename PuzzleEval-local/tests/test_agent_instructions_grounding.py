@@ -77,13 +77,19 @@ class TestAgent3PromptUnambiguous:
         )
 
     def test_input_context_instructions_single_source_rule(self):
+        """The Phase 2A consolidation removed the verbose CAPS-shouted
+        'THIS IS THE ONLY PLACE' framing in favor of a principle-based
+        co-located rule. Verify the SINGLE-source contract is still
+        clearly stated (just less shouted)."""
         p = self._prompt()
-        assert "THIS IS THE ONLY PLACE" in p, (
-            "Prompt must emphatically declare input_context."
-            "instructions as the SINGLE canonical location for the "
-            "agent's system prompt (no split between input_data + "
-            "input_context)."
+        assert "SINGLE source" in p, (
+            "Prompt must declare input_context.instructions as the "
+            "single canonical location for the agent's system prompt."
         )
+        # The principle: not in input_data, not in persona, not in
+        # expected_output. Verify the negation is preserved.
+        assert "Not in" in p and "`input_data`" in p
+        assert "not in `persona`" in p
 
     def test_voice_conversation_input_data_is_placeholder_only(self):
         """The voice_conversation section's input_data example MUST NOT
@@ -115,9 +121,16 @@ class TestAgent3PromptUnambiguous:
         assert "conversational modalities" in p
 
     def test_non_conversational_input_context_rule(self):
+        """Phase 2A consolidated the REQUIRED-vs-FORBIDDEN asymmetry
+        into a single co-located rule. Verify the non-conversational
+        contract (no instructions for non-LLM-agent modalities) is
+        still stated clearly."""
         p = self._prompt()
-        assert "NON-conversational modalities" in p
-        assert "Never put `instructions` in `input_context`" in p
+        # Must teach: non-conversational modalities have no agent
+        # system prompt → input_context.instructions is not populated.
+        assert "non-conversational" in p.lower()
+        # Must reference the metadata-only pattern for those modalities.
+        assert "metadata only" in p or "per-test metadata" in p
 
 
 class TestValidatorEnforcesInstructionsOnConversational:

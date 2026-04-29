@@ -397,19 +397,7 @@ AGENT5_MAX_BUDGET_TOTAL = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_TOTAL", "20.0")
 )
 AGENT5_MAX_PARALLEL = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_PARALLEL", "5"))
-# AGENT5_CODE_TIMEOUT = baseline subprocess timeout in seconds.
-# 120s suits sync APIs and most async-polling jobs. Long-running operations
-# (video encoding, ML training, large-batch processing, async jobs with
-# documented SLA > 2 min) need more — use the *_LONG values below, or let
-# the Agent 5 builder scale dynamically per candidate based on
-# `interaction_model.async_polling` / `batch_file` flags from the atlas.
 AGENT5_CODE_TIMEOUT = int(os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT", "120"))
-# When the candidate's atlas reports async_polling OR batch_file, scale the
-# timeout to this value. Defaults to 10 minutes — covers video encoding,
-# ML model inference queues, batch document processing, large file uploads.
-AGENT5_CODE_TIMEOUT_LONG = int(
-    os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT_LONG", "600")
-)
 AGENT5_MAX_OUTPUT_TOKENS = int(
     # 24K — raised from 16K after a real-run trace (71734f9d) showed
     # Turn 0 of ElevenLabs hitting stop_reason=max_tokens even with

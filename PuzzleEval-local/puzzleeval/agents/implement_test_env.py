@@ -2800,8 +2800,6 @@ def _run_verification_checks(
 # harnesses are built. Agent 5 owns the full lifecycle: build + test.
 # ============================================================================
 
-MECHANICAL_EVAL_TYPES = {"exact_match", "format_compliance"}
-LLM_EVAL_TYPES = {"semantic_similarity", "contains_key_info", "subjective_quality"}
 RATE_LIMIT_INDICATORS = {"rate limit", "429", "too many requests", "quota exceeded"}
 
 # ────────────────────────────────────────────────────────────────────

@@ -11,7 +11,7 @@ provider docs each time. Each pattern entry includes:
 Patterns are PRINCIPLE-BASED (not provider-specific). They cover the ~90%
 of REST/HTTP API shapes the builder will encounter. Specialty auth flows
 (AWS SigV4, mTLS, OAuth2 authorization_code with PKCE) are not here yet —
-see POST_ROADMAP_ENHANCEMENTS.md §22 for the tracked gap.
+the builder falls back to web_search/web_fetch on those rare paths.
 """
 
 from __future__ import annotations

@@ -255,14 +255,12 @@ def save_web_fetches_to_sandbox(
 
 # Density scoring used to live here as a heuristic for ranking
 # prefetched docs by structural richness (code fences, endpoints,
-# auth headers, WebSocket mentions). It was deleted in the
-# build-readiness-checklist pass — the checklist directly encodes
-# "what the builder needs" via per-field source URLs, replacing the
-# proxy of "what looks dense." Agent 5's _usefulness_signal helper
-# in implement_test_env.py keeps the same ranking math (now as a
-# soft inventory-ordering hint, not a tier-based gate), but the
-# functions and tier constants no longer live in this module — no
-# remaining consumers. See PLAN_AGENT5_RESEARCH_AGENCY.md.
+# auth headers, WebSocket mentions). It was deleted when Agent 4's
+# BuildReadinessChecklist replaced it — the checklist directly
+# encodes "what the builder needs" via per-field source URLs,
+# making the "what looks dense" proxy obsolete. The same ranking
+# math survives as ``_usefulness_signal`` (soft ordering hint, not
+# a gate) in ``puzzleeval.agents.agent5.initial_message``.
 
 
 __all__ = [

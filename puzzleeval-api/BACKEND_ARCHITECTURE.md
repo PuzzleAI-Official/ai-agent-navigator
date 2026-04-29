@@ -31,7 +31,7 @@
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
-│                       REACT FRONTEND (:8081)                     │
+│                       REACT FRONTEND (:8080)                     │
 │                                                                   │
 │  ┌────────────────┐      ┌─────────────────┐                    │
 │  │ Playground.tsx │◄─────┤ usePipelineRun  │                    │
@@ -71,11 +71,14 @@
 │                  PUZZLEEVAL PACKAGE (read-only)                  │
 │                                                                   │
 │  agents/                    schemas.py       provider_registry   │
-│  ├── user_understanding.py  (Pydantic)      .json                │
-│  ├── research.py                                                  │
-│  ├── screening.py                                                 │
-│  ├── synthetic_tests*.py                                         │
-│  └── implement_test_env.py  (the big one — 3500 lines)           │
+│  ├── agent1/core.py + templates/   (Pydantic)      .json         │
+│  ├── agent2/core.py + templates/                                  │
+│  ├── agent3/core.py + templates/                                  │
+│  ├── agent3f/core.py + templates/                                 │
+│  ├── agent4/core.py + templates/                                  │
+│  ├── agent5/  (build_loop, api_call, dispatch_helpers, etc.)      │
+│  └── implement_test_env.py  (back-compat shims to agent5/*)       │
+│      + 5 legacy single-file shims (research.py, etc.)             │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
@@ -879,7 +882,7 @@ npx vite --port 8081
 - `routes/runs.py` — includes new `GET /runs/{id}/report` endpoint
 - `routes/files.py` — `_read_with_cap()` stream-reader with size guard
 - `routes/chat.py` — catches `BudgetExceededError` → HTTP 402
-- `PuzzleEval-local/puzzleeval/agents/implement_test_env.py` — Agent 5 (4,515 lines)
+- `PuzzleEval-local/puzzleeval/agents/implement_test_env.py` — back-compat forwarding shims to `agent5/*` (~4,700 lines, mostly delegation; new code goes in canonical `agent5/<sub-module>.py` per CLAUDE.md AD-010)
 - `PuzzleEval-local/puzzleeval/schemas.py` — Pydantic models for all agents
 - `PuzzleEval-local/puzzleeval/anthropic_client.py` — **NEW** central client factory (timeout + retries + model fallback ladder)
 - `PuzzleEval-local/puzzleeval/budget.py` — **NEW** `RunBudget` + `BudgetExceededError`

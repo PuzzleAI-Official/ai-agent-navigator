@@ -28,8 +28,6 @@
 
 from __future__ import annotations
 
-from typing import Iterable
-
 from puzzleeval.schemas import PricingBreakdown, PricingTier
 
 
@@ -258,9 +256,3 @@ __all__ = (
 )
 
 
-def _all_tiers(breakdowns: Iterable[PricingBreakdown]) -> list[PricingTier]:
-    """(Internal) flatten tiers across breakdowns — used by test helpers."""
-    out: list[PricingTier] = []
-    for bd in breakdowns:
-        out.extend(bd.tiers)
-    return out

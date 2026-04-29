@@ -239,7 +239,9 @@ These still require manual setup beyond just adding keys:
   AND the `client_id_env` / `client_secret_env` env vars set somewhere
   (`.env` is fine).
 - **Long-running operations** (video encoding > 10 min) need
-  `PUZZLEEVAL_AGENT5_CODE_TIMEOUT_LONG` and `PUZZLEEVAL_AGENT6_TEST_TIMEOUT_LONG`
+  `PUZZLEEVAL_AGENT5_CODE_TIMEOUT` (subprocess timeout, default 120 s) and
+  `PUZZLEEVAL_AGENT6_TEST_TIMEOUT_LONG` (test runner adaptive timeout,
+  default 600 s, scales when atlas declares `async_polling`/`batch_file`)
   bumped up if the API SLA exceeds 10 minutes.
 - **Code execution for languages other than Python** needs the host
   toolchain installed (`node`, `tsx`, `go`, `rustc`, `bash`). Plugin

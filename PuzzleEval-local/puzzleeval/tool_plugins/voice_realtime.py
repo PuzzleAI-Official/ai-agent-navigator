@@ -242,7 +242,7 @@ class _ServerHandle:
 
 
 # ---------------------------------------------------------------------------
-# Background audio-merge executor (item 5 of PLAN_VOICE_RUN_OPTIMIZATIONS.md)
+# Background audio-merge executor
 # ---------------------------------------------------------------------------
 # Module-level daemon thread pool — lazy-initialized on first submit so
 # tests / CLI probes that don't trigger merges pay zero cost. Daemon=True
@@ -334,8 +334,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         # so the UI can render them in order.
         self._token_to_artifacts: dict[str, list[tuple[str, str]]] = {}
         # ─────────────────────────────────────────────────────────────
-        # Background audio-merge infrastructure (item 5 of
-        # PLAN_VOICE_RUN_OPTIMIZATIONS.md).
+        # Background audio-merge infrastructure.
         # ─────────────────────────────────────────────────────────────
         # Audio merge (decode N MP3s + sample-rate normalize + concat +
         # re-encode via pydub) takes 50-72s per test in real runs. With
@@ -494,7 +493,7 @@ class VoiceRealtimePlugin(ToolPlugin):
             self._server_handle = None
 
     # ─────────────────────────────────────────────────────────────────────
-    # Background audio merge (item 5 of PLAN_VOICE_RUN_OPTIMIZATIONS.md)
+    # Background audio merge
     # ─────────────────────────────────────────────────────────────────────
 
     def submit_merge_in_background(
@@ -938,9 +937,9 @@ class VoiceRealtimePlugin(ToolPlugin):
         overall_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
         artifacts = self.artifacts_for_token_prefix(session_token)
 
-        # Submit conversation merge to background daemon pool (item 5 of
-        # PLAN_VOICE_RUN_OPTIMIZATIONS.md). pydub decode + sample-rate
-        # normalize + concat + re-encode of N MP3s is 50-72s of CPU
+        # Submit conversation merge to background daemon pool. pydub
+        # decode + sample-rate normalize + concat + re-encode of N
+        # MP3s is 50-72s of CPU
         # work; running it synchronously here would gate next-batch
         # start by `merge_time` per worker. Background submit frees
         # workers at conversation-end. Agent 5's
@@ -1181,8 +1180,8 @@ class VoiceRealtimePlugin(ToolPlugin):
             )
 
         # ── 6. Submit conversation merge to background daemon pool ──
-        # (item 5 of PLAN_VOICE_RUN_OPTIMIZATIONS.md). The merge takes
-        # 50-72s of pydub work per test; running it synchronously here
+        # The merge takes 50-72s of pydub work per test; running it
+        # synchronously here
         # would block the worker thread until merge completes, gating
         # the next test batch by `merge_time` per worker. Submitting to
         # the background pool frees the worker at conversation-end so

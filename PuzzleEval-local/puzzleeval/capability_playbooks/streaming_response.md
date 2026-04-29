@@ -103,15 +103,18 @@ Always more reliable than time-based heuristics:
 When the API has a known completion signal, watch for it and break
 on receipt — don't rely solely on idle timeout.
 
-### Background-thread pattern (preferred for WebSocket where blocking
-recv would block other ops)
+### Background-thread pattern (WEBSOCKET ONLY — skip for SSE / polling / chunked HTTP)
 
-For WebSocket harnesses where you might need to send pings/keepalives
-in parallel with receiving, run recv in a background daemon thread
-that pushes to a queue. The main loop drains the queue with the same
-error-timeout + reset-on-event semantics. This is the pattern that
-worked in trace 8ded6706's harness — separates audio pacing from
-response collection cleanly.
+For WebSocket harnesses where you need to send pings/keepalives or
+audio frames in parallel with receiving, run `recv` in a background
+daemon thread that pushes to a queue. The main loop drains the queue
+with the same error-timeout + reset-on-event semantics — separating
+producer pacing from response collection.
+
+Don't apply this to non-WebSocket streams: SSE, chunked HTTP, and
+polling APIs are single-direction (server → client) and the main loop
+already handles them cleanly. Adding a thread there is complexity
+without benefit.
 
 ### Trailing-input padding (provider-specific, watch for it)
 

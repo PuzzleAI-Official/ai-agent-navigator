@@ -14,7 +14,6 @@ selectors:
     - voice_conversation
     - voice_turn
     - audio_content
-    - conversation
 selection_mode: deterministic
 priority: 100
 applies_to_agents:
@@ -29,7 +28,16 @@ revisit_when:
   - "Provider-specific quirks emerge that this teaching doesn't cover"
 ---
 
-## Voice harness return-shape contract (REQUIRED when test has voice / audio / conversation modality)
+## Voice harness return-shape contract (REQUIRED when test has voice / audio modality)
+
+This playbook teaches WHAT shape your harness returns. A separate
+playbook (`streaming_response`) teaches WHEN to break out of the
+collection loop — both apply to voice harnesses, since most voice
+APIs stream audio chunks over WebSocket / SSE / chunked HTTP. Read
+that playbook's "error-timeout + reset-on-event" pattern before
+sizing your collection timeouts; "silence threshold" heuristics
+confuse inference latency with completion and produce zero-audio
+responses even when the shape contract here is correct.
 
 The voice plugin (`tool_plugins/voice_realtime.py`) drives multi-turn
 conversations by calling your harness once per turn and extracting the

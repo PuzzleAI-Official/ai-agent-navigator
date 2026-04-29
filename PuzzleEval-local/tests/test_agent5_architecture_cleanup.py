@@ -60,6 +60,41 @@ def test_agent5_playbook_router_does_not_pollute_rest_cases():
     assert compose_capability_playbooks(rest_cases) == ""
 
 
+def test_plain_text_conversation_does_not_load_voice_or_live_test_voice():
+    """Per coverage.py:130-139, plain text `conversation` needs streaming_response only.
+
+    Pre-fix bug: voice.md and live_test_voice.md both listed `conversation`
+    in their trigger_types, so chatbot/text-conversation candidates loaded the
+    full voice playbook stack — adding ~3,300 tokens of irrelevant audio
+    contracts to a text-only build's prompt.
+
+    This test pins the corrected selector behavior.
+    """
+    from puzzleeval.agents.agent5.playbooks import (
+        compose_capability_playbooks,
+        selected_playbook_ids,
+    )
+
+    chatbot_cases = [{"input_type": "conversation", "output_type": "conversation"}]
+    selected = selected_playbook_ids(chatbot_cases)
+    assert "voice" not in selected, (
+        "Plain text conversation must not load voice playbook — voice teaches "
+        "audio_bytes/audio_path return shapes that don't apply to text agents."
+    )
+    assert "live_test_voice" not in selected, (
+        "Plain text conversation must not load live_test_voice playbook — its "
+        "template asserts on agent audio bytes which don't exist in text builds."
+    )
+    assert "streaming_response" in selected, (
+        "Plain text conversation DOES need streaming_response (token streaming)."
+    )
+
+    rendered = compose_capability_playbooks(chatbot_cases)
+    assert "Voice harness return-shape contract" not in rendered
+    assert "Voice / multi-turn live-test requirements" not in rendered
+    assert "Streaming / multi-event response collection" in rendered
+
+
 def test_agent5_playbook_reads_are_cached():
     from puzzleeval.agents.agent5 import playbooks
 

@@ -390,6 +390,42 @@ AGENT5_PATCH_FRAGMENT_NUDGE_ENABLED = (
 AGENT5_PATCH_FRAGMENT_TOKEN_CEILING = int(
     os.environ.get("PUZZLEEVAL_AGENT5_PATCH_FRAGMENT_TOKEN_CEILING", "600")
 )
+
+# Agent 5 builder write_file gates (B1, B2, B3) — soft-by-default per AD-007.
+# Each gate has an env-var bypass so operators can disable in real runs if a
+# false-positive blocks legitimate work. All default ON.
+#
+#   * GATE_FORBIDDEN_FILENAMES — REJECT_TOOL_CALL on meta-files like NOTES.md.
+#     Builder receives a tool error in the next turn and adapts (rename to a
+#     canonical file or store the content in api_spec.txt).
+#   * GATE_INTROSPECTION_WARN — WARN-only (log + allow) when the builder
+#     writes inspect_/check_/explore_/probe_*.py BEFORE harness.py exists.
+#     Observability for fragmented-probing antipattern; doesn't block.
+#   * GATE_PHASE1_SCAFFOLD_BLOCK — REJECT_TOOL_CALL when the builder writes
+#     scaffold files (harness.py, smoke_test.py, live_test.py,
+#     requirements.txt) while api_spec_written is False. Phase-keyed (NOT
+#     model-keyed) so model-fallback ladders can't trigger false rejects.
+GATE_FORBIDDEN_FILENAMES_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_FORBIDDEN_FILENAMES", "1") != "0"
+)
+GATE_INTROSPECTION_WARN_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_INTROSPECTION_WARN", "1") != "0"
+)
+GATE_PHASE1_SCAFFOLD_BLOCK_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK", "1") != "0"
+)
+
+# Gate B4: pre-spec research budget. Counts web_search + web_fetch +
+# ask_research uses while api_spec_written is False; injects a user message
+# before the next API call when the count crosses the budget. Soft —
+# the message lets the builder adapt (write spec with TODOs OR call
+# advisor for a tier-up); doesn't halt the build.
+GATE_PRESPEC_RESEARCH_BUDGET_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET", "1") != "0"
+)
+GATE_PRESPEC_RESEARCH_BUDGET = int(
+    os.environ.get("PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET_COUNT", "2")
+)
 AGENT5_MAX_BUDGET_PER_CANDIDATE = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_PER_CANDIDATE", "3.0")
 )

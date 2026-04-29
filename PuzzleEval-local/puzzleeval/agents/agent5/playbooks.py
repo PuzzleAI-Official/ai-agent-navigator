@@ -14,13 +14,26 @@ from importlib import resources
 from typing import Any, Mapping
 
 
+# Audio-bearing modalities — load the voice return-shape contract and the
+# voice live-test contract. Plain text "conversation" is intentionally
+# absent: chatbot/text-conversation candidates have no audio path, so the
+# voice playbooks would only confuse them. (Per coverage.py's
+# CoverageRequirement for input_type=conversation: streaming_response only.)
 VOICE_MODALITIES = frozenset({
-    "conversation",
     "voice_conversation",
     "voice_turn",
     "audio_content",
 })
 
+# Live-test-voice tracks the same audio-bearing surface as voice itself —
+# its template asserts on agent audio bytes/path, which only exists when the
+# harness produces audio. Plain text conversation does NOT load this.
+LIVE_TEST_VOICE_MODALITIES = VOICE_MODALITIES
+
+# Streaming response collection covers ANY response that arrives over time —
+# including text conversations that stream tokens, code-gen that streams
+# completions, and voice that streams audio chunks. So plain "conversation"
+# IS in this set; only the audio-specific playbooks exclude it.
 STREAMING_RESPONSE_SHAPES = frozenset({
     "voice_conversation",
     "voice_turn",
@@ -56,7 +69,7 @@ PLAYBOOK_ORDER: tuple[CapabilityPlaybook, ...] = (
     CapabilityPlaybook(
         id="live_test_voice",
         filename="live_test_voice.md",
-        trigger_types=STREAMING_RESPONSE_SHAPES,
+        trigger_types=LIVE_TEST_VOICE_MODALITIES,
     ),
 )
 

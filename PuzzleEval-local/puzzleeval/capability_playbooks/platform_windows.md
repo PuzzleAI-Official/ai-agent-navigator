@@ -50,3 +50,12 @@ visible stdout on Windows (subprocess output capture race). If a
 `python -c` command on Windows produces no visible output, DO NOT
 retry with another `python -c`. Write a `.py` file via `write_file`
 and execute with `python foo.py` — this always captures output.
+
+### ASCII-only in generated Python code
+
+Use plain ASCII in `harness.py` / `smoke_test.py` / `live_test.py` /
+`requirements.txt` content on Windows: no unicode dashes (`—`, `–`),
+no arrows (`→`, `←`), no smart quotes. Use `--` for dashes and `->`
+for arrows. Windows file I/O defaults to cp1252 (or local ANSI), and
+emitting Unicode glyphs in source comments produces silent
+encoding-error truncation on read-back. Stick to ASCII for code.

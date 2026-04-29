@@ -345,6 +345,9 @@ validator). Keep the prompt rule too — both layers. Defense in depth.
 | Path containment for audio streaming | `puzzleeval-api/routes/runs.py:serve_run_audio` | Allowlist of run roots; `Path.resolve().relative_to(root)` check. No traversal holes. |
 | Path traversal in file uploads | `puzzleeval-api/routes/files.py` | Strips directory components, scrubs shell metachars, verifies `dest.resolve()` stays inside upload dir. |
 | Bytes round-trip across JSON border | `agent5/execution.py` exec_script + `_inflate_b64_sentinels` | AD-006 — silent data loss surface eliminated. |
+| Forbidden meta-filenames (B1) | `agent5/tools.py::write_file` | Rejects writes of `notes.md/.txt`, `status.txt`, `progress.md`, `state.md`, `memory.txt`, `plan.md`, `todo.md`. Soft (REJECT_TOOL_CALL — build continues, agent adapts). Bypass: `PUZZLEEVAL_GATE_FORBIDDEN_FILENAMES=0`. |
+| Phase-1 scaffold-block (B3) | `agent5/tools.py::write_file` | Rejects writes of `harness.py/smoke_test.py/live_test.py/requirements.txt` while `phase_state['api_spec_written']` is False. Phase-keyed (NOT model-keyed), so model-fallback ladders never produce false rejects. Bypass: `PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK=0`. |
+| Pre-spec research budget (B4) | `agent5/build_loop.py` (post-turn user-message injection) | Counts turns (not calls) where the builder used web_search/web_fetch/ask_research while `api_spec_written=False`. After exceeding budget (default 2), injects a one-shot user message asking the builder to commit api_spec.txt. Soft — agent decides next move. Bypass: `PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET=0`. |
 
 ### AD-008: Web-tool version selection prioritizes behavioral stability
 
@@ -581,6 +584,11 @@ Defaults all-on. To disable a phase, set the env var to `0` and re-run.
 | `PUZZLEEVAL_STRICT_PLUGIN_REGISTRY` | unset | When `1`, duplicate `register_plugin()` raises instead of warning |
 | `PUZZLEEVAL_MAX_RUN_COST_USD` | `25` | Per-run USD cap; raised → `BudgetExceededError` |
 | `PUZZLEEVAL_EFFORT` | `medium` | Reasoning depth: `low` / `medium` / `high` / `xhigh` / `max` |
+| `PUZZLEEVAL_GATE_FORBIDDEN_FILENAMES` | `1` | Gate B1. When `0`, write_file does NOT reject meta-files (NOTES.md, STATUS.txt, etc.) |
+| `PUZZLEEVAL_GATE_INTROSPECTION_WARN` | `1` | Gate B2 (WARN-only). When `0`, no `gate_fired` log on `inspect_*.py / probe_*.py` writes before harness.py exists. |
+| `PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK` | `1` | Gate B3. When `0`, write_file does NOT reject `harness.py / smoke_test.py / live_test.py / requirements.txt` writes during Phase 1 (api_spec_written=False). |
+| `PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET` | `1` | Gate B4. When `0`, no user-message injection when pre-spec research turns cross the budget. |
+| `PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET_COUNT` | `2` | Number of pre-spec research turns allowed before B4 injects the budget-reached message. |
 
 Standard debugging procedure when a real run misbehaves:
 

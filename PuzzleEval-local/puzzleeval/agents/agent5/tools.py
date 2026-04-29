@@ -7,10 +7,21 @@ imports, but new code should call here.
 
 from __future__ import annotations
 
+import logging
 import os
 import subprocess
 import sys
 from pathlib import Path
+
+from puzzleeval.agents.agent5.dispatch_helpers import (
+    SCAFFOLD_FILENAMES,
+    is_forbidden_meta_filename,
+    is_introspection_script_name,
+    is_phase1_scaffold_violation,
+)
+
+
+_logger = logging.getLogger(__name__)
 
 
 CUSTOM_TOOL_NAMES = {"write_file", "patch_file", "run_code", "read_file", "ask_research"}
@@ -26,8 +37,20 @@ def dispatch_tool(
     read_state: dict[str, float] | None = None,
     code_timeout_s: int,
     allowed_extensions: set[str] | frozenset[str] = ALLOWED_EXTENSIONS,
+    phase_state: dict | None = None,
 ) -> tuple[str, int]:
-    """Execute an Agent 5 custom tool and return ``(result, exit_code)``."""
+    """Execute an Agent 5 custom tool and return ``(result, exit_code)``.
+
+    ``phase_state`` is an optional dict carrying per-build context that
+    feeds the write_file gates (B1, B2, B3). Recognized keys:
+      * ``api_spec_written`` (bool): flips True after the builder writes
+        or patches api_spec.txt; gates B3 (scaffold-block) on this.
+      * ``candidate_slug`` (str | None): for structured logging of gate
+        fires.
+      * ``trace_id`` (str | None): same.
+    Legacy callers that pass no ``phase_state`` get the original behavior
+    (gates effectively off, since they default to permissive).
+    """
 
     if tool_name == "write_file":
         result = write_file(
@@ -35,6 +58,7 @@ def dispatch_tool(
             sandbox_dir,
             read_state=read_state,
             allowed_extensions=allowed_extensions,
+            phase_state=phase_state,
         )
         return result, 1 if result.startswith("Error") else 0
     if tool_name == "patch_file":
@@ -55,14 +79,65 @@ def dispatch_tool(
     return f"Error: unknown tool '{tool_name}'", -2
 
 
+def _log_gate_fired(
+    *,
+    gate_name: str,
+    gate_filename: str,
+    severity: str,
+    rejected: bool,
+    phase_state: dict | None,
+) -> None:
+    """Emit a structured `gate_fired` log line for false-positive detection.
+
+    Field name `gate_filename` (not `filename`) avoids a clash with
+    LogRecord's built-in `filename` attribute (the source file name).
+    """
+
+    state = phase_state or {}
+    _logger.warning(
+        "gate_fired",
+        extra={
+            "operation": "gate_fired",
+            "gate_name": gate_name,
+            "gate_filename": gate_filename,
+            "severity": severity,
+            "rejected": rejected,
+            "candidate_slug": state.get("candidate_slug"),
+            "trace_id": state.get("trace_id"),
+            "api_spec_written": state.get("api_spec_written"),
+        },
+    )
+
+
 def write_file(
     tool_input: dict,
     sandbox_dir: Path,
     *,
     read_state: dict[str, float] | None = None,
     allowed_extensions: set[str] | frozenset[str] = ALLOWED_EXTENSIONS,
+    phase_state: dict | None = None,
 ) -> str:
-    """Write a file to the sandbox directory with path and extension checks."""
+    """Write a file to the sandbox directory with path and extension checks.
+
+    Phase B gates (each with env-var bypass via puzzleeval.config):
+
+    * **B1 — Forbidden meta-filenames** (REJECT_TOOL_CALL): exact-match
+      against `FORBIDDEN_META_FILENAMES` (case-insensitive). The builder
+      receives a tool error and adapts (rename to a canonical file or
+      patch the content into api_spec.txt).
+    * **B2 — Introspection-script warn** (WARN-only): logs but allows
+      writes of `inspect_*.py / check_*.py / explore_*.py / probe_*.py`
+      when harness.py does not yet exist. Observability for fragmented-
+      probing antipattern; doesn't block.
+    * **B3 — Phase-1 scaffold block** (REJECT_TOOL_CALL): rejects writes
+      of harness.py / smoke_test.py / live_test.py / requirements.txt
+      while `phase_state['api_spec_written']` is False. Phase-keyed (NOT
+      model-keyed) so model-fallback ladders can't trigger false rejects.
+    """
+
+    # Lazy-import config so test fixtures that flip env vars at module load
+    # see the updated values.
+    from puzzleeval import config as cfg
 
     raw_filename = tool_input.get("filename", "")
     content = tool_input.get("content", "")
@@ -77,6 +152,58 @@ def write_file(
             f"Error: file extension '{suffix}' not allowed. "
             f"Use one of: {sorted(allowed_extensions)}"
         )
+
+    # ── Gate B1: forbidden meta-filenames ─────────────────────────────
+    if cfg.GATE_FORBIDDEN_FILENAMES_ENABLED and is_forbidden_meta_filename(filename):
+        _log_gate_fired(
+            gate_name="forbidden_meta_filename",
+            gate_filename=filename,
+            severity="REJECT_TOOL_CALL",
+            rejected=True,
+            phase_state=phase_state,
+        )
+        return (
+            f"Error: '{filename}' is a meta/state-tracking file and is not "
+            f"allowed in the sandbox. The canonical files are: api_spec.txt, "
+            f"harness.py, requirements.txt, smoke_test.py, live_test.py. "
+            f"If you need to record a finding, patch_file('api_spec.txt', ...) "
+            f"with the relevant detail — that's your durable memory and "
+            f"survives context compaction."
+        )
+
+    # ── Gate B3: Phase-1 scaffold-block ───────────────────────────────
+    if cfg.GATE_PHASE1_SCAFFOLD_BLOCK_ENABLED and phase_state is not None:
+        api_spec_written = bool(phase_state.get("api_spec_written", True))
+        if is_phase1_scaffold_violation(filename, api_spec_written=api_spec_written):
+            _log_gate_fired(
+                gate_name="phase1_scaffold_block",
+                gate_filename=filename,
+                severity="REJECT_TOOL_CALL",
+                rejected=True,
+                phase_state=phase_state,
+            )
+            return (
+                f"Error: cannot write '{filename}' in Phase 1. The api_spec.txt "
+                f"hasn't been written or patched yet — that's the trigger for "
+                f"the model switch to Opus. Either write_file('api_spec.txt', "
+                f"...) for a fresh spec, or patch_file('api_spec.txt', ...) "
+                f"if a pre-rendered spec is already in the sandbox. Phase 2 "
+                f"scaffolds (harness.py / smoke_test.py / live_test.py / "
+                f"requirements.txt) get written after that single patch fires "
+                f"the switch."
+            )
+
+    # ── Gate B2: introspection-script warn (log + allow) ──────────────
+    if cfg.GATE_INTROSPECTION_WARN_ENABLED and is_introspection_script_name(filename):
+        harness_exists = (sandbox_dir / "harness.py").exists()
+        if not harness_exists:
+            _log_gate_fired(
+                gate_name="introspection_warn",
+                gate_filename=filename,
+                severity="WARN",
+                rejected=False,
+                phase_state=phase_state,
+            )
 
     target = sandbox_dir / filename
     try:

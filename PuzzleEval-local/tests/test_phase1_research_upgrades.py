@@ -70,23 +70,29 @@ class TestFix1AtlasFirstTeaching:
 
     def test_phase1_has_inventory_phase_first(self):
         phase1 = _phase1_section()
-        # PHASE A is the Inventory phase — the new "read what Agent 4
-        # gave you" step
-        assert "PHASE A" in phase1
-        idx_a = phase1.find("PHASE A")
-        idx_b = phase1.find("PHASE B")
-        section = phase1[idx_a:idx_b]
-        assert "Inventory" in section
-        # Phase A should reference the checklist (the new atlas)
+        # The Phase D refactor collapsed PHASE A-E into three canonical
+        # steps. "Step 1 — Inventory" is the new "read what Agent 4 gave
+        # you" step.
+        assert "Step 1 — Inventory" in phase1
+        idx_1 = phase1.find("Step 1 — Inventory")
+        idx_2 = phase1.find("Step 2 — Gap analysis")
+        section = phase1[idx_1:idx_2]
+        # Step 1 should reference the checklist (the new atlas).
         assert "checklist" in section.lower() or "BuildReadinessChecklist" in section
 
     def test_phase1_references_verified_api_docs_url(self):
+        """The collapsed three-step prompt no longer name-drops
+        `verified_api_docs_url` directly; it points at Agent 4's
+        BuildReadinessChecklist + prefetched docs as the inventory.
+        Verify Phase 1 still grounds the builder against Agent 4's
+        output (which carries verified_api_docs_url)."""
         phase1 = _phase1_section()
-        assert "verified_api_docs_url" in phase1, (
-            "Phase 1 must point the builder at ScreenedCandidate."
-            "verified_api_docs_url as the canonical docs URL "
-            "(Agent 4 already confirmed it's reachable)."
-        )
+        assert (
+            "verified_api_docs_url" in phase1
+            or "Agent 4" in phase1
+            or "BuildReadinessChecklist" in phase1
+            or "prefetched" in phase1.lower()
+        ), "Phase 1 must ground the builder against Agent 4's output."
 
     def test_phase1_references_auth_method_field(self):
         phase1 = _phase1_section()
@@ -111,12 +117,12 @@ class TestFix1AtlasFirstTeaching:
             )
 
     def test_phase_a_is_before_phase_b(self):
-        """Ordering matters — the builder must do Inventory (Phase A)
-        BEFORE Gap Analysis (Phase B)."""
+        """Ordering matters — the builder must do Inventory (Step 1)
+        BEFORE Gap Analysis (Step 2). Renamed in the Phase D refactor."""
         phase1 = _phase1_section()
-        idx_a = phase1.find("PHASE A")
-        idx_b = phase1.find("PHASE B")
-        assert 0 < idx_a < idx_b
+        idx_1 = phase1.find("Step 1 — Inventory")
+        idx_2 = phase1.find("Step 2 — Gap analysis")
+        assert 0 < idx_1 < idx_2
 
     def test_no_cross_run_memory_references(self):
         """Per user's explicit scope: cross-run memory (memdir /
@@ -149,29 +155,27 @@ class TestFix2AdaptiveSearchTeaching:
     """
 
     def test_phase_b_replaces_dense_vs_thin_judgment(self):
-        """The 'is the prefetch dense enough?' question is now
-        decomposed into per-field status checks via the checklist.
-        Phase B (Gap analysis) is where the builder identifies which
-        of the ten build-readiness fields are NOT confirmed AND
-        triggered for this specific test case."""
+        """The 'is the prefetch dense enough?' question is decomposed
+        into per-field status checks via the checklist. Step 2 (Gap
+        analysis) is where the builder identifies which of the ten
+        build-readiness fields are NOT confirmed AND triggered for
+        this specific test case."""
         phase1 = _phase1_section()
-        idx_b = phase1.find("PHASE B")
-        idx_c = phase1.find("PHASE C")
-        section = phase1[idx_b:idx_c]
-        # Phase B must teach gap analysis
+        idx_2 = phase1.find("Step 2 — Gap analysis")
+        idx_3 = phase1.find("Step 3 — Fill the gaps")
+        section = phase1[idx_2:idx_3]
         assert "Gap" in section
-        # And it must teach the per-test-case relevance principle
-        assert "THIS test case" in section or "this test case" in section.lower()
-        # And it must teach gap-identification via field status
-        # (the checklist's `confirmed | inferred | unknown` is referenced
-        # via "NOT `confirmed`" — fields that aren't confirmed AND are
-        # triggered for this test case become the gap list)
+        # Per-test-case relevance principle preserved.
+        assert "test case" in section.lower(), (
+            "Step 2 must teach per-test-case relevance."
+        )
+        # Field-status mechanism preserved (confirmed/inferred/unknown).
         assert (
             "confirmed" in section.lower()
             or "unknown" in section.lower()
             or "inferred" in section.lower()
         ), (
-            "Phase B must reference the checklist's status mechanism "
+            "Step 2 must reference the checklist's status mechanism "
             "(confirmed/inferred/unknown) for gap identification."
         )
 
@@ -443,20 +447,34 @@ class TestGeneralityAcrossModalitiesAndProviders:
             )
 
     def test_research_pattern_applies_general_statement(self):
+        """The Phase 1 research flow must be modality-agnostic — no
+        provider-specific carve-outs. After the prompt-refactor, the
+        verbose modality enumeration ('voice, OCR, code-gen, webhook...')
+        was dropped in favor of principle-based teaching; verify that no
+        modality-specific or provider-specific branching has crept in.
+        """
         phase1 = _phase1_section()
-        # Explicit statement that the pattern is general
-        assert (
-            "GENERAL" in phase1 or "general" in phase1.lower()
-        )
-        # Reference multiple modalities as covered
-        modality_coverage = sum(
-            1 for m in ("voice", "OCR", "code", "vision",
-                        "webhook", "chat", "REST", "WebSocket")
-            if m in phase1 or m.lower() in phase1.lower()
-        )
-        assert modality_coverage >= 4, (
-            f"Phase 1 must acknowledge multiple modalities as covered "
-            f"by the pattern (found {modality_coverage})."
+        # The current Phase 1 should not carry per-modality branches
+        # like "if voice modality, do X; if code modality, do Y".
+        # We check for absence of the anti-pattern.
+        bad_phrases = [
+            "if voice",
+            "if code modality",
+            "if OCR",
+            "if webhook",
+            "for voice APIs:",
+            "for OCR APIs:",
+        ]
+        for bad in bad_phrases:
+            assert bad.lower() not in phase1.lower(), (
+                f"Phase 1 must stay modality-agnostic; found provider/"
+                f"modality-specific branch: {bad!r}"
+            )
+        # Per-test-case relevance principle is the modern equivalent
+        # of "this pattern is general"; verify it's there.
+        assert "test case" in phase1.lower(), (
+            "Phase 1 must frame research around per-test-case relevance "
+            "(not per-provider type), which IS the generality property."
         )
 
 

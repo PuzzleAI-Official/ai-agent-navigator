@@ -1570,6 +1570,7 @@ def _dispatch_tool(
     sandbox_dir: Path,
     extra_env: dict[str, str] | None = None,
     read_state: dict[str, float] | None = None,
+    phase_state: dict | None = None,
 ) -> tuple[str, int]:
     """
     Execute a custom tool and return (result_string, exit_code).
@@ -1584,6 +1585,11 @@ def _dispatch_tool(
     Map of ``filename → last_read_timestamp_seconds``. Populated by
     ``read_file``, checked by ``patch_file``. Callers that don't supply
     one get legacy behavior (no gate).
+
+    ``phase_state`` is the optional per-build context for the write_file
+    gates (B1, B2, B3). Recognized keys: ``api_spec_written`` (bool),
+    ``candidate_slug`` (str), ``trace_id`` (str). Legacy callers omit it
+    and get the original behavior.
     """
     return _agent5_tools.dispatch_tool(
         tool_name,
@@ -1593,6 +1599,7 @@ def _dispatch_tool(
         read_state=read_state,
         code_timeout_s=AGENT5_CODE_TIMEOUT,
         allowed_extensions=ALLOWED_EXTENSIONS,
+        phase_state=phase_state,
     )
 
 

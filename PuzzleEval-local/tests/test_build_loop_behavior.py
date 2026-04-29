@@ -26,6 +26,8 @@ A failure means the refactor changed observable behavior.
 
 from __future__ import annotations
 
+import importlib
+
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -38,6 +40,39 @@ from tests.test_agent5 import (
     _make_test_cases,
 )
 from puzzleeval.schemas import Agent5Input
+
+
+@pytest.fixture(autouse=True)
+def _disable_phase1_scaffold_gate_for_legacy_mocks(monkeypatch):
+    """Pre-existing build-loop tests use minimal mocks that write harness.py
+    directly without first writing api_spec.txt. They predate gate B3 and
+    test OTHER invariants (output shape, cost accumulation, conversation
+    log, verification gate, retry behavior).
+
+    Gate B3's correctness is verified separately in
+    `tests/test_agent5_write_file_gates.py`. Here we disable it via the
+    documented env-var bypass so these legacy mock flows continue to
+    exercise the build loop's higher-level contracts.
+
+    These tests also do not cover real venv creation or dependency
+    installation. Stubbing venv setup keeps the suite focused on build-loop
+    state evolution instead of paying ~4-10 seconds per mocked candidate on
+    Windows/Anaconda.
+    """
+    monkeypatch.setenv("PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK", "0")
+    monkeypatch.setenv("PUZZLEEVAL_VENV_PREINSTALL", "0")
+    import puzzleeval.config as cfg
+    importlib.reload(cfg)
+    from puzzleeval.agents import implement_test_env as ite
+    from puzzleeval.agents.agent5 import sandbox as agent5_sandbox
+
+    def _fast_create_venv(*args, **kwargs):
+        return True
+
+    monkeypatch.setattr(ite, "_create_venv", _fast_create_venv)
+    monkeypatch.setattr(agent5_sandbox, "create_venv", _fast_create_venv)
+    yield
+    # Reset for the next test (autouse fixture re-runs each test).
 
 
 def _make_mock_response(content_blocks, stop_reason="end_turn",
@@ -1181,9 +1216,8 @@ class TestAskResearchPhaseGate:
             ),
             _make_text_response("SMOKE TEST PASSED\nHARNESS_COMPLETE"),
         ]
-        result = run_implement_test_env_agent(
-            _make_input_with_one_candidate("AskResearchBlocked")
-        )
+        agent_input = _make_input_with_one_candidate("AskResearchBlocked")
+        result = run_implement_test_env_agent(agent_input)
 
         # ASSERTION 1: sub-agent was NOT spawned (no LLM cost charged)
         mock_research.assert_not_called()
@@ -1212,7 +1246,7 @@ class TestAskResearchPhaseGate:
         # uses a unique trace_id, so finding any matching log is fine).
         import json
         from pathlib import Path
-        runs_dir = Path("runs")
+        runs_dir = Path("runs") / agent_input.trace_id
         gated_log_present = False
         if runs_dir.exists():
             for log_path in runs_dir.glob("**/conversation_log.json"):

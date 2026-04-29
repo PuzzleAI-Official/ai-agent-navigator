@@ -2974,44 +2974,50 @@ class TestEfficiencyHardening_RealRun_d3b49875:
         """Unknown platforms (FreeBSD, AIX, etc.) render with empty
         contract block but still produce a valid prompt.
 
-        Phase 1.B + 1.C: with no platform_freebsd.md contract registered,
-        the unified __CONTRACT_BLOCK__ comes back empty for unknown
-        platforms — the rendered prompt has no platform-specific guidance
-        but is otherwise complete and valid.
+        Phase D of the prompt-refactor moved the OS-name reference out
+        of the prompt body and into the platform_*.md playbooks (each
+        loads a "OS: <name> detected" header). Unknown platforms have
+        no playbook → no OS hint, but the rendered prompt is otherwise
+        complete and the cache invariant is preserved (no dangling
+        placeholders).
         """
         import puzzleeval.agents.implement_test_env as m
         import unittest.mock
         with unittest.mock.patch("sys.platform", "freebsd14"):
             rendered = m._render_builder_prompt(m.BUILDER_SYSTEM_PROMPT)
-            # Placeholder must be cleanly stripped, not left dangling.
+            # Cache-invariant: no dangling placeholders in the body.
             assert "__CONTRACT_BLOCK__" not in rendered
             assert "__OS_SPECIFIC_RULES__" not in rendered
             assert "__MODALITY_CONTRACT__" not in rendered
-            # Reports the actual platform name honestly so Claude can
-            # reason about it.
-            assert "OS: freebsd14" in rendered
+            assert "__OS_TYPE__" not in rendered
+            # Phase 1 / Phase 2 / Signals must still all be present —
+            # only the OS hint is missing for unknown platforms.
+            assert "PHASE 1" in rendered
+            assert "PHASE 2" in rendered
+            assert "HARNESS_COMPLETE" in rendered
 
     def test_builder_prompt_has_env_check_consolidation_pattern(self):
-        """Fix D: agents must consolidate multi-package probes into
-        a single env_check.py file, not one `python -c "import X"`
-        command per package."""
+        """The builder must consolidate multi-package probes into a
+        single check (env_check.py example, OR equivalent batch-probe
+        teaching) rather than one `python -c "import X"` per package.
+        Phase C dropped the trace anecdote; the principle persists."""
         src = _builder_prompt_text()
+        # The example file name is preserved as a concrete pattern.
         assert "env_check.py" in src, (
-            "Builder prompt must explicitly teach the env_check.py "
-            "consolidation pattern (write once, run once instead of "
-            "5 separate import probes)."
+            "Builder prompt must show the env_check.py consolidation "
+            "pattern (write once, run once instead of N probe commands)."
         )
-        assert "Consolidated env probe" in src
 
     def test_builder_prompt_has_parallel_write_rule(self):
-        """Fix B: when multiple file contents are decided, emit all
-        write_file tool_use blocks in ONE assistant response."""
+        """When multiple file contents are decided, emit all write_file
+        tool_use blocks in ONE assistant response. The Phase D refactor
+        renamed the section to 'Parallel scaffold writes (Phase 2 entry)'
+        but the rule is preserved."""
         src = _builder_prompt_text()
         assert (
-            "Parallel tool calls" in src and "write_file" in src
-        ), (
-            "Builder prompt must teach the parallel-write pattern — "
-            "sequential writes cost $0.30+ each in Opus input replay."
+            "Parallel scaffold writes" in src or "parallel" in src.lower()
+        ) and "write_file" in src, (
+            "Builder prompt must teach the parallel-write pattern."
         )
 
     def test_venv_preinstall_manifest_exists(self):
@@ -4221,30 +4227,42 @@ class TestConversationSummaryTelemetry:
     # Behavior covered by: tests/test_dispatch_helpers.py::TestDetectPhaseTransition + tests/test_build_loop_behavior.py::TestPhaseTransitionTriggers
 
     def test_phase1_prompt_forbids_sonnet_writing_code_files(self):
-        """NEW-AM v7: Sonnet (research model) must NOT write harness.py,
-        requirements.txt, smoke_test.py, or live_test.py during Phase 1.
-        These are Phase 2 (Opus) responsibilities. Without this hard
-        constraint, Sonnet's parallel-writes optimization bypasses
-        the model-switch architecture and produces broken code files.
+        """No scaffold writes during Phase 1 — `harness.py`,
+        `requirements.txt`, `smoke_test.py`, and `live_test.py` belong
+        to Phase 2 (Opus). The Phase B refactor moved enforcement into
+        deterministic code (gate B3 in agent5/tools.py via
+        is_phase1_scaffold_violation predicate keyed on
+        api_spec_written), so the prompt no longer carries the verbose
+        SONNET FORBIDDEN list — the gate IS the contract. Defense-in-
+        depth: prompt teaches the rule too, just more concisely.
         """
         from puzzleeval.agents.implement_test_env import BUILDER_SYSTEM_PROMPT
 
         prompt = BUILDER_SYSTEM_PROMPT
-        # Must explicitly forbid Sonnet from writing code files
-        assert "PHASE 1 SONNET FORBIDDEN" in prompt or "Phase 1 Sonnet forbidden" in prompt or \
-               "Sonnet (the\nresearch model) MUST NOT write these files" in prompt or \
-               "Sonnet (the research model) MUST NOT write these files" in prompt
-        # Must list the specific forbidden files
-        for forbidden in ("harness.py", "smoke_test.py", "live_test.py", "requirements.txt"):
-            # Look for explicit mention of forbidden write_file pattern
-            # (these names appear elsewhere in the prompt for general
-            # guidance; the constraint is a specific block teaching
-            # which model owns them)
-            assert forbidden in prompt
-        # Must explain the WHY (real-run evidence)
-        assert "trace a4860e94" in prompt or "Real-run evidence" in prompt or "REAL-RUN EVIDENCE" in prompt
-        # Must keep Phase 2 parallel-writes encouraged (only Phase 1 restricted)
-        assert "Phase 2" in prompt or "PHASE 2" in prompt
+        # Defense-in-depth in the prompt: scaffold rule references the gate.
+        assert (
+            "scaffold" in prompt.lower()
+            or "Phase-1 → Phase-2" in prompt
+            or "Phase 1 → Phase 2" in prompt
+            or "Phase-2 scaffold" in prompt
+        ), "Prompt must reference the Phase-1→Phase-2 scaffold contract."
+        # The specific forbidden filenames must still appear as canonical
+        # files (they're listed elsewhere in the prompt as the only
+        # legitimate sandbox files).
+        for filename in ("harness.py", "smoke_test.py", "live_test.py", "requirements.txt"):
+            assert filename in prompt
+        # Code-side enforcement is the canonical contract.
+        from puzzleeval.agents.agent5.dispatch_helpers import (
+            SCAFFOLD_FILENAMES,
+            is_phase1_scaffold_violation,
+        )
+        assert "harness.py" in SCAFFOLD_FILENAMES
+        assert "smoke_test.py" in SCAFFOLD_FILENAMES
+        assert "live_test.py" in SCAFFOLD_FILENAMES
+        assert "requirements.txt" in SCAFFOLD_FILENAMES
+        # Gate behavior: scaffold writes refused while api_spec_written is False.
+        assert is_phase1_scaffold_violation("harness.py", api_spec_written=False)
+        assert not is_phase1_scaffold_violation("harness.py", api_spec_written=True)
 
     def test_live_test_contract_injects_for_voice_tests(self):
         """NEW-AM v6 live-test contract (real-run trace a4860e94, 2026-04-25):
@@ -4803,188 +4821,129 @@ class TestAgent3FOneTestPerFile:
 
 
 class TestBuilderTurnEfficiencyRules:
-    """Audit of conversation_log.json across 5 real builds (runs
-    b79d79b5 + 045bbd10) found three recurring turn-waste patterns:
-
-      1. Sequential scaffold writes (requirements.txt then harness.py
-         then smoke_test.py etc.) when they're independent files that
-         could all land in one parallel-write turn. Waste: ~3 turns per
-         build × ~$0.08 = ~$0.24 per build.
-
-      2. Fragmented probe scripts during debugging (Klippa wrote 5
-         small probes across 8 turns instead of 1-2 comprehensive
-         probes). Waste: ~3 turns × $0.07 = $0.21 on complex APIs.
-
-      3. Tiny consecutive patches to the same file addressing one
-         logical bug (ElevenLabs turns 12-14 were three serial patches
-         to harness.py, one logical fix). Waste: 2 turns × $0.07 = $0.14.
-
-    Veryfi (5 turns / $0.87) is the gold-standard proof that
-    parallel-write scaffolding is achievable; the others averaged
-    12-19 turns for similar-complexity APIs due to these patterns.
-
-    These regression tests lock each rule into the builder prompt so
-    future Claude instances reliably follow them.
+    """Three turn-waste patterns originally tracked here as war stories:
+    sequential scaffold writes, fragmented probe scripts, and tiny
+    consecutive patches. Phase C of the prompt-refactor pulled out the
+    trace-IDs (Klippa, ElevenLabs, Veryfi, a4860e94) and incident
+    anecdotes — they were narrative-padding the prompt that the agent
+    was simultaneously told NOT to produce. The tests below now pin the
+    PRINCIPLES, not the war stories, and rely on the corresponding code
+    gates (B3 phase-keyed scaffold-block, B4 pre-spec research budget)
+    for deterministic enforcement.
     """
 
     def _read_builder_prompt(self) -> str:
         return _builder_prompt_text()
 
-    def test_scaffold_phase_parallelism_is_soft_guidance(self):
-        """Rule 1 (softened per plan §4.1): requirements.txt + harness.py +
-        smoke_test.py + live_test.py SHOULD land as parallel write_file
-        calls in one turn during scaffold phase, but the rule is now
-        guidance with an explicit escape hatch — NOT a hard mandate.
-        Real-run evidence-backed nudge, not a policy.
-
-        NEW-AM v7 update (2026-04-25): the rule was HARDENED for
-        Phase 1 (Sonnet must NOT write code files) but stays SOFT
-        for Phase 2 (Opus parallel-writes are encouraged). The
-        update was triggered by trace a4860e94 evidence: when
-        Sonnet wrote harness.py via parallel-writes, the harness
-        had subtly-wrong session.update body shape and a trivial
-        live_test → 0/5 real tests. The Phase 1 hard constraint
-        ensures Opus always writes code files."""
+    def test_scaffold_parallelism_principle_present(self):
+        """Phase-2 scaffold writes must land in one parallel turn.
+        The Phase D refactor removed the verbose <use_parallel_tool_calls>
+        Sonnet FORBIDDEN list; gate B3 enforces that contract in code,
+        the prompt teaches the principle (parallel + phase-keyed)."""
         src = self._read_builder_prompt()
-        parallel_section = src.split("<use_parallel_tool_calls>")[1].split(
-            "</use_parallel_tool_calls>")[0]
-        # NEW-AM v7: rule split into Phase 1 (hard constraint) +
-        # Phase 2 (parallelism encouraged). Lock both halves.
-        assert "PHASE 1 SONNET FORBIDDEN" in parallel_section, (
-            "Phase 1 must explicitly FORBID Sonnet from writing code "
-            "files (harness.py / smoke_test.py / live_test.py / "
-            "requirements.txt). Without this, Sonnet's parallel-writes "
-            "optimization bypasses the model-switch architecture and "
-            "produces broken code (real-run evidence: trace a4860e94)."
-        )
-        assert "PHASE 2 OPUS PARALLEL-WRITES" in parallel_section, (
-            "Phase 2 (Opus) must still encourage parallel-writes for "
-            "the scaffold (requirements + harness + smoke + live in "
-            "one turn). The parallel-writes optimization is correct "
-            "for the model that actually owns code generation."
-        )
-        # Phase 1 rule is now a HARD CONSTRAINT (not soft guidance)
-        assert "HARD CONSTRAINT" in parallel_section, (
-            "Phase 1 rule must be labeled HARD CONSTRAINT to prevent "
-            "Sonnet from making 'soft guidance' interpretation that "
-            "leads to writing harness.py."
-        )
-        # Real-run evidence cited
-        assert "trace a4860e94" in parallel_section
-        # Escape hatch must be explicit so Claude knows sequential is
-        # acceptable when genuinely needed. Without it the softening
-        # is ambiguous and models may default to parallel anyway.
-        assert "ESCAPE HATCH" in parallel_section, (
-            "Softened scaffold rule must include an explicit ESCAPE "
-            "HATCH clause documenting when sequential writes are "
-            "acceptable. Without this, 'guidance' reads as 'mandate "
-            "with softer words' and Claude ignores its own reasoning."
-        )
-        # Must still name the specific files so Claude can pattern-match.
-        for filename in ("requirements.txt", "harness.py",
-                         "smoke_test.py", "live_test.py"):
-            assert filename in parallel_section, (
-                f"Scaffold parallelism rule must still explicitly name "
-                f"{filename!r} in the preferred-parallel list even "
-                f"after softening — the file list is the concrete "
-                f"pattern Claude recognizes."
+        # Phase-2 scaffold writes section exists.
+        assert "Phase-2 scaffold writes" in src or "scaffold writes" in src.lower()
+        # Names the four scaffold files as the parallel-write set.
+        for filename in ("requirements.txt", "harness.py", "smoke_test.py", "live_test.py"):
+            assert filename in src, (
+                f"Scaffold writes principle must explicitly name {filename!r}."
             )
+        # Phase-keyed enforcement, not model-keyed (per R6 design fix).
+        assert "api_spec_written" in src or "model switch" in src.lower(), (
+            "Prompt must reference the phase-keyed transition (gate B3 "
+            "enforces it deterministically based on api_spec_written)."
+        )
 
-    def test_scaffold_rule_has_concrete_real_run_evidence(self):
-        """Rule 1 must cite real-run evidence (Veryfi vs others) so
-        Claude sees the pattern isn't theoretical. Concrete numbers
-        anchor the rule far better than abstract efficiency advice.
-        Survives the Gate A softening — the evidence is what sells
-        the guidance when it's no longer a mandate."""
+    def test_scaffold_rule_uses_principle_not_trace_anecdote(self):
+        """Phase C dropped the Veryfi trace-ID anecdote per the
+        engineering principle that prompts teach principles, not war
+        stories. Pin the absence of the anecdote and the presence of
+        the underlying parallelism principle."""
         src = self._read_builder_prompt()
-        # The rule should reference Veryfi's 5-turn / $0.87 achievement.
-        assert "Veryfi" in src and "5 turns" in src, (
-            "Scaffold-phase rule must cite the Veryfi real-run "
-            "evidence (5 turns / $0.87) as proof that parallelism "
-            "is achievable. Abstract advice isn't sticky; a concrete "
-            "success case is — especially after softening from "
-            "mandate to guidance."
+        # War-story breadcrumbs must be GONE — they were narrative padding.
+        assert "Veryfi" not in src, (
+            "Phase C removed the Veryfi anecdote — principle-based teaching."
+        )
+        assert "trace a4860e94" not in src, (
+            "Phase C removed the trace-ID — gate B3 enforces the contract."
+        )
+        # Principle preserved.
+        assert "parallel" in src.lower(), (
+            "Parallelism principle must remain even after dropping the anecdote."
         )
 
-    def test_probe_script_consolidation_rule_present(self):
-        """Rule 2: one comprehensive probe, not N fragmented probes.
-        Hard budget of 2 probe scripts per candidate."""
-        src = self._read_builder_prompt()
-        inv_section = src.split(
-            "<investigate_comprehensively>"
-        )[1].split("</investigate_comprehensively>")[0]
-        assert "Probe-script consolidation (MANDATORY" in inv_section, (
-            "<investigate_comprehensively> must contain a MANDATORY "
-            "probe-consolidation sub-rule. Generic 'one script not "
-            "five' advice was present in the old prompt; Claude "
-            "still wrote 5 probe scripts on Klippa. The new rule "
-            "must be explicitly MANDATORY and budget-bound."
-        )
-        # Must state the numerical budget so Claude self-enforces.
-        assert "at most TWO probe scripts" in inv_section, (
-            "Probe-consolidation rule must state a HARD NUMERICAL "
-            "BUDGET (at most 2 probes per candidate). Soft language "
-            "like 'prefer one' produced 5-probe sprawls in real runs."
-        )
-
-    def test_probe_rule_has_concrete_real_run_evidence(self):
-        """Rule 2 must cite the Klippa 5-probe real-run waste so
-        Claude doesn't dismiss the rule as abstract over-caution."""
+    def test_probe_consolidation_principle_present(self):
+        """The investigate_comprehensively block must teach the ONE
+        comprehensive probe principle. Phase C dropped the Klippa $0.40
+        anecdote and the verbose budget; the principle persists."""
         src = self._read_builder_prompt()
         inv_section = src.split(
             "<investigate_comprehensively>"
         )[1].split("</investigate_comprehensively>")[0]
-        assert "Klippa" in inv_section and "5 probe scripts" in inv_section, (
-            "Probe-consolidation rule must cite the Klippa real-run "
-            "waste (5 probe scripts, $0.40 wasted) so Claude sees "
-            "the failure mode is real, not theoretical."
+        # Principle: one comprehensive probe, not many fragmented ones.
+        assert "ONE comprehensive" in inv_section or "one comprehensive" in inv_section, (
+            "Investigate block must teach the ONE-comprehensive-probe principle."
         )
+        # Anti-pattern named (fragmented probes).
+        assert "fragmented" in inv_section.lower() or "fragmenting" in inv_section.lower()
+
+    def test_probe_rule_uses_principle_not_trace_anecdote(self):
+        """Klippa anecdote removed in Phase C — pin its absence and the
+        principle that replaced it."""
+        src = self._read_builder_prompt()
+        inv_section = src.split(
+            "<investigate_comprehensively>"
+        )[1].split("</investigate_comprehensively>")[0]
+        assert "Klippa" not in inv_section
+        assert "$0.40" not in inv_section
+        # Principle still teaches the response-shape probing scenario
+        # (when to write a probe — debugging an existing harness).
+        assert "harness" in inv_section.lower() and "debug" in inv_section.lower()
 
     def test_patch_consolidation_section_exists(self):
-        """Rule 3: new <consolidate_related_patches> section."""
+        """The <consolidate_related_patches> block addresses tiny
+        consecutive patches addressing one logical bug — preserved
+        through Phase C even after dropping the ElevenLabs anecdote."""
         src = self._read_builder_prompt()
-        assert "<consolidate_related_patches>" in src, (
-            "Builder prompt must contain a new "
-            "<consolidate_related_patches> section addressing the "
-            "fragmented-patch waste pattern observed on ElevenLabs "
-            "turns 12-14 (3 serial patches, same file, one logical fix)."
-        )
-        # Section must mandate bundling KNOWN related patches in one turn
-        # but NOT deferring the first patch waiting for hypothetical edits.
+        assert "<consolidate_related_patches>" in src
         sec = src.split("<consolidate_related_patches>")[1].split(
             "</consolidate_related_patches>")[0]
-        assert "ask" in sec.lower() and "already know" in sec.lower(), (
-            "Patch-consolidation rule must include the decision rule: "
-            "after first patch, ask if other related edits are "
-            "ALREADY KNOWN (not hypothetical). Without this, Claude "
-            "could over-apply the rule and defer legitimate first "
-            "patches waiting for future patches that never materialize."
+        # Decision rule preserved: bundle KNOWN related edits, not
+        # speculative ones.
+        assert "already" in sec.lower() and "know" in sec.lower(), (
+            "Patch-consolidation rule must keep the decision rule about "
+            "bundling KNOWN related edits."
         )
 
     def test_patch_consolidation_warns_against_over_deferring(self):
-        """Rule 3 must be risk-free: it must NOT tell Claude to defer
-        an obvious first patch waiting for hypothetical future patches.
-        The rule applies to KNOWN related edits, not speculative ones."""
+        """The 'this does NOT ask you to DEFER the first patch' guard
+        is a critical risk mitigation — preserved through Phase C in
+        the trimmed-but-principled rewrite."""
         src = self._read_builder_prompt()
         sec = src.split("<consolidate_related_patches>")[1].split(
             "</consolidate_related_patches>")[0]
-        # Key risk mitigation: explicitly state what the rule does NOT ask.
-        assert "does NOT ask" in sec and "DEFER" in sec, (
-            "Patch-consolidation rule must include an explicit "
-            "'what this does NOT ask' clause to prevent Claude from "
-            "over-applying it by deferring legitimate first patches. "
-            "Without the guard, the rule becomes a performance risk."
+        # Phase C kept the guard, just rephrased: "This does not ask
+        # you to DEFER the first patch waiting for hypothetical future
+        # patches."
+        assert "DEFER" in sec, (
+            "Patch-consolidation rule must keep the anti-deferral guard."
+        )
+        assert "does not ask" in sec.lower() or "does NOT ask" in sec, (
+            "Anti-deferral guard must be explicit so Claude doesn't "
+            "over-apply consolidation."
         )
 
-    def test_patch_consolidation_has_concrete_real_run_evidence(self):
-        """Rule 3 must cite the ElevenLabs turn 12-14 real-run waste."""
+    def test_patch_consolidation_uses_principle_not_trace_anecdote(self):
+        """ElevenLabs trace anecdote removed in Phase C — pin its
+        absence."""
         src = self._read_builder_prompt()
         sec = src.split("<consolidate_related_patches>")[1].split(
             "</consolidate_related_patches>")[0]
-        assert "ElevenLabs" in sec and ("turns 12-14" in sec or "12-14" in sec), (
-            "Patch-consolidation rule must cite the ElevenLabs "
-            "real-run waste (turns 12-14: three serial patches, one "
-            "logical fix) as concrete evidence."
+        assert "ElevenLabs" not in sec, (
+            "Phase C removed the ElevenLabs anecdote — principle-based teaching."
+        )
+        assert "12-14" not in sec, (
+            "Phase C removed the turn-range trace breadcrumb."
         )
 
     def test_all_three_rules_are_general_not_modality_specific(self):

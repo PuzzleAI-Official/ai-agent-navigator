@@ -14,7 +14,6 @@ selectors:
   trigger_types:
     - voice_conversation
     - voice_turn
-    - conversation
     - audio_content
 selection_mode: deterministic
 priority: 60
@@ -49,9 +48,37 @@ ZERO agent response — and you won't catch it.
 
 ### Required live_test.py shape (voice/conversation):
 
+The assertion helper below handles BOTH return shapes from the voice
+playbook — Shape A (inline `audio_bytes`) and Shape B (on-disk
+`audio_path`). Use it verbatim regardless of which shape your harness
+produces; assertions on `audio_bytes` only would falsely fail Shape B
+harnesses.
+
 ```python
 """Live test: drive a 2-turn conversation through the production payload shape."""
-import os, json, requests, harness
+import os, json, base64, harness
+
+
+def _agent_audio_size(result):
+    """Return number of bytes of agent audio in the result, regardless of shape.
+
+    Shape A (inline): result["raw_response"]["audio_bytes"] (bytes OR base64 str)
+    Shape B (on-disk): result["raw_response"]["audio_path"] (filesystem path)
+    """
+    raw = (result or {}).get("raw_response", {}) or {}
+    inline = raw.get("audio_bytes")
+    if isinstance(inline, (bytes, bytearray)):
+        return len(inline)
+    if isinstance(inline, str) and inline:
+        try:
+            return len(base64.b64decode(inline, validate=False))
+        except Exception:
+            return len(inline)  # treat as already-raw bytes-as-str
+    path = raw.get("audio_path")
+    if isinstance(path, str) and path and os.path.exists(path):
+        return os.path.getsize(path)
+    return 0
+
 
 # 1) Synthesize real caller audio (use any available TTS service)
 def synth_caller_audio(text):
@@ -86,22 +113,20 @@ result_t1 = harness.run({
 assert result_t0["success"] is True, f"Turn 0 failed: {result_t0.get('error')}"
 assert result_t1["success"] is True, f"Turn 1 failed: {result_t1.get('error')}"
 
-# Audio in BOTH turns — agent must respond, not just succeed
-audio_t0 = result_t0.get("raw_response", {}).get("audio_bytes", b"")
-audio_t1 = result_t1.get("raw_response", {}).get("audio_bytes", b"")
-assert len(audio_t0) > 1000, "Turn 0 produced no agent audio"
-assert len(audio_t1) > 1000, "Turn 1 produced no agent audio"
+# Audio in BOTH turns — works for Shape A (audio_bytes) AND Shape B (audio_path)
+audio_t0_bytes = _agent_audio_size(result_t0)
+audio_t1_bytes = _agent_audio_size(result_t1)
+assert audio_t0_bytes > 1000, "Turn 0 produced no agent audio"
+assert audio_t1_bytes > 1000, "Turn 1 produced no agent audio"
 
 # Continuity check — turn 1's transcript should NOT restart with greeting
 # (if agent says 'Thanks for calling' on turn 1, it's treating each turn
 #  as a new conversation — session_state isn't carrying agent context)
-transcript_t1 = (result_t0.get("output", "") + " " +
-                  result_t1.get("output", "")).lower()
 # (Soft check — log if greeting repeats; some providers legitimately
 # re-greet, but flag it for review)
 
-print(json.dumps({"turn0_audio_bytes": len(audio_t0),
-                   "turn1_audio_bytes": len(audio_t1),
+print(json.dumps({"turn0_audio_bytes": audio_t0_bytes,
+                   "turn1_audio_bytes": audio_t1_bytes,
                    "turn0_transcript": result_t0.get("output", "")[:200],
                    "turn1_transcript": result_t1.get("output", "")[:200],
                    "success": True}, indent=2))

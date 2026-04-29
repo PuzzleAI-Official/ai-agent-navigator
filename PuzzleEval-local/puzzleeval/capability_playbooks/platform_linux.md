@@ -22,10 +22,16 @@ revisit_when:
 
 ## POSIX shell notes (OS: Linux detected)
 
-Standard POSIX utilities are available (`tail`, `head`, `grep`, `wc`,
-`find`, `xargs`, etc.). Use them naturally — no Windows translation
-layer needed.
+Standard GNU coreutils are available (`tail`, `head`, `grep`, `wc`,
+`find`, `xargs`, `sed -i`, `grep -P`, etc.). Use them naturally — the
+core builder rules cover the rest. This playbook is intentionally
+minimal: Linux is the prompt's defaults, so there's nothing to
+translate.
 
 `python -c "..."` captures stdout reliably on Linux. For multi-line
-scripts, still prefer `write_file` + `python foo.py` so the code
-lives on disk for debugging, but inline is fine for one-liners.
+scripts, prefer `write_file` + `python foo.py` so the code lives on
+disk for debugging; inline is fine for one-liners.
+
+If you find yourself wanting to add a Linux-specific rule, ask first:
+"Does this rule conflict with what builders already assume?" If yes,
+add it here. If no, the builder doesn't need it.

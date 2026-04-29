@@ -492,6 +492,14 @@ def build_single_harness(
     # loop was killing mid-Phase-2 debug cycles on ElevenLabs + similar.
     MAX_BUILD_TIME_SECONDS = 900
     candidate_web_fetch_blocks = 0  # Cumulative recoverable web_fetch blocks across turns (Phase 1 hardening)
+    # Gate B4 — Pre-spec research budget. Counts TURNS (not calls) where
+    # the builder used web_search / web_fetch / ask_research while
+    # api_spec_written was False. After exceeding budget, inject a one-
+    # shot user message before the next API call telling the builder to
+    # commit api_spec.txt. Soft enforcement; the builder decides whether
+    # to comply or call advisor for a tier-up.
+    prespec_research_turns = 0
+    prespec_budget_message_injected = False
     smoke_ever_passed = False  # Track smoke test pass across ALL turns
     smoke_passed_at_turn = -1  # Which turn the smoke test first passed
     # Gate C — patch-fragmentation nudge history. Each filename is
@@ -1208,9 +1216,17 @@ def build_single_harness(
                     # Pass credentials so run_code subprocesses can do live API validation.
                     # Pass build_read_state so the patch_file gate enforces
                     # read-before-patch discipline across the build loop.
+                    # Pass phase_state so the write_file gates (B1, B2, B3)
+                    # can phase-key their decisions on api_spec_written.
+                    phase_state = {
+                        "api_spec_written": api_spec_written,
+                        "candidate_slug": candidate.name,
+                        "trace_id": trace_id,
+                    }
                     result_text, exit_code = _dispatch_tool(
                         block.name, block.input, sandbox_dir,
                         extra_env=credentials, read_state=build_read_state,
+                        phase_state=phase_state,
                     )
                     # Persist large outputs to disk (Claude Code pattern: >30KB → file)
                     result_text = _persist_large_output(result_text, sandbox_dir, turn)
@@ -1522,6 +1538,59 @@ def build_single_harness(
                     "role": "user",
                     "content": [{"type": "text", "text": PHASE2_DIRECTIVE}],
                 })
+
+            # ── Gate B4: pre-spec research budget ──
+            # AD-007 soft enforcement. Counts turns (not calls) where the
+            # builder used web_search/web_fetch/ask_research while still
+            # in Phase 1 (api_spec_written=False). After exceeding budget,
+            # inject a single user message asking the builder to commit
+            # api_spec.txt. The builder adapts (writes spec with TODOs)
+            # OR calls advisor for a tier-up — never halts the build.
+            from puzzleeval import config as _cfg
+            from puzzleeval.agents.agent5.dispatch_helpers import (
+                turn_used_prespec_research,
+            )
+            if (
+                _cfg.GATE_PRESPEC_RESEARCH_BUDGET_ENABLED
+                and not api_spec_written
+                and not prespec_budget_message_injected
+            ):
+                if turn_used_prespec_research(
+                    response.content,
+                    response.usage,
+                    api_spec_exists=(sandbox_dir / "api_spec.txt").exists(),
+                ):
+                    prespec_research_turns += 1
+                budget = max(1, int(_cfg.GATE_PRESPEC_RESEARCH_BUDGET))
+                if prespec_research_turns >= budget:
+                    budget_msg = (
+                        f"Pre-spec research budget reached ({prespec_research_turns} "
+                        f"of {budget} turns used while api_spec.txt remains "
+                        f"unwritten). Stop researching and commit: write or patch "
+                        f"api_spec.txt now with what you know. Mark unresolved fields "
+                        f"as TODO — Phase 2's live API calls will fill them faster "
+                        f"than another docs read. If you genuinely need a tier-up "
+                        f"on a hard architectural choice, call advisor() once before "
+                        f"committing."
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "text", "text": budget_msg}],
+                    })
+                    prespec_budget_message_injected = True
+                    logger.warning(
+                        "gate_fired",
+                        extra={
+                            "operation": "gate_fired",
+                            "gate_name": "prespec_research_budget",
+                            "severity": "INJECT_USER_MESSAGE",
+                            "rejected": False,
+                            "candidate_slug": candidate.name,
+                            "trace_id": trace_id,
+                            "prespec_research_turns": prespec_research_turns,
+                            "budget": budget,
+                        },
+                    )
 
             # ── Adaptive progress tracking (Claude Code diminishing-returns) ──
             # A turn "made progress" if: (a) it wrote/patched a file, OR

@@ -222,34 +222,41 @@ class TestPrefetchedDocsBlockRendersInventory:
 
 
 class TestPhase1TeachesFivePhaseFlow:
+    """Phase 1's research flow used to be five sub-phases (A-E); the
+    prompt-refactor collapsed them into three canonical steps (Inventory →
+    Gap analysis → Fill+commit). The CONTRACT — checklist-first inventory,
+    prefetched-docs awareness, gap-driven research — is preserved."""
 
     def _prompt(self) -> str:
         from puzzleeval.agents.implement_test_env import BUILDER_SYSTEM_PROMPT
         return BUILDER_SYSTEM_PROMPT
 
-    def test_phase_1_teaches_five_phase_flow(self):
-        """The new Phase 1 prompt is structured around Phases A-E
-        (Inventory → Gap analysis → Targeted research → Spec → Build)."""
+    def test_phase_1_teaches_three_step_flow(self):
+        """Phase 1 is structured around three canonical steps."""
         prompt = self._prompt()
-        for phase in ("PHASE A", "PHASE B", "PHASE C", "PHASE D", "PHASE E"):
-            assert phase in prompt, f"{phase} missing from prompt"
+        for step in ("Step 1 — Inventory", "Step 2 — Gap analysis", "Step 3 — Fill the gaps"):
+            assert step in prompt, f"{step!r} missing from prompt"
 
-    def test_phase_a_directs_builder_to_checklist(self):
+    def test_inventory_step_directs_builder_to_checklist(self):
         prompt = self._prompt()
-        idx_a = prompt.find("PHASE A")
-        idx_b = prompt.find("PHASE B")
-        section = prompt[idx_a:idx_b]
-        # Phase A points at the BuildReadinessChecklist (the new contract)
-        # AND optionally at the prefetched docs files (background)
+        idx = prompt.find("Step 1 — Inventory")
+        idx_end = prompt.find("Step 2 — Gap analysis", idx)
+        section = prompt[idx:idx_end] if idx_end > 0 else prompt[idx:idx + 1000]
         assert "checklist" in section.lower() or "BuildReadinessChecklist" in section
 
-    def test_phase_a_can_reference_fetched_docs_files(self):
+    def test_phase1_references_prefetched_docs(self):
+        """Phase 1 should still point at the prefetched docs Agent 4
+        produced; the inventory step is the natural place but the
+        reference may also live in the FAST-PATH preamble."""
         prompt = self._prompt()
-        idx_a = prompt.find("PHASE A")
-        idx_b = prompt.find("PHASE B")
-        section = prompt[idx_a:idx_b]
-        # Phase A may point at fetched_docs_*.txt files for source-cross-checks
-        assert "fetched_docs_" in section or "prefetched" in section.lower()
+        idx = prompt.find("PHASE 1: RESEARCH")
+        idx_end = prompt.find("PHASE 2", idx)
+        section = prompt[idx:idx_end] if idx_end > 0 else prompt[idx:]
+        assert (
+            "fetched_docs_" in section
+            or "prefetched" in section.lower()
+            or "Agent 4" in section
+        )
 
 
 # ============================================================================

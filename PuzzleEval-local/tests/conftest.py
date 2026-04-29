@@ -42,3 +42,35 @@ def _isolate_memdir(tmp_path_factory, monkeypatch):
         d = tmp_path_factory.mktemp("memdir")
         monkeypatch.setenv("PUZZLEEVAL_MEMDIR", str(d))
     yield
+
+
+@pytest.fixture(autouse=True)
+def _disable_phase1_scaffold_gate_for_legacy_mocks(monkeypatch):
+    """Disable gate B3 (Phase-1 scaffold block) for legacy mock-based
+    tests by default.
+
+    Legacy tests (test_agent5.py, test_build_loop_behavior.py, etc.) use
+    minimal mocks that write harness.py directly without first writing
+    api_spec.txt — they predate gate B3 and test OTHER invariants
+    (output shape, cost accumulation, conversation log, verification
+    gate, retry behavior, integration paths).
+
+    Gate B3's correctness is verified separately in
+    `tests/test_agent5_write_file_gates.py`, which explicitly passes
+    `phase_state` and asserts both the violation + near-miss cases.
+    Disabling B3 globally via the documented env-var bypass lets
+    legacy mock flows continue to exercise the build loop's higher-
+    level contracts.
+
+    Tests that need gate B3 active (the dedicated gate-suite tests)
+    set the env var explicitly via their own fixtures.
+    """
+    if "PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK" not in os.environ:
+        monkeypatch.setenv("PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK", "0")
+        # Force a config reload so module-level constants reflect the env.
+        import importlib
+
+        import puzzleeval.config as cfg
+
+        importlib.reload(cfg)
+    yield

@@ -426,6 +426,24 @@ GATE_PRESPEC_RESEARCH_BUDGET_ENABLED = (
 GATE_PRESPEC_RESEARCH_BUDGET = int(
     os.environ.get("PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET_COUNT", "2")
 )
+
+# Phase 2B gates (G-A2, G-A3, G-A4) — schema-side soft validators.
+# All WARN-tier; emit structured `gate_fired` logs without raising.
+# Bypass via env-var per-gate. See PuzzleEval-local/CLAUDE.md AD-007
+# table for the full description and OOD-recovery story per gate.
+#
+# G-A2 — Agent2Result per-scope-floor (warn when <3 candidates per scope)
+# G-A3 — TestCase instructions-asymmetry (capability-predicate-driven)
+# G-A4 — BuildReadinessChecklist Verified-Pass needs all 4 non-negotiables
+GATE_AGENT2_SCOPE_FLOOR_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_AGENT2_SCOPE_FLOOR", "1") != "0"
+)
+GATE_TESTCASE_INSTRUCTIONS_ASYMMETRY_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_TESTCASE_INSTRUCTIONS_ASYMMETRY", "1") != "0"
+)
+GATE_CHECKLIST_VERIFIED_PASS_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_CHECKLIST_VERIFIED_PASS", "1") != "0"
+)
 AGENT5_MAX_BUDGET_PER_CANDIDATE = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_PER_CANDIDATE", "3.0")
 )

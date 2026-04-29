@@ -348,6 +348,9 @@ validator). Keep the prompt rule too — both layers. Defense in depth.
 | Forbidden meta-filenames (B1) | `agent5/tools.py::write_file` | Rejects writes of `notes.md/.txt`, `status.txt`, `progress.md`, `state.md`, `memory.txt`, `plan.md`, `todo.md`. Soft (REJECT_TOOL_CALL — build continues, agent adapts). Bypass: `PUZZLEEVAL_GATE_FORBIDDEN_FILENAMES=0`. |
 | Phase-1 scaffold-block (B3) | `agent5/tools.py::write_file` | Rejects writes of `harness.py/smoke_test.py/live_test.py/requirements.txt` while `phase_state['api_spec_written']` is False. Phase-keyed (NOT model-keyed), so model-fallback ladders never produce false rejects. Bypass: `PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK=0`. |
 | Pre-spec research budget (B4) | `agent5/build_loop.py` (post-turn user-message injection) | Counts turns (not calls) where the builder used web_search/web_fetch/ask_research while `api_spec_written=False`. After exceeding budget (default 2), injects a one-shot user message asking the builder to commit api_spec.txt. Soft — agent decides next move. Bypass: `PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET=0`. |
+| Agent 2 per-scope-floor (G-A2) | `schemas.py::Agent2Result._gate_a2_per_scope_floor` (Pydantic `model_validator(mode='after')`) | WARN-tier. Emits `gate_fired` when any scope has fewer than 3 candidates whose `covers_step_ids` includes that scope. Surfaces under-coverage to operator without blocking the pipeline. Bypass: `PUZZLEEVAL_GATE_AGENT2_SCOPE_FLOOR=0`. NEVER raises. |
+| TestCase instructions-asymmetry (G-A3) | `schemas.py::TestCase._gate_a3_instructions_asymmetry` (Pydantic `model_validator(mode='after')`) | WARN-tier. Capability-predicate-driven via `puzzleeval/capability_predicates.py::supports_user_instructions(input_type)` — new modalities update the predicate, not the validator. Emits `gate_fired` when a non-conversational test case populates `input_context.instructions` OR a conversational one omits it. Bypass: `PUZZLEEVAL_GATE_TESTCASE_INSTRUCTIONS_ASYMMETRY=0`. NEVER raises. Promotion to REJECT_TOOL_CALL gated on 2 release cycles of zero false positives. |
+| Verified-Pass needs non-negotiables (G-A4) | `validators.py::validate_checklist_for_verified_pass` (standalone fn called by Agent 4 at verdict-assignment) | WARN-tier. Returns the names of non-negotiable BuildReadinessChecklist fields that are still `unknown` when Verified Pass is granted; emits `gate_fired` log. Surfaces false-pass risk for operator review. Bypass: `PUZZLEEVAL_GATE_CHECKLIST_VERIFIED_PASS=0`. NEVER raises. |
 
 ### AD-008: Web-tool version selection prioritizes behavioral stability
 
@@ -589,6 +592,9 @@ Defaults all-on. To disable a phase, set the env var to `0` and re-run.
 | `PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK` | `1` | Gate B3. When `0`, write_file does NOT reject `harness.py / smoke_test.py / live_test.py / requirements.txt` writes during Phase 1 (api_spec_written=False). |
 | `PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET` | `1` | Gate B4. When `0`, no user-message injection when pre-spec research turns cross the budget. |
 | `PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET_COUNT` | `2` | Number of pre-spec research turns allowed before B4 injects the budget-reached message. |
+| `PUZZLEEVAL_GATE_AGENT2_SCOPE_FLOOR` | `1` | Phase-2B gate G-A2. When `0`, Agent2Result validator does NOT warn on scopes with fewer than 3 covering candidates. |
+| `PUZZLEEVAL_GATE_TESTCASE_INSTRUCTIONS_ASYMMETRY` | `1` | Phase-2B gate G-A3. When `0`, TestCase validator does NOT warn on `input_context.instructions` mismatches with the modality predicate. |
+| `PUZZLEEVAL_GATE_CHECKLIST_VERIFIED_PASS` | `1` | Phase-2B gate G-A4. When `0`, `validate_checklist_for_verified_pass` returns empty list (no warn) regardless of unknown non-negotiables. |
 
 Standard debugging procedure when a real run misbehaves:
 

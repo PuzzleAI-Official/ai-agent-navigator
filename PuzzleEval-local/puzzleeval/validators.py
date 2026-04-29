@@ -1354,3 +1354,68 @@ def validate_agent5_output(
             )
 
     return ValidationResult(passed=len(errors) == 0, errors=errors, warnings=warnings)
+
+
+# ============================================================================
+# Phase 2B Gate G-A4 — Verified-Pass-needs-non-negotiables
+# ============================================================================
+#
+# This is a standalone validator (not a Pydantic model_validator) because
+# the verdict context (Verified Pass / Inconclusive / Verified Reject)
+# isn't available on BuildReadinessChecklist itself — it's assigned by
+# Agent 4 at a later boundary. Agent 4 calls this function at the
+# verdict-assignment point.
+#
+# Severity: WARN. Bypass: PUZZLEEVAL_GATE_CHECKLIST_VERIFIED_PASS=0.
+# OOD recovery: future flow where Verified Pass can be issued with
+# conditional fields unconfirmed: warn fires, no behavior change.
+
+def validate_checklist_for_verified_pass(
+    checklist,
+    *,
+    candidate_name: str | None = None,
+    trace_id: str | None = None,
+) -> list[str]:
+    """Return the names of non-negotiable fields that are `unknown` on
+    a checklist being granted Verified Pass.
+
+    Caller (Agent 4 deep-verify) invokes this only when assigning the
+    Verified Pass verdict. If the returned list is non-empty, a
+    `gate_fired` log line is emitted (severity=WARN). The caller can
+    still proceed with Verified Pass — this is observability for
+    false-pass detection, not blocking enforcement. Agent 5's deep-verify
+    gate catches the same issue at build-readiness time.
+
+    The four non-negotiables are imported lazily from
+    `puzzleeval.schemas` to avoid circular imports.
+    """
+    import logging
+    import os
+
+    if os.environ.get("PUZZLEEVAL_GATE_CHECKLIST_VERIFIED_PASS", "1") == "0":
+        return []
+
+    from puzzleeval.schemas import NON_NEGOTIABLE_FIELDS
+
+    unknowns: list[str] = []
+    for field_name in NON_NEGOTIABLE_FIELDS:
+        field_obj = getattr(checklist, field_name, None)
+        if field_obj is not None and getattr(field_obj, "status", None) == "unknown":
+            unknowns.append(field_name)
+
+    if unknowns:
+        logger = logging.getLogger("puzzleeval.validators")
+        logger.warning(
+            "gate_fired",
+            extra={
+                "operation": "gate_fired",
+                "gate_name": "checklist_verified_pass_non_negotiables",
+                "severity": "WARN",
+                "rejected": False,
+                "unknown_non_negotiables": unknowns,
+                "candidate_name": candidate_name,
+                "trace_id": trace_id,
+            },
+        )
+
+    return unknowns

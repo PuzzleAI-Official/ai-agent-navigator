@@ -12,7 +12,7 @@
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 # ============================================================================
@@ -1370,6 +1370,52 @@ class Agent2Result(BaseModel):
         description="Total API cost including web search fees",
     )
 
+    # ── Phase 2B gate G-A2: per-scope coverage floor (WARN-tier) ──
+    # Soft validator that emits a structured `gate_fired` log line when
+    # any scope has fewer than 3 candidates with `covers_step_ids`
+    # including that scope. The prompt teaches the two-stage selection
+    # (Agent 2 research_system.md); this validator surfaces gaps to
+    # the operator without blocking the pipeline.
+    #
+    # Severity: WARN. Bypass: PUZZLEEVAL_GATE_AGENT2_SCOPE_FLOOR=0.
+    # OOD recovery: a scope with legitimately only 2 candidates (rare
+    # market) → warn fires, no behavior change. Operator reviews the
+    # gate_fired log; if false-positive, env-var bypass.
+    @model_validator(mode="after")  # type: ignore[misc]
+    def _gate_a2_per_scope_floor(self) -> "Agent2Result":
+        import logging
+        import os
+
+        if os.environ.get("PUZZLEEVAL_GATE_AGENT2_SCOPE_FLOOR", "1") == "0":
+            return self
+
+        # Build per-scope coverage counts from candidate.covers_step_ids
+        scope_counts: dict[str, int] = {}
+        for cand in self.candidates or []:
+            covers = getattr(cand, "covers_step_ids", None) or []
+            for scope_id in covers:
+                scope_counts[scope_id] = scope_counts.get(scope_id, 0) + 1
+
+        under_covered = sorted(
+            (sid, cnt) for sid, cnt in scope_counts.items() if cnt < 3
+        )
+        if under_covered:
+            logger = logging.getLogger("puzzleeval.schemas")
+            logger.warning(
+                "gate_fired",
+                extra={
+                    "operation": "gate_fired",
+                    "gate_name": "agent2_scope_floor",
+                    "severity": "WARN",
+                    "rejected": False,
+                    "under_covered_scopes": [
+                        {"scope_id": sid, "candidate_count": cnt}
+                        for sid, cnt in under_covered
+                    ],
+                },
+            )
+        return self
+
 
 # ============================================================================
 # Agent 3 Input Schema
@@ -2005,6 +2051,66 @@ class TestCase(BaseModel):
             "PUZZLEEVAL_CONVERSATION_EVAL_MODE env when set."
         ),
     )
+
+    # ── Phase 2B gate G-A3: instructions-asymmetry validator (WARN-tier) ──
+    # Capability-predicate-driven (NOT modality-enumerated) per the
+    # Phase 2 plan's generalizability principle. Queries
+    # `supports_user_instructions(input_type)` from
+    # `capability_predicates.py` to decide whether populating
+    # `input_context.instructions` is correct. New modalities update
+    # the predicate, not this validator.
+    #
+    # Severity: WARN (start). Promotion to REJECT_TOOL_CALL requires
+    # 2 release cycles of zero false positives in `gate_fired` telemetry.
+    # Bypass: PUZZLEEVAL_GATE_TESTCASE_INSTRUCTIONS_ASYMMETRY=0.
+    #
+    # OOD recovery: a future modality that legitimately needs
+    # instructions on a non-conversational test → add the modality to
+    # `_USER_INSTRUCTIONS_MODALITIES` in capability_predicates.py.
+    # Validator updates automatically.
+    #
+    # NO-RAISE contract: this validator NEVER raises. It only logs.
+    # The Pydantic parse always succeeds; the gate is observability,
+    # not enforcement. Promotion would change the semantics; for now
+    # the gate is a soft signal.
+    @model_validator(mode="after")  # type: ignore[misc]
+    def _gate_a3_instructions_asymmetry(self) -> "TestCase":
+        import logging
+        import os
+
+        if (
+            os.environ.get("PUZZLEEVAL_GATE_TESTCASE_INSTRUCTIONS_ASYMMETRY", "1")
+            == "0"
+        ):
+            return self
+
+        from puzzleeval.capability_predicates import supports_user_instructions
+
+        ctx = self.input_context or {}
+        instructions_present = bool(ctx.get("instructions"))
+        should_have = supports_user_instructions(self.input_type)
+
+        violation = None
+        if instructions_present and not should_have:
+            violation = "instructions_populated_for_non_conversational"
+        elif should_have and not instructions_present:
+            violation = "instructions_missing_for_conversational"
+
+        if violation:
+            logger = logging.getLogger("puzzleeval.schemas")
+            logger.warning(
+                "gate_fired",
+                extra={
+                    "operation": "gate_fired",
+                    "gate_name": "testcase_instructions_asymmetry",
+                    "severity": "WARN",
+                    "rejected": False,
+                    "violation": violation,
+                    "test_case_id": getattr(self, "id", None),
+                    "input_type": self.input_type,
+                },
+            )
+        return self
 
 
 class Agent3Result(BaseModel):

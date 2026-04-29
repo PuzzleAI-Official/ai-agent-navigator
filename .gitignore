@@ -28,6 +28,11 @@ puzzleeval-api/.env
 puzzleeval-api/uploads/
 puzzleeval-api/runs/
 
+# Pipeline run artifacts (top-level — nested runs/ are covered above)
+/runs/
+/real_run_report.json
+/*_run_report.json
+
 # Python bytecode + test caches (keep .pyc out of git)
 __pycache__/
 *.pyc

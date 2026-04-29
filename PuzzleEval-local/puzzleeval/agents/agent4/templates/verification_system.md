@@ -144,11 +144,19 @@ states:
     why ('docs paywalled', 'sparse SDK-only docs', 'not in any reference
     page'). NEVER fabricate a value when status is unknown.
 
-THE FOUR NON-NEGOTIABLES (must be `confirmed` for Verified Pass):
+THE FOUR NON-NEGOTIABLES (must be `confirmed` for `Verified Pass`):
   1. endpoint_path        — concrete URL or template
   2. auth_method          — header name + value format, or OAuth flow
   3. request_body_shape   — JSON skeleton (or multipart fields, or query params)
   4. response_body_shape  — JSON skeleton with path to primary output
+
+A soft Pydantic validator (`G-A4`, WARN-tier) emits `gate_fired` when a
+checklist with `verdict == "Verified Pass"` is produced while ANY of
+the four non-negotiables remains `unknown`. The warn surfaces false-
+pass risk to the operator without blocking the pipeline; downstream
+Agent 5 deep-verify catches the same issue at build-readiness time.
+Don't fight the warn — confirm the four with concrete evidence or
+mark the candidate `Inconclusive` rather than `Verified Pass`.
 
 THE SIX CONDITIONAL FIELDS (mark `unknown` with reasoning if not in docs):
   5. auth_refresh         — refresh-token flow or "static (no refresh)"

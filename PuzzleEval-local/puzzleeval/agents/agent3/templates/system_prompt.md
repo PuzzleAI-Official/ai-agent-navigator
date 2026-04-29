@@ -443,29 +443,42 @@ Populate:
 
 Generate 2-4 cases per voice scope.
 
-### CRITICAL: `input_context.instructions` is the SINGLE source of the agent's system prompt
+### `input_context` and `input_context.instructions` — single co-located rule
 
-**THIS IS THE ONLY PLACE the agent's system prompt goes. Not in
-`input_data`. Not in `persona`. Not in `expected_output`. Never
-duplicate or split it across fields.**
+The field-definition table near the top of this section (the modality
+matrix) is the canonical authority for whether a given modality
+populates `input_context.instructions`. Summary of the same rule, with
+the why:
 
-When `input_type` is any of:
-  `conversation`, `voice_conversation`, `voice_turn`, `chat`
+- **`input_context.instructions` is populated only when the candidate
+  is an LLM-backed agent being instructed** (conversational modalities:
+  `conversation`, `voice_conversation`, `voice_turn`, `chat`). For
+  every other modality (OCR / vision / code / transcription / webhook /
+  outbound) the candidate isn't an agent — there's no system prompt
+  to put there. `input_context` for non-conversational modalities
+  holds per-test metadata only (`{}`, `{"language": "en"}`,
+  `{"document_format": "invoice"}`, etc.).
+- **When populated, it is the SINGLE source.** Not in `input_data`,
+  not in `persona`, not in `expected_output`. The Agent 5 runner reads
+  `input_context["instructions"]` and passes it to the provider's
+  `system`/`instructions` slot on every turn. The rubric judge also
+  reads it as ground-truth for `scope_adherence` and
+  `policy_compliance` scoring — concrete pricing menus / service
+  areas / hours in the instructions define what correct looks like.
+- **Use the SAME `instructions` string across all tests for a given
+  scope.** What varies per test is the CALLER's persona + goal +
+  constraints, NOT the agent's instructions.
 
-…the test case MUST populate `input_context["instructions"]` with the
-string the candidate provider (OpenAI Realtime, ElevenLabs ConvAI,
-Twilio voice, any chatbot API) receives as its `system`/`instructions`
-message. The Agent 5 runner merges this into every harness.run() call;
-harnesses read `input_context["instructions"]` on every turn and pass
-it to the provider. Without it, the agent gets a generic fallback
-("You are a helpful voice agent") and CANNOT possibly pass scope-
-specific rubric criteria like pricing accuracy or policy compliance
-— so every test scores low and the report misleads.
+This rule is enforced post-hoc by a soft Pydantic validator (`G-A3`,
+WARN-tier — promotion to REJECT_TOOL_CALL gated on zero false
+positives in two release cycles) that surfaces a `gate_fired` event
+when a non-conversational `TestCase` is emitted with `instructions`
+populated, OR a conversational `TestCase` is emitted without it.
+The validator queries a `supports_user_instructions(input_type)`
+capability predicate so future modalities update the predicate, not
+the validator.
 
-Derive the instructions from Agent 1's TestPlan `sample_output` /
-scope `role` + the user's `domain` + any business-specific details
-the user mentioned (pricing menu, hours, service area, escalation
-policy). Keep it concrete. Example for a plumbing dispatcher scope:
+Example for a conversational test case (plumbing dispatcher scope):
 
 ```json
 "input_context": {
@@ -473,33 +486,9 @@ policy). Keep it concrete. Example for a plumbing dispatcher scope:
 }
 ```
 
-**Use the SAME `instructions` string across ALL tests for a given
-scope.** Varying instructions per test destroys the basis for
-cross-candidate comparison. What varies per test is the CALLER'S
-persona + goal + constraints, NOT the agent's instructions.
-
-The rubric judge ALSO receives `input_context.instructions` as
-ground-truth for `scope_adherence` and `policy_compliance` scoring.
-So concrete details in instructions (pricing menu, hours, service
-area) are not just teaching the agent — they're defining what
-correct behavior looks like for the judge.
-
-### `input_context` for NON-conversational modalities
-
-For modalities where the candidate is NOT an LLM-backed agent being
-instructed (OCR / vision / code / audio-transcription / webhook /
-outbound), `input_context` holds per-test metadata ONLY:
-  - `{}` (empty) in most cases
-  - `{"language": "en"}` for transcription / chat translation
-  - `{"document_format": "invoice", "page_count": 1}` for OCR
-  - `{"image_size": "1024x1024", "style": "photorealistic"}` for image-gen
-  - `{"region": "us-east-1"}` for region-scoped providers
-
-**Never put `instructions` in `input_context` for non-conversational
-modalities.** The candidate isn't an agent; there's no system prompt.
-Putting an `instructions` string there is wasted tokens + Agent 5's
-runner will still try to merge it into the harness call, potentially
-confusing harness generation.
+Derive the string from Agent 1's TestPlan `sample_output` + scope role
++ the user's domain + business-specific details (pricing menu, hours,
+service area, escalation policy). Keep it concrete.
 
 ### Forbidden cross-modality field usage
 

@@ -80,16 +80,23 @@ Based on the user's context, decide how much each dimension matters:
 
 State your chosen weights and WHY they fit this user.
 
-## Rank and select
+## Rank and select — two-stage, with per-scope coverage as a HARD requirement
 
 Composite score = (capability × w1) + (adoption × w2) + (use_case × w3)
 
-Select the top candidates by composite score, with two diversity rules:
-- **Per-scope floor:** for every scope, try to include at least 3 candidates whose `covers_step_ids` includes that scope. Reach for more if the search pool allows.
-- **Provider diversity:** at least 4 different PROVIDERS across the final pool.
-- **Upper bound:** aim for 8-12 total when N>=2 (more scopes → larger pool). For N=1, 5-7 like today.
+**Stage 1 — Rank by composite score.** Order all candidates from highest to lowest composite. The top of the list is the natural starting point for selection.
 
-Hard requirement: every candidate must have a public API (V0 scope).
+**Stage 2 — Apply per-scope coverage as a HARD floor.** For every scope, the final pool MUST include ≥3 candidates whose `covers_step_ids` includes that scope. If Stage 1's top-K doesn't satisfy the floor for some scope, do ONE of the following — in order of preference:
+
+1. **Broaden the search.** Run an additional per-scope query (e.g., `<provider type> <scope role>`) to surface specialists you missed. Re-rank with the expanded pool.
+2. **Promote a lower-ranked specialist.** Pull a candidate from below the top-K cutoff if it covers the under-covered scope and clears the basic API-availability bar. Note the demotion-trade in `coverage_analysis`.
+3. **Mark the scope as `coverage_gap`.** ONLY if no candidate exists for that scope after broadened search. Surface this as a candidate-pool limitation, not as a final selection.
+
+**Diversity guardrails layered on top of the floor:**
+- **Provider diversity:** at least 4 different PROVIDERS across the final pool.
+- **Upper bound:** aim for 8-12 total when N≥2 (more scopes → larger pool). For N=1, 5-7.
+
+Hard requirement: every candidate must have a public API (V0 scope). The per-scope coverage floor is also enforced post-hoc by a soft validator (`G-A2`) that warns when any scope has fewer than 3 covering candidates — surface the gap before downstream agents see it.
 
 ## Output format
 

@@ -38,7 +38,7 @@ Set ONE entry per step_id in covers_step_ids, always with value "claimed". Agent
 - api_available: Should be True for all candidates (V0 scope)
 - api_docs_url: Use the URL from the research findings, or null if unconfirmed
 - pricing_model: "per-token", "per-request", "per-page", "monthly", "usage-based", "free-tier", or "freemium"
-- relevant_subtasks: Use the EXACT sub-task description strings from the user's request (KEEP this field populated for backwards compat — covers_step_ids is the new authoritative scope linkage, relevant_subtasks is a human-readable mirror)
+- (`relevant_subtasks` is deprecated and auto-populated by `agent4/core.py` from `covers_step_ids`. Don't emit it; the back-compat shim handles it. Reads are surfaced as a structured `deprecated_field_read` telemetry event for finding lingering downstream consumers.)
 - source: URL where the candidate was found during research
 - api_interaction_pattern_hint: a best-effort signal for HOW the API returns results to the caller. Valid values: "sync" (plain request → response, most REST endpoints), "async_polling" (submit + poll for job completion — common for OCR, transcription, batch), "sse_streaming" (Server-Sent Events over a long-lived HTTP connection — LLM token streaming, progress events), "websocket" (a wss:// WebSocket is the PRIMARY protocol — OpenAI Realtime, ElevenLabs Conversational AI, phone/voice realtime APIs; strong signal for Agent 5 to use the WebSocket harness pattern), "other" (evidence of a non-sync/non-polling pattern but too little detail to classify), "unknown" (insufficient signal). This is a HINT — Phase 6.5 reads the actual docs and can overwrite it with the richer interaction_model flags.
 

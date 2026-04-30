@@ -1225,10 +1225,17 @@ class Candidate(BaseModel):
     )
 
     relevant_subtasks: list[str] = Field(
+        default_factory=list,
         description=(
-            "Which of the user's sub-task descriptions this candidate covers. "
-            "Use the exact sub-task description strings from UserUnderstandingOutput. "
-            "A candidate may cover one sub-task (specialized) or many (all-in-one)."
+            "DEPRECATED (Phase 2C). Which of the user's sub-task descriptions "
+            "this candidate covers (free-text strings). Superseded by "
+            "`covers_step_ids` (the authoritative scope linkage with stable "
+            "blueprint IDs). New code should not read this field directly — "
+            "use `read_subtask_or_scope_refs(candidate)` (see helper below) "
+            "which falls back to `covers_step_ids` when this field is empty "
+            "and emits once-per-process `deprecated_field_read` telemetry "
+            "so we can find lingering consumers. Field will be removed in "
+            "a future release (no earlier than 2 release cycles)."
         )
     )
 
@@ -1326,6 +1333,68 @@ class Candidate(BaseModel):
             "six above is coerced to 'unknown' by the validator."
         )
     )
+
+
+# ============================================================================
+# `relevant_subtasks` deprecation helper (Phase 2C.1)
+# ============================================================================
+# Reads of `Candidate.relevant_subtasks` are migrating to
+# `read_subtask_or_scope_refs(candidate)` which:
+#   1. Returns `relevant_subtasks` if non-empty (preserves legacy behavior).
+#   2. Falls back to `covers_step_ids` when relevant_subtasks is empty
+#      (the new authoritative source).
+#   3. Emits a once-per-process structured telemetry event the FIRST time
+#      relevant_subtasks is read for any candidate. This surfaces lingering
+#      consumers without spamming logs and without using DeprecationWarning
+#      (per Codex C7: warnings-as-errors-CI-safety).
+#
+# Existing call sites (agent4/core.py, validators.py, implement_test_env.py)
+# can migrate to the helper at their own pace; this module only adds the
+# helper. The field itself stays on Candidate -- removal is out of scope
+# for this PR (deferred 2 release cycles per the deprecation discipline).
+
+_DEPRECATED_FIELD_LOG_ONCE: set[str] = set()
+
+
+def read_subtask_or_scope_refs(candidate) -> list[str]:
+    """Return a list of references for what this candidate covers.
+
+    Prefers `relevant_subtasks` (the legacy free-text strings) when
+    populated; falls back to `covers_step_ids` (the authoritative scope
+    linkage) when relevant_subtasks is empty.
+
+    Emits a once-per-process `deprecated_field_read` log line the first
+    time relevant_subtasks is read for any candidate, so we can detect
+    lingering downstream consumers. The log line includes a stack
+    sample (best-effort) so we can pinpoint the caller. CI-safe: no
+    DeprecationWarning, no exceptions.
+    """
+    rel = getattr(candidate, "relevant_subtasks", None) or []
+    if rel:
+        # Telemetry: once per process, log that the deprecated field is
+        # still being read. Operators can grep for `deprecated_field_read`
+        # in production logs to find lingering consumers.
+        if "relevant_subtasks" not in _DEPRECATED_FIELD_LOG_ONCE:
+            _DEPRECATED_FIELD_LOG_ONCE.add("relevant_subtasks")
+            import logging
+            import traceback
+
+            stack_sample = "".join(traceback.format_stack(limit=4)[:-1])
+            logging.getLogger("puzzleeval.schemas").info(
+                "deprecated_field_read",
+                extra={
+                    "operation": "deprecated_field_read",
+                    "field_name": "relevant_subtasks",
+                    "candidate_name": getattr(candidate, "name", None),
+                    "stack_sample": stack_sample,
+                },
+            )
+        return list(rel)
+
+    # Fall back to covers_step_ids (the new authoritative source). No
+    # telemetry on this path -- it's not deprecated; it's the future.
+    covers = getattr(candidate, "covers_step_ids", None) or []
+    return list(covers)
 
 
 class Agent2Result(BaseModel):

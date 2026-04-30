@@ -110,12 +110,12 @@ Five legacy single-file paths exist as back-compat shims (AD-010).
 | `api_call.py` | Anthropic API call boundary. Retry-with-backoff, prompt-too-long (PTL) recovery via context compaction, rate-limit backoff, model fallback (Opus → Sonnet → Haiku). `BuilderAPICallContext` frozen dataclass; `APICallOutcome` tagged union (Success/Failure). |
 | `dispatch_helpers.py` | Pure predicates + formatters used by the dispatch loop: `detect_smoke_pass`, `detect_harness_signal`, `detect_phase_transition`, `detect_tool_result_error`, `classify_tool_result_error`, `should_inject_reassessment`, `build_reassessment_message`, `enrich_research_question`. Pure functions, no I/O — each one is testable in isolation. |
 | `turn_blocks.py` | Per-turn response-block iteration. Strips orphan server tool_use blocks (max_tokens truncation defense), builds the per-turn `turn_log` dict, emits the SSE `agent_activity` build_turn payload. |
-| `sandbox.py` | venv creation + management (per-sandbox lock for race-safety, `python -m venv` with pip-bootstrap fallback for Windows+anaconda), `VENV_PREINSTALL_MANIFEST` (6 packages every harness needs), credential resolution from `provider_registry.json` (cross-provider union by name substring), env-var injection, test-file staging. |
-| `tools.py` | Local-dispatch implementations of the custom tools the builder calls: `write_file`, `patch_file` (string-replace editing), `read_file`, `run_code` (subprocess with timeout + venv isolation). Returns `(result_text, exit_code)` tuples for is_error classification. |
+| `sandbox.py` | venv creation + management (per-sandbox lock for race-safety, `python -m venv` with pip-bootstrap fallback for Windows+anaconda), `VENV_PREINSTALL_MANIFEST` (6 packages every harness needs), credential resolution from `provider_registry.json` (cross-provider union by name substring), env-var injection, test-file staging. **Owns `FORENSICS_SHIM_CONTENT` + `stage_forensics_shim()`** — the `_forensics.py` shim auto-injected into every sandbox at venv creation. The shim provides the universal observability API (`log`, `traced_op`, thread helpers) + best-effort auto-hooks (requests/httpx/websocket-client/websockets/aiohttp/threading) + mandatory credential redaction + `faulthandler.dump_traceback_later`. Adding a new auto-hook = extend `FORENSICS_SHIM_CONTENT`. |
+| `tools.py` | Local-dispatch implementations of the custom tools the builder calls: `write_file`, `patch_file` (string-replace editing), `read_file`, `run_code` (subprocess with timeout + venv isolation), **`read_forensics`** (last N events from `harness_forensics.jsonl` — the builder reads its own past run's events without re-running). Returns `(result_text, exit_code)` tuples for is_error classification. |
 | `prompts.py` | Builder system prompt loader from `templates/builder_system_prompt.md` + placeholder rendering: `__OS_TYPE__`, `__OS_SPECIFIC_RULES__`, `__CONTRACT_BLOCK__`. Single render entry point used by both real builds and tests. |
 | `playbooks.py` | Capability playbook composition. Reads `capability_playbooks/*.md` via the contracts loader; composes the conditional contract block injected into the system prompt for THIS test case's modalities. |
 | `costing.py` | Per-turn cost calculation: input + output tokens, cache create/read, advisor server-tool, web_search/web_fetch server-tool. Pricing tables sourced from `puzzleeval/telemetry/pricing_tables.py`. |
-| `verification.py` | Post-`HARNESS_COMPLETE` deterministic gate. Confirms `harness.py` exists and has the required contract (`run(input_data)` callable, returns the canonical 7-key dict). |
+| `verification.py` | Post-`HARNESS_COMPLETE` deterministic gates. `run_verification_checks` confirms `harness.py` exists with the canonical 7-key return contract. **`verify_forensics_coverage`** is the semantic AST gate enforcing the OBSERVABILITY CONTRACT: harness imports `_forensics` first; SDK calls (openai/anthropic/grpc/etc., libraries the auto-hooks don't cover) wrapped in `with traced_op(...)`; streaming/voice harnesses log session + stream lifecycle. WARN-tier per AD-007. Adding a new SDK family to the wrap-required list = extend `_SDK_LIBS_REQUIRING_MANUAL_WRAP`. |
 | `research_subagent.py` | The `ask_research` sub-agent for Phase 2+ debugging only. Spawns a fresh research context (separate from builder) with web_search + web_fetch. **Phase 1 gate:** refuses with a redirect message when `api_spec.txt` doesn't exist yet — forces builder to do its own primary discovery. |
 | `initial_message.py` | Builder's first user message. Composes: atlas context (Agent 4's `BuildReadinessChecklist`), sandbox contents listing, prefetched docs preview, scope-role hints, modality context, FAST-PATH instructions when checklist is complete. |
 | `execution.py` | Post-build test execution (~830 LoC). `execute_all_tests`, `execute_single_test` (subprocess driver with bytes round-trip via b64 sentinels), `execute_test_with_session_retry`, `run_single_test_with_rate_limit`, `compute_aggregate_metrics`. Multi-call modality pre-call skip lives here. |
@@ -417,6 +417,39 @@ based on no in-tree caller, then mock-pipeline-E2E caught a sibling
 import in `puzzleeval-api/services/pipeline_runner.py:632`. The verification
 gate caught it before merge — exactly its job.
 
+### AD-011: Harness observability is a shipped layer, not a builder convention
+
+Every harness Agent 5 builds gets an auto-injected `_forensics.py`
+shim (staged by `agent5/sandbox.py::stage_forensics_shim` at venv
+creation): universal API (`log`, `traced_op`, thread helpers) +
+best-effort auto-hooks for common HTTP/WS libs + mandatory credential
+redaction + stack-dump-on-hang. The semantic gate
+(`agent5/verification.py::verify_forensics_coverage`) rejects
+HARNESS_COMPLETE if the harness skips the import OR uses an SDK
+without `traced_op` wrapping OR is streaming/voice without
+session+stream lifecycle instrumentation.
+
+**Why.** Pure auto-hooks rejected — coverage gaps for `httpx.AsyncClient`,
+`aiohttp`, gRPC, raw sockets, provider SDKs leave failure modes
+invisible (the ElevenLabs reader-thread bug from real-run
+`6e0c9563` would have been invisible). Pure builder-driven rejected
+— inconsistent formats break the verifier + report assembly,
+credential leak risk per-harness, LLM-to-LLM context handoff brittle.
+Hybrid (standard interface + builder-chosen content) ships the
+universal layer + lets the gate force manual wrapping for anything
+auto-hooks miss.
+
+**Revisit if:** verifier false-positive rate exceeds 5% over a
+release cycle (tighten or relax heuristics) OR sandbox-level
+network-capture becomes cheap (cloud pivot enables container HTTPS
+proxies; would supplement, not replace, the semantic gate).
+
+**Never.** Don't move redaction out of `_emit` (only place that
+guarantees credentials never hit disk). Don't make auto-hooks
+opt-in (default-on with fail-soft prevents the "forgot to enable"
+silent failure). Don't relax the gate to a count-only check
+(gameable; doesn't catch "used SDK but didn't wrap").
+
 ---
 
 ## Where to make changes
@@ -452,6 +485,10 @@ deterministic gate that AD-007 requires.
 | Add a back-compat shim for a moved symbol | The legacy file (e.g., `puzzleeval/agents/research.py`) — mirror via `for _name in dir(_core): globals()[_name] = getattr(_core, _name)` pattern → document sunset in this file under AD-010 | `pytest tests/` (full suite — back-compat is only verified by the importer files passing) |
 | Update Agent 5's builder system prompt | `puzzleeval/agents/agent5/templates/builder_system_prompt.md` ONLY — never inline in `agent5/prompts.py` | manual: real-API smoke (`scripts/real_api_smoke.py`) on a small candidate |
 | Update a capability playbook (voice/streaming/etc.) | `puzzleeval/capability_playbooks/<id>.md` ONLY — these are PROMPT CONTENT, treat as code | `pytest tests/test_contract_loader.py` |
+| Add a new HTTP/WS auto-hook to the forensics shim | `puzzleeval/agents/agent5/sandbox.py::FORENSICS_SHIM_CONTENT` (the auto-hook section). Each hook in its own try/except so failures don't cascade. Update OBSERVABILITY CONTRACT in `templates/builder_system_prompt.md` to mention the new lib. | `pytest tests/test_forensics_layer.py` + `python scripts/forensics_smoke.py` |
+| Tighten/extend the forensics-coverage gate | `puzzleeval/agents/agent5/verification.py::verify_forensics_coverage` + helpers (`_detected_network_imports`, `_is_streaming_harness`, `_SDK_LIBS_REQUIRING_MANUAL_WRAP`) | `pytest tests/test_forensics_layer.py::TestVerifyForensicsCoverage` |
+| Mark a plugin as provisioning per-call sessions | Set `provisions_remote_session_per_call=True` on the plugin's `PluginCapabilities` (canonical: `voice_realtime.py`). Adversarial verifier auto-skips idempotency+concurrency probes via the predicate at `implement_test_env.py:3528`. | `pytest tests/test_adversarial_session_aware.py` |
+| Bump build budget for a new modality | Add the modality to the relevant frozenset in `agent5/playbooks.py` (existing: `VOICE_MODALITIES`). The build-loop check at `build_loop.py:552` reads it. New cap constants in `config.py` follow the `AGENT5_MAX_TURNS_VOICE` / `AGENT5_MAX_BUDGET_PER_CANDIDATE_VOICE` pattern. | `pytest tests/test_voice_build_budget.py` |
 
 ### Multi-file coordinations
 

@@ -38,8 +38,6 @@ So: one TestCase per unique input, in every modality that reads this prompt. Don
 
 **Test count arithmetic:** target `test_count = unique_file_count - off_topic_files - near_duplicate_redundancy`. With 5 user files where 1 is off-topic and 2 are near-duplicates of another, you emit 3 TestCases. Not 3×k for some k>1.
 
-Historical note: an earlier version of this prompt encouraged "2-3 tests per medium-variety file, 3-5 per high-variety" as a way to reward coverage. This confused TEST count (inputs processed) with CRITERION count (dimensions graded) and produced runs where 3 user files generated 8 TestCases — 5 of them byte-identical file copies against the same candidate API, wasting 62% of the per-run API budget for zero extra information. The current rule separates those concerns.
-
 ## Coverage Matrix
 
 Tag each test case with applicable dimensions from the canonical set (single source of truth lives at puzzleeval.config.CANONICAL_COVERAGE_DIMENSIONS):

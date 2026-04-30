@@ -129,21 +129,14 @@ Each test case must have 2-5 weighted criteria. Rules:
   - "subjective_quality" — for tone, helpfulness, completeness
 - Be SPECIFIC. "Good response" is too vague. "Must mention the 30-day return policy" is testable.
 
-## Plugin-shaped test cases (REQUIRED for code / conversation / audio modalities)
-
-The Agent 5 evaluator dispatches test cases to specialized plugins based on
-input_type / output_type. Plugins need STRUCTURED payloads, not free-form
-text. Generate the right shape per modality so the plugin can score
-deterministically — otherwise the LLM judge falls back, which is fine for
-text/json but loses precision on code (does it run?), conversation (did
-it stay on intent across turns?), audio (does the transcript match?).
-
 ## PER-MODALITY FIELD MATRIX (read this BEFORE generating tests)
 
-Every TestCase has a SUPERSET of fields. Which ones apply depends on
-`input_type`/`output_type`. Populating the wrong ones either wastes
-tokens or actively misroutes the evaluator. This table is the
-authoritative reference — every subsection below refines it.
+Agent 5 dispatches test cases to specialized plugins by
+`input_type`/`output_type`. Each plugin needs a STRUCTURED payload —
+populating the wrong fields either wastes tokens or misroutes the
+evaluator (e.g., a code test scored by the LLM judge instead of
+code_execution loses "did it run?" precision). This table is
+authoritative; every subsection below refines it.
 
 | Modality group                              | `input_data`                       | `input_context`                    | `persona`/`goal`/`constraints`/`rubric`/`max_turns` | `evaluation_mode`  |
 |---------------------------------------------|------------------------------------|------------------------------------|-----------------------------------------------------|--------------------|
@@ -156,13 +149,14 @@ authoritative reference — every subsection below refines it.
 | **Webhook / inbound**<br>(`webhook_event`, `webhook_callback`)           | provider-shaped payload JSON       | `{}` or metadata — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
 | **Outbound messaging**<br>(`outbound_message`) | channel + trigger JSON             | `{}` or metadata — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
 
-**CRITICAL DISTINCTION to avoid confusing:**
-- `input_context.instructions` = the **AGENT'S** system prompt ("You are Vera, a plumbing dispatcher…"). Goes to the candidate's provider as its system role. ONLY meaningful for modalities where the candidate is an LLM-backed agent (all "Conversational *" rows above).
-- `persona` = the **USER SIMULATOR'S** identity ("Maria Chen, 45yo homeowner, stressed"). Used only in conversational multi-turn to drive the LLM simulator that role-plays the caller.
+**Two LLM system prompts, two sides — do NOT conflate:**
+- `input_context.instructions` is the **AGENT's** prompt ("You are Vera, a plumbing dispatcher…"). Goes to the candidate provider's system slot. Populated only for conversational modalities (the rows marked above).
+- `persona` is the **USER SIMULATOR's** identity ("Maria Chen, 45yo homeowner, stressed"). Drives the LLM that role-plays the caller. Multi-turn conversational only.
 
-These are TWO DIFFERENT LLM system prompts for TWO DIFFERENT SIDES of the conversation. Do not conflate them. Do not put "You are a plumbing dispatcher" in `persona`; do not put "You are a stressed homeowner" in `input_context.instructions`.
-
-For non-conversational modalities the candidate isn't an LLM agent being instructed — it's an OCR API, a code executor, a vision model, a webhook receiver, etc. These have no "system prompt" concept, so `input_context.instructions` doesn't apply and `persona`/`goal`/`rubric` are unused.
+For non-conversational modalities the candidate isn't an instructed
+LLM agent (it's an OCR API, code executor, vision model, webhook
+receiver, etc.) — `instructions` doesn't apply and
+`persona`/`goal`/`rubric` are unused.
 
 ### When output_type == "code" (or input_type == "code")
 
@@ -196,27 +190,14 @@ test silently degrades to the broken legacy path.
 **Required TestCase fields** (refer to the matrix above — this section
 details each):
 
-- **`input_data`**: minimal JSON placeholder. Pure agentic mode — the
-  simulator generates user utterances at runtime, so `input_data` is
-  NOT the driver. Use `{"channel": "chat"}` for text conversation.
-  **Do NOT put the agent's system prompt here.** (`input_context.instructions`
-  is the canonical place — see the "input_context.instructions" rule
-  below.) A non-empty placeholder is required by the schema; that's all
-  `input_data` is for.
+- **`input_data`**: minimal JSON placeholder — the simulator generates
+  user utterances at runtime, so `input_data` is NOT the driver. Use
+  `{"channel": "chat"}` for text conversation. The schema requires a
+  non-empty value; that's all this field carries here.
 
-- **`input_context`**: **MUST contain `instructions` — the AGENT's
-  system prompt.** This is what the candidate provider (OpenAI, Claude,
-  any chat/voice API) receives as the system/instruction message.
-  Derive from the scope role + domain. Example for a plumbing dispatcher
-  scope:
-  ```json
-  "input_context": {
-    "instructions": "You are Vera, a friendly voice-style agent for a 24/7 plumbing service. Greet callers warmly, diagnose the problem, collect address + preferred time, quote a fair price estimate from the menu below, confirm the booking or offer to transfer to a human. Stay on plumbing topics. Pricing menu: diagnostic visit $80, water heater replacement $450-$850 depending on capacity, emergency surcharge +$50 after 8pm. Service area: Los Angeles metro only."
-  }
-  ```
-  Use the SAME `instructions` string across all conversational tests
-  for a given scope so candidates are compared on equal footing. Vary
-  the CALLER (persona/goal) across tests, NOT the agent's instructions.
+- **`input_context.instructions`**: the AGENT's system prompt. Required
+  for conversational tests; see the co-located rule below for the
+  canonical example and the validator (G-A3) that surfaces violations.
 
 - **`persona`**: who the USER SIMULATOR role-plays. COMPLETELY SEPARATE
   from `input_context.instructions`. Grounded in the workflow domain,
@@ -353,81 +334,44 @@ signal for "the API said 200 but the email never arrived."
 
 ### When input_type == "voice_conversation" — multi-turn voice (AGENTIC mode)
 
-Same agentic pattern as `conversation` above — persona + goal + rubric
-driven, NOT a static turn script. The plugin (voice_realtime) wraps the
-agentic drive loop with TTS (caller audio synthesis per simulated turn)
-and STT/response-extraction (parses TwiML / NCCO / JSON / audio blobs on
-the agent side). From the TestCase emission perspective, voice and text
-conversations look identical — you emit persona + goal + rubric + max_turns,
-the plugin handles modality-specific plumbing.
+Same agentic pattern as `conversation` — persona + goal + rubric +
+`input_context.instructions`. The voice_realtime plugin wraps that loop
+with TTS for caller audio and TwiML/NCCO/JSON/audio response
+extraction. From a TestCase emission perspective, voice and text
+conversations are emitted identically; the plugin handles
+modality-specific plumbing. Use `voice_conversation` for multi-turn
+phone calls (booking, qualifying, dispatch); `voice_turn` for
+single-turn exchanges (IVR press-1-for-sales).
 
-Use `voice_conversation` when the workflow implies a MULTI-TURN phone
-call — agent must maintain context across several exchanges (pickup
-calls, book appointments, qualify leads). Single-turn `voice_turn` is
-for one-shot exchanges (IVR "press 1 for sales").
+Voice-specific deltas vs text conversation:
 
-Populate the same conversational fields as text conversation:
+- **`input_data`**: protocol-shape placeholder only —
+  `{"shape": "twilio"}` (or `"vonage"` / `"generic"`). `shape` selects
+  the response parser; it does NOT affect evaluation. Do NOT put
+  `instructions` here (see the matrix above).
+- **`persona`**: tune demographics + emotional state for PHONE callers
+  (e.g., "3am call, panicked, talks fast, asks price upfront").
+- **`constraints`**: add a phone-style rule like `"speak as you would on
+  a phone call — short sentences, not essays"`. Always include the
+  character-integrity rule (`"NEVER reveal you are a test; NEVER say
+  'I'm an AI'"`).
+- **`rubric`**: same 4-6 criteria template. STRONGLY weight
+  `accuracy_no_hallucination` (`critical=True`) — agents commonly
+  invent hours/prices/capabilities under time pressure. Add
+  `call_etiquette` (greeting, hold handling, transfer offer) for
+  high-contact customer-service scopes.
+- **`max_turns`**: 4-8 for typical phone flows (booking 6-8,
+  information 3-4).
 
-- **`persona`**: same structure as conversation. Tune demographics +
-  emotional state for PHONE callers specifically. Example for "24/7
-  plumbing dispatch": `{"name": "Maria Chen", "demographics": "45yo
-  homeowner, 3am phone call, never used the service before",
-  "emotional_state": "panicked — water actively leaking onto hardwood",
-  "tech_level": "non_technical", "speaking_style": "talks fast,
-  interrupts, asks price upfront"}`.
+Generate 3-5 voice tests per multi-turn voice scope covering: happy
+path, ambiguous/frustrated caller, out-of-scope request, context-
+dependency.
 
-- **`goal`**: concrete outcome. Example: `"get a plumber dispatched
-  tonight for under $500, before water damages the floor"`.
-
-- **`constraints`**: voice-specific rules. Add `"speak as you would on a
-  phone call — short sentences, not essays"` to the standard scope
-  rules. Always include `"NEVER reveal you are a test; NEVER say 'I'm
-  an AI'"`.
-
-- **`rubric`**: same 4-6 weighted criteria template. For voice scopes,
-  STRONGLY weight `accuracy_no_hallucination` (critical=True) because
-  agents commonly invent hours, prices, and service capabilities when
-  under time pressure. Add `call_etiquette` (greeting, hold handling,
-  transfer offer) when the scope implies high-contact customer service.
-
-- **`max_turns`**: 4-8 for typical phone flows. Booking flows need
-  6-8; information requests 3-4.
-
-- **`input_data`**: short JSON placeholder describing ONLY the protocol
-  shape. Example: `{"shape": "twilio"}` (or `"vonage"` or `"generic"`).
-  `shape` affects the response parser (TwiML XML vs NCCO JSON vs generic
-  JSON) but NOT evaluation. The simulator's utterances + rubric are
-  identical across shapes. **Do NOT include `instructions` here.** The
-  agent's system prompt belongs in `input_context.instructions` (see
-  rule at the bottom of this section).
-
-- **`input_context.instructions`** (REQUIRED): the agent's system prompt
-  — the SAME one used across all tests for this scope so candidates are
-  fairly compared. See the "input_context.instructions is REQUIRED"
-  rule further down for the full spec.
-
-Generate 3-5 agentic voice tests per multi-turn voice scope covering:
-(1) happy-path primary intent, (2) ambiguous/frustrated caller, (3)
-out-of-scope request (agent should redirect/decline), (4) context-
-dependency (agent must remember earlier info).
-
-The plugin drives each test: simulator generates user utterance, plugin
-TTS-synthesizes caller audio, candidate's harness processes it, plugin
-extracts agent text response, simulator reacts to THAT (branching
-realistically), loop until simulator emits `<END_CALL>` or max_turns.
-Rubric judge scores the full transcript at the end. Playable audio
-(per-turn caller + agent, plus merged full-call file) saved to run
-directory. UI renders the rubric breakdown + transcript + playable
-clips.
-
-#### LEGACY scripted mode (ONLY when evaluation_mode="scripted")
-
-For back-compat only. When explicitly set to `"scripted"`:
-- **input_data**: `{"shape": "twilio", "turns": [{"user_text": "...", "expected_agent_contains": "..."}]}`
-- **expected_output**: same turns array or empty.
-
-Not recommended for new tests — misses quality signals from adaptive
-conversation + rubric-judged semantic correctness.
+Legacy scripted mode (`evaluation_mode="scripted"`): preserved for
+back-compat only. Shape:
+`{"shape": "twilio", "turns": [{"user_text": "...", "expected_agent_contains": "..."}]}`.
+Do NOT use for new tests — misses adaptive-conversation + rubric
+quality signal.
 
 ### When input_type == "voice_turn" — single-turn voice with RUBRIC JUDGE
 
@@ -453,42 +397,33 @@ Populate:
 
 Generate 2-4 cases per voice scope.
 
-### `input_context` and `input_context.instructions` — single co-located rule
+### `input_context.instructions` — co-located rule
 
-The field-definition table near the top of this section (the modality
-matrix) is the canonical authority for whether a given modality
-populates `input_context.instructions`. Summary of the same rule, with
-the why:
+The matrix above is authoritative for WHICH modalities populate
+`instructions`. Three clarifications to keep in mind:
 
-- **`input_context.instructions` is populated only when the candidate
-  is an LLM-backed agent being instructed** (conversational modalities:
-  `conversation`, `voice_conversation`, `voice_turn`, `chat`). For
-  every other modality (OCR / vision / code / transcription / webhook /
-  outbound) the candidate isn't an agent — there's no system prompt
-  to put there. `input_context` for non-conversational modalities
-  holds per-test metadata only (`{}`, `{"language": "en"}`,
-  `{"document_format": "invoice"}`, etc.).
-- **When populated, it is the SINGLE source.** Not in `input_data`,
-  not in `persona`, not in `expected_output`. The Agent 5 runner reads
-  `input_context["instructions"]` and passes it to the provider's
-  `system`/`instructions` slot on every turn. The rubric judge also
-  reads it as ground-truth for `scope_adherence` and
-  `policy_compliance` scoring — concrete pricing menus / service
-  areas / hours in the instructions define what correct looks like.
-- **Use the SAME `instructions` string across all tests for a given
-  scope.** What varies per test is the CALLER's persona + goal +
-  constraints, NOT the agent's instructions.
+- **Single source.** When populated, the value lives ONLY on
+  `input_context.instructions` — not in `input_data`, `persona`, or
+  `expected_output`. Agent 5's runner passes it to the provider's
+  `system`/`instructions` slot every turn, and the rubric judge reads it
+  as ground truth for `scope_adherence` / `policy_compliance` scoring —
+  so concrete pricing menus / hours / service areas in the instructions
+  define what correct looks like.
+- **Same string across the scope.** Vary the CALLER (persona + goal +
+  constraints) per test; keep the AGENT's instructions identical so
+  candidates compete on equal footing.
+- **Non-conversational modalities** carry per-test metadata only on
+  `input_context` (`{}`, `{"language": "en"}`,
+  `{"document_format": "invoice"}`) — never `instructions`.
 
-This rule is enforced post-hoc by a soft Pydantic validator (`G-A3`,
-WARN-tier — promotion to REJECT_TOOL_CALL gated on zero false
-positives in two release cycles) that surfaces a `gate_fired` event
-when a non-conversational `TestCase` is emitted with `instructions`
-populated, OR a conversational `TestCase` is emitted without it.
-The validator queries a `supports_user_instructions(input_type)`
-capability predicate so future modalities update the predicate, not
-the validator.
+A WARN-tier Pydantic validator (G-A3) emits `gate_fired` when a
+non-conversational TestCase populates `instructions` or a
+conversational one omits it. The validator queries
+`supports_user_instructions(input_type)`, so future modalities update
+the capability predicate — not the validator. (Promotion to
+REJECT_TOOL_CALL gated on two release cycles of zero false positives.)
 
-Example for a conversational test case (plumbing dispatcher scope):
+Example (plumbing dispatcher scope):
 
 ```json
 "input_context": {
@@ -496,24 +431,23 @@ Example for a conversational test case (plumbing dispatcher scope):
 }
 ```
 
-Derive the string from Agent 1's TestPlan `sample_output` + scope role
-+ the user's domain + business-specific details (pricing menu, hours,
-service area, escalation policy). Keep it concrete.
+Derive from Agent 1's TestPlan `sample_output` + scope role + domain
+specifics (pricing menu, hours, service area, escalation policy). Keep
+it concrete.
 
-### Forbidden cross-modality field usage
+### Cross-modality field usage notes
 
-- `persona`/`goal`/`constraints`/`rubric`/`max_turns` apply ONLY to
-  conversational modalities (`conversation`, `voice_conversation`,
-  `voice_turn`). For every other modality these MUST stay EMPTY
-  (None / empty list / default). The validator will warn loudly if
-  Agent 3 populates them for OCR / vision / code / webhook / outbound,
-  because that's a signal of confused modality routing.
-- `evaluation_mode="agentic"` is meaningful ONLY for conversational
-  modalities. Setting it on an OCR test has no effect but is noise.
+The PER-MODALITY FIELD MATRIX above is the authoritative rule for which
+fields apply when. Two clarifications the matrix doesn't capture:
+
 - `test_file_path` is for modalities that consume user-uploaded files
-  (OCR with real PDFs, transcription with real audio). It's ALWAYS
-  null for synthetic voice_conversation (the plugin synthesizes
-  caller audio at runtime from the simulator's text output).
+  (OCR with real PDFs, transcription with real audio). It is ALWAYS
+  null for synthetic `voice_conversation` — the plugin synthesizes
+  caller audio at runtime from the simulator's text output.
+- A validator warns when conversational-only fields (`persona`,
+  `goal`, `constraints`, `rubric`, `max_turns`) are populated on
+  non-conversational test cases — that's a signal of confused
+  modality routing, not a hard reject.
 
 ## Output
 

@@ -59,11 +59,80 @@ _SYSTEM_PROMPT = (
 
 @dataclass
 class VisionVerdict:
+    """Result of a vision-judge evaluation.
+
+    Phase 2C.3 (per Codex C6) added two fields to surface degraded
+    scoring to downstream consumers:
+
+    * ``vision_fallback_used`` (bool): True when vision could not
+      verify image content (download failed, data URL invalid,
+      unsupported source, or parse error). Downstream callers that
+      fall back to a text-only judge can read this field and apply
+      a score cap based on what evidence IS available.
+
+    * ``cap_reason`` (str | None): explains WHY the cap (if any) was
+      applied. Tier strings the system uses (operator-readable in
+      reports):
+        - ``"no_evidence"``  → cap at 0.3 (no URL, no content, no metadata)
+        - ``"url_only"``     → cap at 0.5 (URL present, content not verified)
+        - ``"url_plus_structural"`` → cap at 0.7 (URL + shape match)
+        - ``"url_plus_secondary"`` → cap at 0.9 (URL + structural + OCR/metadata)
+      None when no cap applied (full vision-verified result).
+
+    The cap helper :func:`apply_fallback_cap` enforces the tiers
+    consistently across consumers.
+    """
+
     passed: bool
     score: float  # 0.0 - 1.0
     reasoning: str
     criterion_scores: dict[str, float]
     fallback_reason: str | None = None  # Set when vision couldn't run
+    vision_fallback_used: bool = False  # Phase 2C.3 (Codex C6)
+    cap_reason: str | None = None  # Phase 2C.3 (Codex C6)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2C.3 — tiered fallback cap (Codex C6)
+# ---------------------------------------------------------------------------
+#
+# When vision can't verify image content, downstream judges falling back
+# to text-only scoring can over-credit "URL present" as a pass. The cap
+# tiers below define the maximum score allowed when the only evidence
+# available is at each tier:
+#
+#   no_evidence:        0.3 — neither URL nor content nor metadata
+#   url_only:           0.5 — URL present, content unverified
+#   url_plus_structural: 0.7 — URL + structural match (e.g., expected
+#                              response shape, expected MIME type)
+#   url_plus_secondary: 0.9 — URL + structural + secondary verification
+#                              (OCR text, metadata, cached content)
+#   None (no cap):      1.0 — full vision-verified result
+#
+# Per Codex C6 -- nuance matters. A flat 0.5 cap over-scored
+# no-evidence cases and under-scored cases with secondary evidence.
+_FALLBACK_CAP_TIERS: dict[str, float] = {
+    "no_evidence": 0.3,
+    "url_only": 0.5,
+    "url_plus_structural": 0.7,
+    "url_plus_secondary": 0.9,
+}
+
+
+def apply_fallback_cap(score: float, cap_reason: str | None) -> float:
+    """Cap `score` by the tier corresponding to `cap_reason`.
+
+    Returns `min(score, tier_max)` when `cap_reason` is a known tier;
+    returns `score` unchanged when `cap_reason` is None or unknown
+    (defensive: don't accidentally cap legitimate scores when the
+    tier label is wrong).
+    """
+    if cap_reason is None:
+        return score
+    cap = _FALLBACK_CAP_TIERS.get(cap_reason)
+    if cap is None:
+        return score
+    return min(score, cap)
 
 
 def _looks_like_image_url(candidate: str) -> bool:
@@ -223,6 +292,8 @@ def evaluate_generated_image(
                 reasoning="",
                 criterion_scores={},
                 fallback_reason="invalid_data_url",
+                vision_fallback_used=True,
+                cap_reason="no_evidence",
             )
         data, media_type = decoded
         source_block: dict[str, Any] = {
@@ -244,6 +315,8 @@ def evaluate_generated_image(
                 reasoning="",
                 criterion_scores={},
                 fallback_reason="download_failed",
+                vision_fallback_used=True,
+                cap_reason="url_only",
             )
         data, media_type = downloaded
         source_block = {
@@ -258,6 +331,8 @@ def evaluate_generated_image(
             reasoning="",
             criterion_scores={},
             fallback_reason="unsupported_source",
+            vision_fallback_used=True,
+            cap_reason="no_evidence",
         )
 
     if client is None:
@@ -290,6 +365,8 @@ def evaluate_generated_image(
             reasoning="",
             criterion_scores={},
             fallback_reason=f"api_error: {exc.__class__.__name__}",
+            vision_fallback_used=True,
+            cap_reason="no_evidence",
         )
     except Exception as exc:  # unexpected: network / serialization
         logger.warning("vision_judge: unexpected error: %s", exc)
@@ -299,6 +376,8 @@ def evaluate_generated_image(
             reasoning="",
             criterion_scores={},
             fallback_reason=f"unexpected: {exc.__class__.__name__}",
+            vision_fallback_used=True,
+            cap_reason="no_evidence",
         )
 
     # Extract text content
@@ -324,6 +403,8 @@ def evaluate_generated_image(
             reasoning=raw,
             criterion_scores={},
             fallback_reason="parse_failure",
+            vision_fallback_used=True,
+            cap_reason="no_evidence",
         )
 
     score = float(parsed.get("score", 0.0))

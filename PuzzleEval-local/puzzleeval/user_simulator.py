@@ -177,9 +177,22 @@ def _build_system_prompt(
     persona: Persona,
     goal: str,
     constraints: list[str],
+    *,
+    extend_to_completion: bool = False,
+    max_extension_turns: int = 3,
 ) -> str:
-    """Render the simulator system prompt for a specific persona + goal."""
-    return _SIMULATOR_SYSTEM_TEMPLATE.format(
+    """Render the simulator system prompt for a specific persona + goal.
+
+    When `extend_to_completion=True`, swaps the default "NEVER go past
+    your goal" rule with a goal-extension rule: the simulator continues
+    past the first goal-met point and performs follow-up turns up to
+    `max_extension_turns`. Resolves the rubric_judge ↔ user_simulator
+    conflict (F-Aux1) for multi-step goals.
+
+    Default `extend_to_completion=False` preserves the legacy
+    "end-on-goal" semantics — no regression for existing fixtures.
+    """
+    rendered = _SIMULATOR_SYSTEM_TEMPLATE.format(
         name=persona.name,
         demographics=persona.demographics,
         emotional_state=persona.emotional_state,
@@ -188,6 +201,25 @@ def _build_system_prompt(
         goal=goal.strip(),
         constraints_block=_format_constraints(constraints),
     )
+    if extend_to_completion:
+        # Swap the default "NEVER go past your goal" rule for the
+        # extension rule. The line text is stable in the template;
+        # if the template changes, this swap becomes a no-op (which
+        # is fine — defaults already preserve current behavior).
+        old_rule = (
+            "- NEVER go past your goal: once it's met, end the call, "
+            "don't invent new problems"
+        )
+        new_rule = (
+            f"- After your primary goal is met, you MAY continue the "
+            f"conversation with related follow-ups (confirming details, "
+            f"adjacent concerns) for up to {max_extension_turns} more "
+            f"turns. Don't invent unrelated problems; stay within "
+            f"your reason for calling. End the call after the "
+            f"extension window with `<END_CALL reason=\"goal_achieved\">`"
+        )
+        rendered = rendered.replace(old_rule, new_rule)
+    return rendered
 
 
 # ============================================================================
@@ -292,6 +324,8 @@ def generate_next_user_turn(
     trace_id: str = "no-trace",
     model: str | None = None,
     temperature: float | None = None,
+    extend_to_completion: bool = False,
+    max_extension_turns: int = 3,
 ) -> SimulatorTurn:
     """Generate the simulator's next user utterance.
 
@@ -341,6 +375,8 @@ def generate_next_user_turn(
         persona=persona,
         goal=goal,
         constraints=constraints or [],
+        extend_to_completion=extend_to_completion,
+        max_extension_turns=max_extension_turns,
     )
     messages = _render_history_as_messages(history)
 

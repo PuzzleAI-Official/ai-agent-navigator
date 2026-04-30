@@ -1651,6 +1651,50 @@ class Persona(BaseModel):
     )
 
 
+class SimulatorConfig(BaseModel):
+    """Per-test configuration for the user simulator (Phase 2C.5 / F-Aux1).
+
+    Resolves the cross-prompt conflict between `rubric_judge` (which
+    scores goal completion on a 0-1 spectrum, expecting multi-step
+    resolution) and `user_simulator` (which by default ends the call
+    the moment its primary goal is met). Multi-step goals scored
+    artificially low because the conversation ended at step 1.
+
+    When `extend_to_completion=True`, the simulator continues past the
+    first goal-met point, performing follow-up turns (e.g., confirming
+    details, addressing adjacent concerns) up to `max_extension_turns`.
+    Agent 3 sets this flag for tests with multi-step goals.
+
+    Default behavior (`extend_to_completion=False`) preserves the
+    current "end on goal" semantics — no regression for existing
+    fixtures.
+    """
+
+    extend_to_completion: bool = Field(
+        default=False,
+        description=(
+            "When True, the simulator continues past the first "
+            "goal-achieved point and performs follow-up turns up to "
+            "`max_extension_turns`. Use for multi-step goals where the "
+            "rubric judge expects to score the full resolution arc, "
+            "not just the goal-met moment. Default False preserves "
+            "back-compat: simulator ends the call when goal is met."
+        ),
+    )
+
+    max_extension_turns: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description=(
+            "When extend_to_completion is True, the simulator performs "
+            "AT MOST this many additional turns after the goal is met "
+            "before ending the call. Cap at 10 to prevent runaway "
+            "conversations on flaky agents."
+        ),
+    )
+
+
 class RubricCriterion(BaseModel):
     """
     One weighted dimension the rubric judge scores for a conversational test.
@@ -2102,6 +2146,20 @@ class TestCase(BaseModel):
             "Tuning: shorter scopes (info requests) use 3-4; complex "
             "scopes (booking flows) use 6-8. Clamped by "
             "CONVERSATION_MAX_TURNS_CEILING config (default 12)."
+        ),
+    )
+
+    simulator_config: SimulatorConfig | None = Field(
+        default=None,
+        description=(
+            "Phase 2C.5 (F-Aux1) — per-test simulator overrides. When "
+            "set, allows the simulator to extend the conversation past "
+            "the first goal-met point (for multi-step goals where the "
+            "rubric judge needs to score the full resolution arc). When "
+            "None (default), preserves the legacy 'end on goal' "
+            "semantics. Agent 3 sets this for tests where the goal "
+            "involves multiple sub-resolutions (book + verify address + "
+            "confirm payment, etc.)."
         ),
     )
 

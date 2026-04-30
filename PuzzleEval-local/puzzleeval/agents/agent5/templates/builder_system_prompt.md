@@ -268,6 +268,103 @@ Every meta-file costs ~$0.30 and zero build progress.
 If you feel the urge to "save state," patch ``api_spec.txt`` with the
 relevant finding instead — that IS your memory and it survives compaction.
 
+## OBSERVABILITY CONTRACT (every harness MUST self-instrument)
+
+The sandbox auto-injects ``_forensics.py`` next to your harness with a
+stable observability API. **Import it as the FIRST line of harness.py**,
+before any HTTP/WS/SDK clients (the auto-hooks need to monkey-patch
+those libraries BEFORE your code grabs references to their functions):
+
+```python
+from _forensics import log, traced_op, log_thread_start, log_thread_error
+```
+
+**Use ``traced_op`` as the primary instrumentation** — it's a context
+manager that auto-pairs start/done/error events with timing:
+
+```python
+with traced_op("create_session", provider="elevenlabs"):
+    agent_id = create_agent(api_key)
+    ws = open_websocket(agent_id)
+
+with traced_op("send_audio_chunk", provider="elevenlabs", turn_index=2):
+    ws.send(audio_bytes)
+```
+
+On entry: emits ``op_start`` event with your op name + fields.
+On clean exit: emits ``op_done`` (with duration_ms).
+On exception: emits ``op_error`` (with error_type, error, duration_ms)
+AND re-raises — never swallows the exception. Naming the op is your
+choice; pick a snake_case verb-noun like ``create_session``,
+``drain_response``, ``send_audio_chunk``.
+
+**Canonical event names** for direct ``log()`` calls (use these when
+recording lifecycle events you don't wrap in ``traced_op``):
+
+- ``harness_start`` (auto-emitted on import) / ``harness_exit`` (auto on atexit)
+- ``session_create_start`` / ``session_create_done`` / ``session_create_error``
+- ``request_start`` / ``request_done`` / ``request_error`` (auto-emitted
+  for requests/httpx/aiohttp HTTP calls)
+- ``stream_start`` / ``stream_event`` / ``stream_done`` / ``stream_error``
+- ``thread_start`` / ``thread_error`` (auto-emitted via ``threading.Thread`` hook)
+- ``timeout``, ``provider_error``
+
+You can call ``log("custom_name", **fields)`` for non-canonical events
+too — they coexist with the canonical taxonomy in the JSONL log. The
+verifier's streaming-harness check accepts EITHER ``traced_op("session_create", ...)``
+OR ``log("session_create_start", ...)`` as evidence of session lifecycle.
+
+**Standard fields** to include where applicable:
+
+- ``op``: snake_case operation name you pick (e.g., ``"create_agent"``,
+  ``"drain_response"``)
+- ``provider``: short provider tag (``"elevenlabs"``, ``"openai"``)
+- ``url_host``: hostname only — **NEVER** the full URL, **NEVER** query
+  params (privacy: query strings often carry signed-URL tokens)
+- ``status_code``, ``duration_ms``, ``attempt``, ``request_id``,
+  ``error_type``, ``error``
+
+**Auto-hooks (free baseline coverage, NOT a guarantee).** The shim
+auto-instruments these libraries so calls through them are recorded
+without you writing any logging code:
+
+- ``requests`` (sync HTTP)
+- ``httpx`` (sync + async HTTP)
+- ``aiohttp`` (async HTTP)
+- ``websocket-client`` (sync WebSocket — the ``websocket.WebSocket`` class)
+- ``websockets`` (async WebSocket)
+- ``threading.Thread`` (auto-emits ``thread_start`` + ``thread_error``)
+
+**For ANY OTHER client you must wrap manually** (the auto-hooks do NOT
+cover these): provider SDKs (``openai``, ``anthropic``, ``google.cloud``,
+``elevenlabs``, ``deepgram``, ``cohere``), ``grpcio``, raw ``socket``
+programming, async ``asyncio.create_task`` callbacks, custom WebSocket
+wrappers. Wrap their call sites with ``traced_op(...)`` so the verifier
+can localize failures. **The verifier checks for this** — it scans your
+harness with AST and rejects HARNESS_COMPLETE if it finds an SDK import
+with zero ``with traced_op(...)`` blocks.
+
+**For voice / multi-turn / streaming harnesses** the verifier requires
+additional instrumentation:
+
+- ``traced_op("session_create", provider=...)`` around session
+  provisioning (WebSocket connect, agent create, etc.)
+- ``traced_op("stream", provider=...)`` around the receive loop, plus
+  per-event ``log("stream_event", event_type=...)`` calls inside it
+- ``log_thread_start("reader", ...)`` if you spawn a background reader
+  (the auto threading hook also captures uncaught reader exceptions)
+
+**Why this matters** — when a harness hangs (the ElevenLabs reader-thread
+bug we hit on real-run trace 6e0c9563 is the canonical example), the
+forensics file is the post-mortem evidence. With it, the adversarial
+report says "WebSocket recv stopped at t=4.2s, last event was
+``agent_response``, then 40s of silence." Without it, the report says
+"timeout: " and you waste 4-6 build turns adding logging mid-debug.
+
+When debugging mid-build, **call ``read_forensics(50)``** to inspect the
+last 50 events from the most recent harness run — don't re-run the
+harness when the evidence is already on disk.
+
 ## ERROR-HANDLING CONTRACT (HARD REQUIREMENT)
 
 Your harness will be probed AFTER the build loop by an adversarial battery

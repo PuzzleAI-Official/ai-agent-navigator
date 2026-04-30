@@ -24,7 +24,7 @@ from puzzleeval.agents.agent5.dispatch_helpers import (
 _logger = logging.getLogger(__name__)
 
 
-CUSTOM_TOOL_NAMES = {"write_file", "patch_file", "run_code", "read_file", "ask_research"}
+CUSTOM_TOOL_NAMES = {"write_file", "patch_file", "run_code", "read_file", "ask_research", "read_forensics"}
 ALLOWED_EXTENSIONS = {".py", ".txt", ".json", ".cfg", ".toml", ".sh", ".yaml", ".yml"}
 
 
@@ -73,6 +73,9 @@ def dispatch_tool(
         )
     if tool_name == "read_file":
         result = read_file(tool_input, sandbox_dir, read_state=read_state)
+        return result, 1 if result.startswith("Error") else 0
+    if tool_name == "read_forensics":
+        result = read_forensics(tool_input, sandbox_dir)
         return result, 1 if result.startswith("Error") else 0
     if tool_name == "ask_research":
         return "Error: ask_research must be dispatched via the main loop", -2
@@ -449,3 +452,39 @@ def read_file(
         return content
     except OSError as exc:
         return f"Error reading {filename}: {exc}"
+
+
+def read_forensics(
+    tool_input: dict,
+    sandbox_dir: Path,
+) -> str:
+    """Read the last N events from harness_forensics.jsonl.
+
+    The forensics shim auto-injected by sandbox setup writes structured
+    JSONL events here whenever the harness runs. After running smoke_test
+    or live_test, the builder calls this tool to inspect what happened —
+    HTTP/WS calls (auto-instrumented), explicit `traced_op`/`log` events,
+    thread errors, and (when present) faulthandler stack dumps.
+
+    Use this INSTEAD of re-running the harness when diagnosing a hang or
+    failure: the forensics file already has the evidence.
+
+    Returns the last `last_n` lines of the JSONL file (default 50), one
+    JSON event per line. Empty when the harness hasn't run yet.
+    """
+    last_n = max(1, int(tool_input.get("last_n", 50)))
+    log_path = sandbox_dir / "harness_forensics.jsonl"
+    if not log_path.exists():
+        return (
+            "(no forensic log yet — run live_test.py or smoke_test.py first. "
+            "The log appears at harness_forensics.jsonl after the harness has "
+            "run at least once.)"
+        )
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError as exc:
+        return f"Error reading harness_forensics.jsonl: {exc}"
+    if not lines:
+        return "(harness_forensics.jsonl is empty)"
+    tail = lines[-last_n:]
+    return "\n".join(tail)

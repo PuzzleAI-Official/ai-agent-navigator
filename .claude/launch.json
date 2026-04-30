@@ -5,13 +5,15 @@
       "name": "frontend",
       "runtimeExecutable": "npm",
       "runtimeArgs": ["run", "dev"],
-      "port": 8080
+      "port": 8080,
+      "autoPort": false
     },
     {
       "name": "backend",
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "uvicorn", "main:app", "--host", "127.0.0.1", "--port", "8001", "--app-dir", "puzzleeval-api"],
-      "port": 8001
+      "port": 8001,
+      "autoPort": false
     }
   ]
 }

@@ -286,6 +286,17 @@ interface EvidenceRow {
   }>;
 }
 
+interface ForensicsEvent {
+  // Free-form JSONL-decoded forensics events. Common fields per the
+  // canonical taxonomy: t_ms, t_abs, kind, event, op, provider,
+  // url_host, status_code, duration_ms, error_type, error.
+  t_ms?: number;
+  t_abs?: number;
+  kind?: string;
+  event?: string;
+  [key: string]: unknown;
+}
+
 interface CandidateReport {
   name?: string;
   provider?: string;
@@ -305,6 +316,14 @@ interface CandidateReport {
   success_evidence?: EvidenceRow[];
   pros?: string[];
   cons?: string[];
+  // Build-status disclosure (from report.py's failed-build surfacing).
+  // When `build_succeeded === false`, the harness either failed
+  // adversarial validation OR the build loop emitted FailedHarness.
+  // The candidate row renders critical_failures + forensics_tail in
+  // a dedicated <ForensicsBlock> so the user can see WHY it failed.
+  build_succeeded?: boolean;
+  critical_failures?: string[];
+  forensics_tail?: ForensicsEvent[];
 }
 
 interface EvaluationReport {
@@ -453,11 +472,73 @@ function Metric({ label, value, emphasis = false }: { label: string; value: stri
   );
 }
 
+function ForensicsBlock({
+  criticalFailures,
+  forensicsTail,
+}: {
+  criticalFailures?: string[];
+  forensicsTail?: ForensicsEvent[];
+}) {
+  const failures = criticalFailures ?? [];
+  const tail = forensicsTail ?? [];
+  if (failures.length === 0 && tail.length === 0) {
+    return null;
+  }
+  // Show last 20 events even though the backend captures up to 50 — the
+  // "explore the full log" path is read_forensics from Agent 5; this UI
+  // surface is for the operator's quick glance.
+  const visibleTail = tail.slice(-20);
+  return (
+    <details className="text-xs">
+      <summary className="cursor-pointer text-amber-400 hover:text-amber-300 font-medium">
+        Forensics — {failures.length} critical issue
+        {failures.length === 1 ? "" : "s"}
+        {tail.length > 0 && (
+          <> · last {visibleTail.length} of {tail.length} events</>
+        )}
+      </summary>
+      <div className="mt-2 space-y-2 pl-3 border-l border-amber-900/40">
+        {failures.length > 0 && (
+          <div>
+            <div className="text-zinc-300 mb-1">Critical failures:</div>
+            <ul className="space-y-1">
+              {failures.map((f, i) => (
+                <li key={i} className="text-amber-300/90 font-mono text-[11px]">
+                  • {f}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+        {visibleTail.length > 0 && (
+          <div>
+            <div className="text-zinc-300 mb-1">Last events:</div>
+            <pre className="max-h-64 overflow-auto bg-zinc-950/80 border border-zinc-800 rounded p-2 text-[10px] leading-tight whitespace-pre-wrap break-all">
+              {visibleTail
+                .map((ev) => JSON.stringify(ev))
+                .join("\n")}
+            </pre>
+          </div>
+        )}
+      </div>
+    </details>
+  );
+}
+
+
 function CandidateRow({ c }: { c: CandidateReport }) {
   const passPct = typeof c.pass_rate === "number" ? c.pass_rate * 100 : 0;
   const monthly = c.monthly_cost_projection_usd;
+  const buildFailed = c.build_succeeded === false;
   return (
-    <div className="rounded bg-zinc-900/70 border border-zinc-800 p-3 space-y-2">
+    <div
+      className={
+        "rounded border p-3 space-y-2 " +
+        (buildFailed
+          ? "bg-amber-950/20 border-amber-900/50"
+          : "bg-zinc-900/70 border-zinc-800")
+      }
+    >
       <div className="flex items-baseline justify-between gap-4 flex-wrap">
         <div>
           <span className="text-xs text-zinc-500 mr-2">#{c.rank ?? "?"}</span>
@@ -465,20 +546,39 @@ function CandidateRow({ c }: { c: CandidateReport }) {
           {c.provider && (
             <span className="text-xs text-zinc-500 ml-2">· {c.provider}</span>
           )}
+          {buildFailed && (
+            <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400 font-semibold">
+              build failed validation
+            </span>
+          )}
         </div>
         <div className="text-xs text-zinc-400">
-          {c.passed_count ?? 0}/{c.total_count ?? 0} passed ({passPct.toFixed(0)}%) ·{" "}
-          {typeof c.overall_score === "number"
-            ? `score ${(c.overall_score * 100).toFixed(0)}%`
-            : "—"}
-          {typeof monthly === "number" && (
-            <> · est. ${monthly.toFixed(2)}/mo</>
-          )}
-          {c.sandbox_used && (
-            <span className="ml-2 text-amber-400">[sandbox]</span>
+          {buildFailed ? (
+            <span className="text-amber-400/90">
+              not tested — see forensics
+            </span>
+          ) : (
+            <>
+              {c.passed_count ?? 0}/{c.total_count ?? 0} passed ({passPct.toFixed(0)}%) ·{" "}
+              {typeof c.overall_score === "number"
+                ? `score ${(c.overall_score * 100).toFixed(0)}%`
+                : "—"}
+              {typeof monthly === "number" && (
+                <> · est. ${monthly.toFixed(2)}/mo</>
+              )}
+              {c.sandbox_used && (
+                <span className="ml-2 text-amber-400">[sandbox]</span>
+              )}
+            </>
           )}
         </div>
       </div>
+      {buildFailed && (
+        <ForensicsBlock
+          criticalFailures={c.critical_failures}
+          forensicsTail={c.forensics_tail}
+        />
+      )}
       {(c.pros?.length || c.cons?.length) && (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-xs">
           {c.pros && c.pros.length > 0 && (

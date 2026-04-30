@@ -66,7 +66,17 @@ class TestEvidence:
 
 @dataclass
 class CandidateReport:
-    """Per-candidate summary with evidence + cost projection."""
+    """Per-candidate summary with evidence + cost projection.
+
+    For candidates whose harness FAILED to build (adversarial probes
+    flagged it NOT READY, or the build loop emitted FailedHarness),
+    the report still surfaces an entry with ``build_succeeded=False``,
+    ``critical_failures`` listing what blocked the harness, and
+    ``forensics_tail`` showing the last events the harness emitted
+    before failure. This prevents the silent-absence failure mode where
+    a user-named candidate (e.g., ElevenLabs in real-run trace
+    6e0c9563) gets built but excluded from the report entirely.
+    """
     name: str
     provider: str
     rank: int  # 1 = best; sorted by overall_score desc, ties broken by cost
@@ -86,6 +96,22 @@ class CandidateReport:
     pros: list[str] = field(default_factory=list)
     cons: list[str] = field(default_factory=list)
     coverage_gaps: list[str] = field(default_factory=list)
+    # Build-status disclosure (Issue #6 fix from real-run trace 6e0c9563):
+    # When `build_succeeded=False`, the candidate's harness failed
+    # adversarial validation OR the build loop emitted FailedHarness.
+    # The frontend surfaces these in a dedicated "Builds attempted but
+    # failed validation" section so the user understands WHY a named
+    # candidate doesn't have test results.
+    build_succeeded: bool = True
+    # When build_succeeded=False, lists the adversarial-probe critical
+    # failures (e.g., "empty_input: timeout: ...", "concurrency:
+    # outcomes=['crash','crash','crash']"). Empty for successful builds.
+    critical_failures: list[str] = field(default_factory=list)
+    # Last 50 events from harness_forensics.jsonl (post-mortem evidence).
+    # Each entry is a JSONL-decoded dict matching the canonical event
+    # taxonomy. Empty when the forensics file is missing OR the build
+    # succeeded (the operator already has the per-test transcripts).
+    forensics_tail: list[dict] = field(default_factory=list)
 
 
 @dataclass
@@ -131,6 +157,42 @@ def _safe_get(obj: Any, key: str, default: Any = None) -> Any:
     if isinstance(obj, dict):
         return obj.get(key, default)
     return getattr(obj, key, default)
+
+
+def _read_forensics_tail(
+    harness_dir: Any, max_events: int = 50,
+) -> list[dict]:
+    """Read the last N events from a harness's harness_forensics.jsonl.
+
+    Returns a list of decoded JSON objects (one per event). Empty list when
+    the harness_dir is missing/None, the file doesn't exist, or read fails —
+    never raises, never blocks report assembly.
+
+    Used by the failed-build-candidate surfacing logic to attach post-mortem
+    evidence to the report so the user can see exactly what the harness was
+    doing before it failed validation.
+    """
+    if not harness_dir:
+        return []
+    try:
+        from pathlib import Path
+        log_path = Path(str(harness_dir)) / "harness_forensics.jsonl"
+        if not log_path.exists():
+            return []
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    tail = lines[-max_events:]
+    out: list[dict] = []
+    import json
+    for line in tail:
+        try:
+            ev = json.loads(line)
+            if isinstance(ev, dict):
+                out.append(ev)
+        except (ValueError, json.JSONDecodeError):
+            continue
+    return out
 
 
 def _project_monthly_cost(
@@ -403,6 +465,90 @@ def assemble_report(
             pros=pros, cons=cons,
             coverage_gaps=[],
         ))
+
+    # ── Failed-build candidate surfacing (Issue #6) ──────────────────────
+    # When a harness builds but fails adversarial validation (e.g.,
+    # ElevenLabs ConvAI's reader-thread bug from real-run trace 6e0c9563),
+    # OR the build loop emits FailedHarness, the candidate is silently
+    # dropped from candidate_runs[]. Without this block, the user-named
+    # candidate disappears from the report with no explanation.
+    #
+    # Surface these candidates with build_succeeded=False, the
+    # critical_failures list, and forensics_tail (the last 50 events
+    # from harness_forensics.jsonl). They appear AFTER the ranked
+    # successful builds so they don't compete on score; the frontend
+    # renders them in a dedicated "build failed" section.
+    already_reported = {rep.name.lower() for rep in candidate_reports}
+    if agent5_result:
+        # Adversarial-failed harnesses: built but harness_ready=False
+        for h in (_safe_get(agent5_result, "harnesses", []) or []):
+            h_name = str(_safe_get(h, "candidate_name", "") or "")
+            if not h_name or h_name.lower() in already_reported:
+                continue
+            adv = _safe_get(h, "adversarial_report", {}) or {}
+            # Convert adversarial_report to dict if it's an object
+            if not isinstance(adv, dict):
+                try:
+                    adv = adv.__dict__
+                except Exception:
+                    adv = {}
+            harness_ready = bool(adv.get("harness_ready", True))
+            if harness_ready:
+                continue  # built fine, just not in candidate_runs for some other reason
+            critical_failures = list(adv.get("critical_failures", []) or [])
+            forensics_tail = _read_forensics_tail(_safe_get(h, "harness_dir", None))
+            candidate_reports.append(CandidateReport(
+                name=h_name,
+                provider=str(_safe_get(h, "provider", "") or ""),
+                rank=len(candidate_reports) + 1,
+                overall_score=0.0,
+                pass_rate=0.0,
+                passed_count=0,
+                total_count=0,
+                avg_latency_ms=None,
+                cost_usd_per_call=None,
+                monthly_cost_projection_usd=None,
+                auth_method=str(_safe_get(h, "auth_method", "") or "unknown"),
+                requirements=list(_safe_get(h, "requirements", []) or []),
+                auth_env_vars=list(_safe_get(h, "auth_env_vars", []) or []),
+                sandbox_used=False,
+                build_succeeded=False,
+                critical_failures=critical_failures,
+                forensics_tail=forensics_tail,
+            ))
+            already_reported.add(h_name.lower())
+            advisories.append(
+                f"{h_name}: harness built but failed adversarial validation "
+                f"({len(critical_failures)} critical issue(s)). See the "
+                f"candidate's Forensics block for the last events before failure."
+            )
+        # Outright failed harnesses: never built or smoke-test never passed
+        for fh in (_safe_get(agent5_result, "failed_harnesses", []) or []):
+            f_name = str(_safe_get(fh, "candidate_name", "") or "")
+            if not f_name or f_name.lower() in already_reported:
+                continue
+            failure_reason = str(_safe_get(fh, "failure_reason", "") or "unknown")
+            forensics_tail = _read_forensics_tail(_safe_get(fh, "harness_dir", None))
+            candidate_reports.append(CandidateReport(
+                name=f_name,
+                provider=str(_safe_get(fh, "provider", "") or ""),
+                rank=len(candidate_reports) + 1,
+                overall_score=0.0,
+                pass_rate=0.0,
+                passed_count=0,
+                total_count=0,
+                avg_latency_ms=None,
+                cost_usd_per_call=None,
+                monthly_cost_projection_usd=None,
+                auth_method="unknown",
+                requirements=[],
+                auth_env_vars=[],
+                sandbox_used=False,
+                build_succeeded=False,
+                critical_failures=[failure_reason] if failure_reason else [],
+                forensics_tail=forensics_tail,
+            ))
+            already_reported.add(f_name.lower())
 
     # Per-scope winners: best (highest overall_score) candidate that
     # actually covers each scope.

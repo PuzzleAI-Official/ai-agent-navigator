@@ -82,6 +82,19 @@ class PluginCapabilities:
     evaluates_output: bool = False
     requires_credentials: list[str] = field(default_factory=list)
     requires_harness_runner: bool = False
+    # `provisions_remote_session_per_call` declares that a single
+    # ``harness.run()`` call provisions a billable provider-side resource
+    # (e.g., ElevenLabs Conversational AI agent, OpenAI Realtime session)
+    # that costs money and counts against rate limits. The adversarial
+    # verifier reads this flag to skip stateless probes
+    # (`idempotency` + `concurrency`) which would otherwise create N
+    # billable sessions in seconds and flood provider rate limits — the
+    # exact failure mode that dropped ElevenLabs from test execution
+    # in real-run trace 6e0c9563. Multi-turn coverage for these
+    # harnesses comes from smoke_test + live_test which the builder
+    # writes; the skipped probes assume STATELESS semantics that don't
+    # apply.
+    provisions_remote_session_per_call: bool = False
     notes: str = ""
 
 

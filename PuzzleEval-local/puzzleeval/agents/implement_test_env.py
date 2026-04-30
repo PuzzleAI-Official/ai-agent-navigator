@@ -1128,8 +1128,52 @@ ADVISOR_TOOL = {
     "caching": {"type": "ephemeral", "ttl": "5m"},
 }
 
+READ_FORENSICS_TOOL = {
+    "name": "read_forensics",
+    "description": (
+        "Read the last N events from harness_forensics.jsonl after running "
+        "smoke_test or live_test. Use this to diagnose hangs, failures, and "
+        "unexpected behavior WITHOUT re-running the harness — the forensics "
+        "file already has the evidence.\n\n"
+        "WHAT'S IN IT:\n"
+        "  • HTTP calls (auto-instrumented for requests/httpx/aiohttp): "
+        "    {kind:'http', event:'request_done', method, url_host, status_code, duration_ms}\n"
+        "  • WebSocket frames (auto-instrumented for websocket-client/websockets): "
+        "    {kind:'ws', dir:'send|recv', type, bytes}\n"
+        "  • Your explicit traced_op blocks: "
+        "    {event:'op_start|op_done|op_error', op, duration_ms, ...your fields}\n"
+        "  • Thread errors (auto-captured): "
+        "    {kind:'thread', event:'thread_error', name, error_type, error, tb}\n"
+        "  • Faulthandler stack dumps to stderr if any thread hung > "
+        "PUZZLEEVAL_HARNESS_FAULTHANDLER_TIMEOUT seconds (default 45s)\n\n"
+        "DEBUG WORKFLOW:\n"
+        "  1. Run smoke_test or live_test (run_code)\n"
+        "  2. If it failed/hung, call read_forensics(50) FIRST before re-running\n"
+        "  3. Find the last successful event before the failure — that's where "
+        "the bug lives\n"
+        "  4. Patch the harness with what you learned, then re-run\n\n"
+        "Re-running blindly without reading forensics wastes turns. The log is "
+        "always there after at least one harness run."
+    ),
+    "input_schema": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "last_n": {
+                "type": "integer",
+                "description": (
+                    "Number of most-recent events to return. Default 50. "
+                    "Increase to 100-200 if the harness produces many events "
+                    "per turn (e.g., voice with audio chunk events)."
+                ),
+                "default": 50,
+            },
+        },
+    },
+}
+
 # All tools passed to the API — server tools + custom tools + advisor
-ALL_TOOLS = [WEB_FETCH_TOOL, WEB_SEARCH_TOOL, ADVISOR_TOOL, WRITE_FILE_TOOL, PATCH_FILE_TOOL, RUN_CODE_TOOL, READ_FILE_TOOL, ASK_RESEARCH_TOOL]
+ALL_TOOLS = [WEB_FETCH_TOOL, WEB_SEARCH_TOOL, ADVISOR_TOOL, WRITE_FILE_TOOL, PATCH_FILE_TOOL, RUN_CODE_TOOL, READ_FILE_TOOL, ASK_RESEARCH_TOOL, READ_FORENSICS_TOOL]
 
 
 # ============================================================================
@@ -3510,6 +3554,32 @@ def run_implement_test_env_agent(
                 run_adversarial_battery,
                 report_to_dict,
             )
+            from puzzleeval.tool_plugins import (
+                find_plugins_for_input_type, find_plugins_for_output_type,
+            )
+
+            def _provisions_remote_session(test_cases) -> bool:
+                """Check whether ANY test case routes to a plugin that
+                provisions a billable provider session per harness call.
+
+                When True, the adversarial verifier skips the stateless
+                idempotency + concurrency probes (those probes assume
+                stateless single-call semantics; for stateful-session
+                harnesses they create N billable provider sessions and
+                hit rate limits).
+                """
+                for tc in test_cases:
+                    plugins = (
+                        find_plugins_for_input_type(tc.input_type)
+                        + find_plugins_for_output_type(tc.output_type)
+                    )
+                    for plugin in plugins:
+                        if plugin.capabilities().provisions_remote_session_per_call:
+                            return True
+                return False
+
+            provisions_remote_session = _provisions_remote_session(test_cases)
+
             for h in list(harnesses_with_sandboxes):
                 # Use the first test case's adapted input as the probe basis;
                 # falls back to a minimal payload if no test cases match.
@@ -3529,6 +3599,7 @@ def run_implement_test_env_agent(
                         sandbox_dir=Path(h.harness_dir),
                         sample_input=sample,
                         credentials=creds,
+                        provisions_remote_session_per_call=provisions_remote_session,
                     )
                     h.adversarial_report = report_to_dict(report)
                     if not report.harness_ready:

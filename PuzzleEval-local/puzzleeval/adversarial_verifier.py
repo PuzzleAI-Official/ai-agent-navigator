@@ -236,7 +236,7 @@ def _probe_empty_input(sandbox_dir: Path, sample_input: dict[str, Any], creds) -
         label="empty_input",
         passed=passed,
         outcome=outcome,
-        detail=_summarize(parsed),
+        detail=_summarize(parsed, sandbox_dir),
         latency_ms=parsed.get("duration_ms", 0.0),
         raw=parsed,
     )
@@ -269,7 +269,7 @@ def _probe_max_input(sandbox_dir: Path, sample_input: dict[str, Any], creds) -> 
         label="max_input",
         passed=passed,
         outcome=outcome,
-        detail=_summarize(parsed),
+        detail=_summarize(parsed, sandbox_dir),
         latency_ms=parsed.get("duration_ms", 0.0),
         raw=parsed,
     )
@@ -300,7 +300,7 @@ def _probe_malformed(sandbox_dir: Path, sample_input: dict[str, Any], creds) -> 
         label="malformed_input",
         passed=passed,
         outcome=outcome,
-        detail=_summarize(parsed),
+        detail=_summarize(parsed, sandbox_dir),
         latency_ms=parsed.get("duration_ms", 0.0),
         raw=parsed,
     )
@@ -467,12 +467,25 @@ def run_adversarial_battery(
     sample_input: dict[str, Any],
     credentials: dict[str, str] | None,
     enabled_probes: list[str] | None = None,
+    *,
+    provisions_remote_session_per_call: bool = False,
 ) -> AdversarialReport:
     """Run all enabled probes against the harness in ``sandbox_dir``.
 
     ``sample_input`` is a representative input dict to mutate per probe —
     typically the harness's smoke_test input or the first Agent 3 test
     case after adaptation.
+
+    ``provisions_remote_session_per_call`` (keyword-only): when True, skip
+    the ``idempotency`` and ``concurrency`` probes. These probes assume
+    stateless single-call semantics (same input → same output across
+    repeated/parallel calls). For harnesses that provision a billable
+    provider-side resource per call (ElevenLabs ConvAI agent, OpenAI
+    Realtime session, Twilio call), running those probes creates N
+    billable sessions in seconds and hits provider rate limits — the
+    exact failure mode that dropped ElevenLabs from test execution on
+    real-run trace 6e0c9563. Multi-turn coverage for these harnesses
+    comes from smoke_test + live_test which the builder writes.
 
     Returns ``AdversarialReport``. ``harness_ready`` is False when ANY
     probe crashed or showed silent_corruption; the production test runner
@@ -495,6 +508,25 @@ def run_adversarial_battery(
     selected = enabled_probes or list(all_probes.keys())
     report = AdversarialReport(harness_ready=True)
     start = time.perf_counter()
+
+    # Session-aware skip: harnesses that provision a billable provider-side
+    # resource per call cannot be stress-probed for stateless invariants.
+    # See docstring for full rationale; capability flag set by the plugin
+    # (e.g., voice_realtime). Surfaced as a warning in the report so the
+    # operator can audit the skip decision.
+    if provisions_remote_session_per_call:
+        skip = {"idempotency", "concurrency"}
+        skipped_in_set = [p for p in selected if p in skip]
+        if skipped_in_set:
+            selected = [p for p in selected if p not in skip]
+            report.warnings.append(
+                f"skipped probes {skipped_in_set} — harness provisions a "
+                f"billable provider session per call (per plugin capability "
+                f"`provisions_remote_session_per_call=True`). Stateless "
+                f"probes would create N billable sessions in seconds and "
+                f"hit provider rate limits. Multi-turn coverage comes from "
+                f"smoke_test + live_test which the builder writes."
+            )
 
     # ── Setup pre-check: venv sane enough to import the harness? ──
     ok, err = _precheck_sandbox_imports(sandbox_dir, credentials)
@@ -568,17 +600,54 @@ def report_to_dict(report: AdversarialReport) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def _summarize(parsed: dict[str, Any]) -> str:
+def _summarize(parsed: dict[str, Any], sandbox_dir: Path | None = None) -> str:
+    """Summarize one probe result for the report.
+
+    When the result indicates a crash or timeout AND ``sandbox_dir`` is
+    provided, append the last 10 events from ``harness_forensics.jsonl`` so
+    the operator (and Agent 5 on a re-spawn) can see exactly where the
+    harness got stuck. Without the forensics tail the report says
+    ``timeout:`` with no additional context — the exact failure mode that
+    wasted Agent 5's turn 11 on real-run trace 6e0c9563.
+    """
     if parsed.get("_invocation") in {"timeout", "subprocess_error"}:
-        return f"{parsed.get('_invocation')}: {parsed.get('error', '')[:200]}"
+        base = f"{parsed.get('_invocation')}: {parsed.get('error', '')[:200]}"
+        return base + _forensics_tail_suffix(sandbox_dir)
     if not parsed.get("_subprocess_ok", True):
-        return f"crash: {parsed.get('error_type', 'Unknown')}: {parsed.get('error', '')[:200]}"
+        base = (
+            f"crash: {parsed.get('error_type', 'Unknown')}: "
+            f"{parsed.get('error', '')[:200]}"
+        )
+        return base + _forensics_tail_suffix(sandbox_dir)
     result = parsed.get("result")
     if isinstance(result, dict):
         ok = result.get("success")
         err = (result.get("error") or "")[:200]
         return f"success={ok}, error={err}" if err else f"success={ok}"
     return f"non-dict result: {str(result)[:200]}"
+
+
+def _forensics_tail_suffix(sandbox_dir: Path | None, n: int = 10) -> str:
+    """Read the last N events from harness_forensics.jsonl and format as suffix.
+
+    Returns an empty string when sandbox_dir is None, the file doesn't exist,
+    or reading fails — never raises. The suffix is the single highest-leverage
+    debugging signal in the entire failure pipeline: when the harness hangs,
+    these events show exactly where it got stuck.
+    """
+    if sandbox_dir is None:
+        return ""
+    log_path = sandbox_dir / "harness_forensics.jsonl"
+    if not log_path.exists():
+        return ""
+    try:
+        lines = log_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return ""
+    if not lines:
+        return ""
+    tail = lines[-n:]
+    return f"\n  last {len(tail)} forensic events:\n    " + "\n    ".join(tail)
 
 
 __all__ = [

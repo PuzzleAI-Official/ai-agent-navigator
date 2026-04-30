@@ -450,8 +450,39 @@ AGENT5_MAX_BUDGET_PER_CANDIDATE = float(
 AGENT5_MAX_BUDGET_TOTAL = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_TOTAL", "20.0")
 )
+# Voice-modality build budget — voice harnesses are intrinsically harder than
+# REST (multi-turn WebSocket state, async events, real-time TTS/STT) and need
+# more headroom. Both turn cap AND dollar budget bumped together so voice
+# builds don't quietly become expensive (one without the other would let cost
+# climb past the operator's expectation). Detected via VOICE_MODALITIES from
+# `playbooks.py` at build time. Per-modality logic in build_loop is the
+# documented exception to AD-001/AD-003 because budget is meta-control over
+# the agent itself, not modality-specific behavior.
+AGENT5_MAX_TURNS_VOICE = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_TURNS_VOICE", "65"))
+AGENT5_MAX_BUDGET_PER_CANDIDATE_VOICE = float(
+    os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_PER_CANDIDATE_VOICE", "5.0")
+)
 AGENT5_MAX_PARALLEL = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_PARALLEL", "5"))
 AGENT5_CODE_TIMEOUT = int(os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT", "120"))
+
+# Harness forensics layer — observability for Agent-5-built harnesses.
+# `_forensics.py` is auto-injected into every sandbox; harnesses import it
+# for `log()` + `traced_op()` + canonical event taxonomy. The semantic
+# verification gate (verify_forensics_coverage in agent5/verification.py)
+# enforces that harnesses (a) import _forensics first, (b) wrap SDK calls
+# in traced_op, (c) instrument session/stream lifecycle for streaming
+# harnesses. Soft-by-default per AD-007.
+GATE_FORENSICS_COVERAGE_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_FORENSICS_COVERAGE", "1") != "0"
+)
+# Stack-dump-on-hang inside the harness shim. faulthandler.dump_traceback_later
+# fires after this many seconds with no progress on any thread, printing the
+# full traceback to stderr. Set to 0 to disable. Default 45s catches genuine
+# hangs without false alarms on legitimate slow operations (e.g. provider
+# rate limits + retry).
+HARNESS_FAULTHANDLER_TIMEOUT = int(
+    os.environ.get("PUZZLEEVAL_HARNESS_FAULTHANDLER_TIMEOUT", "45")
+)
 AGENT5_MAX_OUTPUT_TOKENS = int(
     # 24K — raised from 16K after a real-run trace (71734f9d) showed
     # Turn 0 of ElevenLabs hitting stop_reason=max_tokens even with

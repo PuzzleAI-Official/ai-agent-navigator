@@ -352,12 +352,18 @@ def build_single_harness(
     # finished loading, so these imports resolve cleanly.
     from puzzleeval.config import (
         AGENT5_BUILDER_MODEL,
+        AGENT5_MAX_BUDGET_PER_CANDIDATE,
+        AGENT5_MAX_BUDGET_PER_CANDIDATE_VOICE,
         AGENT5_MAX_OUTPUT_TOKENS,
         AGENT5_MAX_TURNS,
+        AGENT5_MAX_TURNS_VOICE,
         AGENT5_MAX_VERIFICATION_RETRIES,
         ENABLE_FETCH_FALLBACK,
+        GATE_FORENSICS_COVERAGE_ENABLED,
         RESEARCH_MODEL,
     )
+    from puzzleeval.agents.agent5.playbooks import VOICE_MODALITIES
+    from puzzleeval.agents.agent5.verification import verify_forensics_coverage
     from puzzleeval.agents.implement_test_env import (
         ALL_TOOLS,
         BUILDER_SYSTEM_PROMPT,
@@ -549,9 +555,36 @@ def build_single_harness(
     # ever producing a final verdict. Fired once per candidate.
     turn_budget_nudge_sent = False
 
-    while turn < AGENT5_MAX_TURNS:
+    # Voice harnesses get a higher build budget. Voice is intrinsically
+    # harder than REST (multi-turn WebSocket state, async events, real-time
+    # TTS/STT) — real-run trace 6e0c9563 had ElevenLabs abandon a deeper
+    # fix at turn 13/40 because the default 40-turn cap ran out before debug
+    # iterations completed. Per-modality logic in build_loop is the
+    # documented exception to AD-001/AD-003 because budget is meta-control
+    # over the agent itself, not modality-specific behavior.
+    is_voice_build = any(
+        (getattr(tc, "input_type", None) in VOICE_MODALITIES)
+        or (getattr(tc, "output_type", None) in VOICE_MODALITIES)
+        for tc in staged_test_cases
+    )
+    effective_max_turns = AGENT5_MAX_TURNS_VOICE if is_voice_build else AGENT5_MAX_TURNS
+    if is_voice_build and effective_max_turns != AGENT5_MAX_TURNS:
+        logger.info(
+            "Voice-modality build: using effective_max_turns=%d (default %d) "
+            "for %s",
+            effective_max_turns, AGENT5_MAX_TURNS, candidate.name,
+            extra={
+                "operation": "voice_build_budget_applied",
+                "trace_id": trace_id,
+                "candidate_name": candidate.name,
+                "effective_max_turns": effective_max_turns,
+                "default_max_turns": AGENT5_MAX_TURNS,
+            },
+        )
+
+    while turn < effective_max_turns:
         # Turn-budget nudge — fire once when <=3 turns remain.
-        turns_remaining = AGENT5_MAX_TURNS - turn
+        turns_remaining = effective_max_turns - turn
         if (
             turns_remaining <= 3
             and not turn_budget_nudge_sent
@@ -562,7 +595,7 @@ def build_single_harness(
                 "role": "user",
                 "content": (
                     f"TURN BUDGET ADVISORY: {turns_remaining} turns remaining "
-                    f"(of {AGENT5_MAX_TURNS}). You must now EITHER: (a) "
+                    f"(of {effective_max_turns}). You must now EITHER: (a) "
                     "finish the current attempt + signal HARNESS_COMPLETE "
                     "if the smoke test + live test will pass, OR (b) signal "
                     "HARNESS_FAILED with a specific failure_reason. Do NOT "
@@ -943,6 +976,32 @@ def build_single_harness(
                     issues = _run_verification_checks(
                         sandbox_dir, candidate, credentials, logger, trace_id,
                     )
+                    # Forensics-coverage gate (semantic AST check):
+                    # enforce the OBSERVABILITY CONTRACT — harness must
+                    # import _forensics first, wrap SDK calls in
+                    # traced_op, and instrument session/stream lifecycle
+                    # for streaming harnesses. WARN-tier per AD-007:
+                    # one repair-request retry, then the next iteration
+                    # accepts whatever the builder produced (gate_fired
+                    # telemetry would surface false positives across
+                    # release cycles). Bypass via env var
+                    # PUZZLEEVAL_GATE_FORENSICS_COVERAGE=0.
+                    if not issues and GATE_FORENSICS_COVERAGE_ENABLED:
+                        forensics_issue = verify_forensics_coverage(sandbox_dir)
+                        if forensics_issue is not None:
+                            logger.warning(
+                                "gate_fired",
+                                extra={
+                                    "operation": "gate_fired",
+                                    "gate_name": "forensics_coverage",
+                                    "severity": "WARN",
+                                    "rejected": True,
+                                    "trace_id": trace_id,
+                                    "candidate_name": candidate.name,
+                                    "attempt": verification_attempts + 1,
+                                },
+                            )
+                            issues = forensics_issue
                     if issues:
                         logger.info(f"Verification issues for {candidate.name}, retry {verification_attempts + 1}", extra={
                             "operation": "verification_gate_fail",

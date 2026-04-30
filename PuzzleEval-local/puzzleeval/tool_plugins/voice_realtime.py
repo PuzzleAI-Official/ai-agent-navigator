@@ -433,6 +433,12 @@ class VoiceRealtimePlugin(ToolPlugin):
             # passes a runner whenever it's available — the plugin ignores
             # it for single-turn tests. Same pattern as conversation_simulator.
             requires_harness_runner=True,
+            # Voice harnesses provision a billable provider session per
+            # call (ElevenLabs ConvAI agent, OpenAI Realtime session,
+            # Twilio call, etc.). The adversarial verifier reads this
+            # flag to skip stateless probes that would create N billable
+            # sessions in seconds and hit provider rate limits.
+            provisions_remote_session_per_call=True,
             notes=(
                 "Local audio-loopback for voice/phone agents. Single-turn: "
                 "serves a caller utterance, captures one response. Multi-turn: "

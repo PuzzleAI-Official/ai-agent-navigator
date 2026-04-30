@@ -131,35 +131,92 @@ TARGETED_RESEARCH_SYSTEM = (
     "Synthesize findings. If the provider migrated (new domain / v2 API), "
     "report BOTH old and new endpoints explicitly.\n\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "HONEST OUTPUT FORMAT (both regimes):\n"
+    "HONEST 3-TIER OUTPUT FORMAT (both regimes):\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "If the answer was FOUND:\n"
+    "Pick exactly ONE of three tiers based on what your research found.\n"
+    "The tier names are load-bearing — the builder routes on them.\n\n"
+    "TIER 1 — `ANSWER`: you found a confident, source-backed answer.\n"
     "  `ANSWER: <direct actionable answer — specific flag, endpoint, "
     "fix, code snippet if relevant>`\n"
     "  `SOURCE: <URL — prefer official docs; cite multiple if cross-"
     "referenced>`\n"
     "  `CONFIDENCE: high|medium (based on source authority + specificity)`\n\n"
-    "If the answer was NOT found:\n"
-    "  `ANSWER: NOT FOUND — searched: <queries tried>; checked: "
+    "TIER 2 — `REASONABLE_GUESS`: you couldn't find an authoritative "
+    "answer but the context (api_spec, recent error, similar APIs) "
+    "supports a likely value. Builder treats this as 'code with this; "
+    "live errors confirm or refute.' Honest middle ground between a "
+    "fabricated ANSWER and a giving-up NOT_FOUND.\n"
+    "  `REASONABLE_GUESS: <likely value with reasoning>`\n"
+    "  `BASIS: <what context supports this — analogous API, error "
+    "pattern, partial doc fragment>`\n"
+    "  `CONFIDENCE: low (unverified — builder should validate "
+    "empirically)`\n\n"
+    "TIER 3 — `NOT_FOUND`: genuinely uncertain. No confident answer, "
+    "no defensible guess. Builder will leave the field as TODO and "
+    "let live errors guide.\n"
+    "  `NOT_FOUND: searched: <queries tried>; checked: "
     "<sources checked>`\n"
-    "  `HYPOTHESIS: <best guess from context, explicitly labeled as "
-    "unverified>` (only if you have something grounded; otherwise omit)\n"
-    "  `RECOMMENDED NEXT STEP: <what the builder should try empirically, "
-    "e.g., 'probe the WebSocket close code and check the frame payload'>`\n"
-    "  `CONFIDENCE: low`\n\n"
+    "  `RECOMMENDED NEXT STEP: <what the builder should try "
+    "empirically, e.g., 'probe the WebSocket close code and check the "
+    "frame payload'>`\n"
+    "  `CONFIDENCE: none`\n\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
     "CRITICAL RULES:\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "1. NEVER fabricate a confident-sounding answer. Hallucinating an "
-    "endpoint URL or config flag is WORSE than saying 'NOT FOUND'. The "
-    "builder will waste turns acting on your wrong answer.\n"
-    "2. If you find conflicting info, prefer the most recent source "
-    "(2025-2026) and report the conflict.\n"
-    "3. If the company rebranded or migrated, report BOTH old and new "
+    "1. NEVER fabricate a confident-sounding answer in TIER 1. If "
+    "you're uncertain, use TIER 2 (REASONABLE_GUESS) — that's exactly "
+    "what it's for. Hallucinating an endpoint URL or config flag with "
+    "TIER 1 confidence is WORSE than admitting uncertainty: the "
+    "builder will waste turns acting on a wrong answer believed to be "
+    "authoritative.\n"
+    "2. The TIER 2 path lets you contribute partial information when "
+    "research finds context but no authoritative confirmation. Use it "
+    "when you have a defensible reasoning chain; don't downgrade to "
+    "TIER 3 if you actually have signal.\n"
+    "3. If you find conflicting info, prefer the most recent source "
+    "(2025-2026) and report the conflict in your TIER 1 answer.\n"
+    "4. If the company rebranded or migrated, report BOTH old and new "
     "endpoints — builder may have credentials for only one.\n"
-    "4. Keep output concise — builder has limited context. 300-800 words "
-    "ideal. Front-load the ANSWER line; supporting detail below."
+    "5. Keep output concise — builder has limited context. 300-800 "
+    "words ideal. Front-load the tier-prefixed first line; supporting "
+    "detail below."
 )
+
+
+# ---------------------------------------------------------------------------
+# Phase 2C.4 — output-tier classifier (Codex C8 prep for G-Aux2 promotion)
+# ---------------------------------------------------------------------------
+
+# The three tiers the prompt teaches. Builders/callers use the classifier
+# below to route based on which tier the sub-agent emitted. Currently
+# advisory; future G-Aux2 promotion would attach Pydantic-schema validation.
+
+RESEARCH_SUBAGENT_TIERS: tuple[str, ...] = ("ANSWER", "REASONABLE_GUESS", "NOT_FOUND")
+
+
+def classify_research_output(text: str) -> str:
+    """Classify a research-subagent response into one of the three tiers.
+
+    Returns one of the strings in RESEARCH_SUBAGENT_TIERS or "UNKNOWN"
+    if no tier prefix is detectable. The classifier is permissive about
+    surrounding whitespace + colon-vs-no-colon to handle minor LLM
+    formatting variation.
+
+    Looks for the FIRST line that begins (after stripping) with one of
+    the tier names. ANSWER is the most specific (not REASONABLE_GUESS
+    nor NOT_FOUND), so we check in order: REASONABLE_GUESS first
+    (longest), then NOT_FOUND, then ANSWER.
+    """
+    if not text:
+        return "UNKNOWN"
+    for line in text.splitlines():
+        stripped = line.lstrip().lstrip("`").lstrip("*").lstrip()
+        # Order matters: REASONABLE_GUESS must be checked before ANSWER
+        # (which is a substring of nothing here, but defensive ordering).
+        for tier in ("REASONABLE_GUESS", "NOT_FOUND", "ANSWER"):
+            if stripped.startswith(tier + ":") or stripped.startswith(tier + " "):
+                return tier
+    return "UNKNOWN"
 
 
 # ---------------------------------------------------------------------------
@@ -286,7 +343,9 @@ def run_targeted_research(
 
 
 __all__ = [
+    "RESEARCH_SUBAGENT_TIERS",
     "TARGETED_RESEARCH_SYSTEM",
     "ask_research_template_adherence",
+    "classify_research_output",
     "run_targeted_research",
 ]

@@ -5326,12 +5326,19 @@ class TestAskResearchContextInheritance:
             )
         # Must also teach the honest-failure output format so
         # exploratory mode doesn't fabricate an answer when
-        # research genuinely turned up nothing.
-        assert "NOT FOUND" in TARGETED_RESEARCH_SYSTEM, (
-            "Prompt must explicitly authorize 'NOT FOUND' output "
-            "when research turns up nothing. Without it, the "
-            "sub-agent hallucinates confident-sounding answers to "
-            "avoid looking useless — exactly what we don't want."
+        # research genuinely turned up nothing. Phase 2C.4 promoted
+        # the contract from a 2-tier (ANSWER / NOT FOUND) format to
+        # a 3-tier output schema (ANSWER / REASONABLE_GUESS /
+        # NOT_FOUND). Either canonicalization satisfies the
+        # honest-failure contract.
+        assert (
+            "NOT FOUND" in TARGETED_RESEARCH_SYSTEM
+            or "NOT_FOUND" in TARGETED_RESEARCH_SYSTEM
+        ), (
+            "Prompt must explicitly authorize 'NOT_FOUND' (or legacy "
+            "'NOT FOUND') output when research turns up nothing. "
+            "Without it, the sub-agent hallucinates confident-sounding "
+            "answers to avoid looking useless."
         )
 
     def test_tool_description_repositions_from_last_resort(self):

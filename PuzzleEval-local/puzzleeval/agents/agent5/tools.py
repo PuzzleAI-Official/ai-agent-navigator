@@ -25,7 +25,74 @@ _logger = logging.getLogger(__name__)
 
 
 CUSTOM_TOOL_NAMES = {"write_file", "patch_file", "run_code", "read_file", "ask_research", "read_forensics"}
-ALLOWED_EXTENSIONS = {".py", ".txt", ".json", ".cfg", ".toml", ".sh", ".yaml", ".yml"}
+ALLOWED_EXTENSIONS = {".py", ".txt", ".json", ".cfg", ".toml", ".sh", ".yaml", ".yml", ".md"}
+
+
+# Subdirectories the agent may read from + write into (a-la-carte allowlist
+# rather than full subdir support — keep blast radius small). Today the
+# only entry is ``_agent_state/`` for the autonomy artifacts (PR 1 of the
+# Goal/Planning/State/Reflection plan). New entries must justify why
+# subdir access is required vs sandbox-root.
+_ALLOWED_SUBDIRS: frozenset[str] = frozenset({"_agent_state"})
+
+
+# Files inside ``_agent_state/`` that are ORCHESTRATOR-OWNED and must not
+# be writable by the agent. ``write_file`` rejects with a clear error
+# message; ``patch_file`` rejects identically. Reading these is allowed.
+ORCHESTRATOR_OWNED_ARTIFACTS: frozenset[str] = frozenset({
+    "_agent_state/objective.md",
+    "_agent_state/runtime_state.json",
+})
+
+
+def _resolve_sandbox_filename(raw_filename: str) -> str | None:
+    """Return the sandbox-relative path for a tool argument.
+
+    Handles two cases:
+      * Plain filename (no directory) → returned as-is (the historical
+        behavior of ``Path(raw_filename).name`` with no information lost
+        when the input was already a bare filename).
+      * Path with one allowlisted subdirectory prefix (e.g.
+        ``_agent_state/build_plan.md``) → returned as a forward-slashed
+        relative path so callers can use it for both filesystem ops and
+        log fields.
+
+    Returns None when the input has a directory prefix that is NOT on
+    the allowlist (caller produces a clear error). Empty strings also
+    yield None.
+    """
+    raw_filename = (raw_filename or "").strip()
+    if not raw_filename:
+        return None
+
+    # Reject absolute paths early. Check before any normalization so an
+    # input like "/etc/passwd" or "C:\\foo" doesn't slip through.
+    if raw_filename.startswith(("/", "\\")) or (len(raw_filename) > 2 and raw_filename[1] == ":"):
+        return None
+
+    # Normalize separators (Windows + POSIX) and strip a SINGLE leading
+    # "./" if present. We deliberately do NOT use ``Path.lstrip("./")``
+    # which would also munch a leading ".." (lstrip strips any of the
+    # given characters from the left, eating "../foo" → "foo").
+    normalized = raw_filename.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    parts = [p for p in normalized.split("/") if p]
+    if not parts:
+        return None
+
+    # Reject ".." anywhere in the path (traversal).
+    if any(p == ".." for p in parts):
+        return None
+
+    if len(parts) == 1:
+        return parts[0]
+
+    if len(parts) == 2 and parts[0] in _ALLOWED_SUBDIRS:
+        return f"{parts[0]}/{parts[1]}"
+
+    # Multi-level paths or unknown subdirs are rejected.
+    return None
 
 
 def dispatch_tool(
@@ -145,9 +212,19 @@ def write_file(
     raw_filename = tool_input.get("filename", "")
     content = tool_input.get("content", "")
 
-    filename = Path(raw_filename).name
-    if not filename:
-        return "Error: empty filename"
+    relative_path = _resolve_sandbox_filename(raw_filename)
+    if not relative_path:
+        return (
+            "Error: invalid filename. Use a bare filename (e.g. "
+            "'harness.py') OR a path inside an allowlisted subdirectory "
+            f"({sorted(_ALLOWED_SUBDIRS)}, e.g. '_agent_state/build_plan.md'). "
+            "Absolute paths and `..` traversal are rejected."
+        )
+
+    # The base filename (without subdir prefix) drives gate B1/B3 lookups —
+    # those gates were designed against bare-name semantics; honoring them
+    # uniformly keeps the rejection messages stable when the prefix differs.
+    filename = Path(relative_path).name
 
     suffix = Path(filename).suffix.lower()
     if suffix not in allowed_extensions:
@@ -156,11 +233,33 @@ def write_file(
             f"Use one of: {sorted(allowed_extensions)}"
         )
 
+    # ── Orchestrator-owned artifact protection ────────────────────────
+    # Files inside _agent_state/ that the orchestrator owns are write-
+    # protected. Read access is allowed (read_file works fine); writes
+    # are rejected so the agent's mental model can't corrupt the
+    # authoritative state the orchestrator maintains.
+    if relative_path in ORCHESTRATOR_OWNED_ARTIFACTS:
+        _log_gate_fired(
+            gate_name="orchestrator_owned_artifact",
+            gate_filename=relative_path,
+            severity="REJECT_TOOL_CALL",
+            rejected=True,
+            phase_state=phase_state,
+        )
+        return (
+            f"Error: '{relative_path}' is orchestrator-owned and cannot be "
+            f"modified by the agent. The orchestrator updates this file "
+            f"directly each turn. You may READ it via read_file to ground "
+            f"your mental model, but you cannot WRITE it. Agent-writable "
+            f"artifacts in _agent_state/: build_plan.md, "
+            f"agent_observations.json, reflection_phase_<n>.md."
+        )
+
     # ── Gate B1: forbidden meta-filenames ─────────────────────────────
     if cfg.GATE_FORBIDDEN_FILENAMES_ENABLED and is_forbidden_meta_filename(filename):
         _log_gate_fired(
             gate_name="forbidden_meta_filename",
-            gate_filename=filename,
+            gate_filename=relative_path,
             severity="REJECT_TOOL_CALL",
             rejected=True,
             phase_state=phase_state,
@@ -180,7 +279,7 @@ def write_file(
         if is_phase1_scaffold_violation(filename, api_spec_written=api_spec_written):
             _log_gate_fired(
                 gate_name="phase1_scaffold_block",
-                gate_filename=filename,
+                gate_filename=relative_path,
                 severity="REJECT_TOOL_CALL",
                 rejected=True,
                 phase_state=phase_state,
@@ -202,23 +301,27 @@ def write_file(
         if not harness_exists:
             _log_gate_fired(
                 gate_name="introspection_warn",
-                gate_filename=filename,
+                gate_filename=relative_path,
                 severity="WARN",
                 rejected=False,
                 phase_state=phase_state,
             )
 
-    target = sandbox_dir / filename
+    target = sandbox_dir / relative_path
     try:
+        # Allowlisted subdirs may not exist yet (sandbox.stage_agent_state
+        # creates _agent_state/ at setup, but defense-in-depth: ensure the
+        # parent exists before writing).
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         if read_state is not None:
             try:
-                read_state[filename] = target.stat().st_mtime
+                read_state[relative_path] = target.stat().st_mtime
             except OSError:
                 pass
-        return f"Written {len(content)} chars to {filename}"
+        return f"Written {len(content)} chars to {relative_path}"
     except OSError as exc:
-        return f"Error writing {filename}: {exc}"
+        return f"Error writing {relative_path}: {exc}"
 
 
 def patch_file(
@@ -233,20 +336,32 @@ def patch_file(
     old_string = tool_input.get("old_string", "")
     new_string = tool_input.get("new_string", "")
 
-    filename = Path(raw_filename).name
-    if not filename:
-        return "Error: empty filename"
+    relative_path = _resolve_sandbox_filename(raw_filename)
+    if not relative_path:
+        return (
+            "Error: invalid filename. Use a bare filename or a path inside "
+            f"an allowlisted subdirectory ({sorted(_ALLOWED_SUBDIRS)})."
+        )
 
-    target = sandbox_dir / filename
+    # Orchestrator-owned artifact protection (parallel to write_file).
+    if relative_path in ORCHESTRATOR_OWNED_ARTIFACTS:
+        return (
+            f"Error: '{relative_path}' is orchestrator-owned and cannot be "
+            f"patched by the agent. Read it freely via read_file; the "
+            f"orchestrator updates it each turn."
+        )
+
+    filename = Path(relative_path).name
+    target = sandbox_dir / relative_path
     if not target.exists():
-        return f"Error: '{filename}' does not exist in sandbox. Use write_file to create it first."
+        return f"Error: '{relative_path}' does not exist in sandbox. Use write_file to create it first."
 
     if read_state is not None:
         try:
             current_mtime = target.stat().st_mtime
         except OSError:
             current_mtime = None
-        last_read = read_state.get(filename)
+        last_read = read_state.get(relative_path)
         if last_read is None:
             return (
                 f"STOP: '{filename}' has not been read yet in this build. "
@@ -309,7 +424,7 @@ def patch_file(
         target.write_text(new_content, encoding="utf-8")
         if read_state is not None:
             try:
-                read_state[filename] = target.stat().st_mtime
+                read_state[relative_path] = target.stat().st_mtime
             except OSError:
                 pass
         return f"Patched {filename}: replaced {len(old_string)} chars with {len(new_string)} chars"
@@ -429,29 +544,45 @@ def read_file(
     *,
     read_state: dict[str, float] | None = None,
 ) -> str:
-    """Read a file from the sandbox directory."""
+    """Read a file from the sandbox directory.
+
+    Supports both bare filenames (``harness.py``) and paths inside an
+    allowlisted subdirectory (``_agent_state/objective.md``). Other
+    directory prefixes are rejected.
+    """
 
     raw_filename = tool_input.get("filename", "")
-    filename = Path(raw_filename).name
-    if not filename:
-        return "Error: empty filename"
+    relative_path = _resolve_sandbox_filename(raw_filename)
+    if not relative_path:
+        return (
+            "Error: invalid filename. Use a bare filename or a path inside "
+            f"an allowlisted subdirectory ({sorted(_ALLOWED_SUBDIRS)})."
+        )
 
-    target = sandbox_dir / filename
+    target = sandbox_dir / relative_path
     if not target.exists():
-        return f"Error: '{filename}' does not exist in sandbox"
+        return f"Error: '{relative_path}' does not exist in sandbox"
 
     try:
+        current_mtime = target.stat().st_mtime
         content = target.read_text(encoding="utf-8")
         if len(content) > 10000:
             content = content[:10000] + "\n... (content truncated at 10000 chars)"
         if read_state is not None:
+            last_read = read_state.get(relative_path)
             try:
-                read_state[filename] = target.stat().st_mtime
+                read_state[relative_path] = current_mtime
             except OSError:
                 pass
+            if last_read is not None and last_read == current_mtime:
+                content = (
+                    f"NOTE: {relative_path} is unchanged since the last read "
+                    f"in this build. Avoid re-reading it again unless another "
+                    f"tool modifies it.\n\n{content}"
+                )
         return content
     except OSError as exc:
-        return f"Error reading {filename}: {exc}"
+        return f"Error reading {relative_path}: {exc}"
 
 
 def read_forensics(

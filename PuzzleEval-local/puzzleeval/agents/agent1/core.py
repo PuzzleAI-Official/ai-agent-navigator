@@ -237,16 +237,29 @@ def run_user_understanding_agent(input_data: Agent1Input) -> Agent1Result:
     # `high` (or whatever PUZZLEEVAL_EFFORT is set to). Set
     # `PUZZLEEVAL_EFFORT=xhigh` for the deepest planning on Opus 4.7.
     #
-    # The strict-grammar path (messages.parse + output_format) compiles the
-    # Pydantic schema into a token-level constraint grammar — fast and
-    # guaranteed-valid, but Anthropic enforces a max grammar size. Agent1Result
-    # has 9 nested types and 60+ fields; once Phase 9's TestPlan is included
-    # the compiled grammar exceeds the API limit. _call_with_fallback() runs
-    # the strict path first and, on the specific 400 "compiled grammar too
-    # large" error, falls back to messages.create() with a NON-strict tool
-    # whose input is the same JSON Schema. The model emits JSON freely; we
-    # validate the JSON through the Pydantic model post-hoc. Same Pydantic
-    # output object reaches the rest of the pipeline either way.
+    # Agent1Result reliably overflows Anthropic's strict-grammar budget
+    # (9 nested types, 60+ fields, plus Phase 9's TestPlan). Every strict
+    # attempt 400s with "compiled grammar is too large" before falling
+    # back to non-strict — that wastes one full API round-trip per Agent 1
+    # call. In conversational mode the user pays this cost on EVERY
+    # clarifying-question turn, which is the dominant source of perceived
+    # Agent 1 latency.
+    #
+    # Skip the doomed strict attempt by passing ``prefer_non_strict=True``.
+    # Same pattern Agent 2 + Agent 4 use for the same reason. The
+    # non-strict tool path produces an identical shim object — model
+    # emits JSON freely, ``parse_with_fallback`` validates it through the
+    # same Pydantic model, downstream pipeline doesn't branch.
+    #
+    # Cost trade: we lose strict's free correctness guarantee. Sonnet's
+    # tool-use JSON is reliable enough that the Pydantic post-validation
+    # almost never trips; when it does, the same retry path catches it.
+    # Net win: ~20-60s saved per Agent 1 turn.
+    #
+    # ``prefer_non_strict=True`` is incompatible with adaptive thinking
+    # and ``output_config`` (strict-mode-only fields). The non-strict
+    # path drops them automatically — we can still pass them in ``extra``
+    # because parse_with_fallback strips them on the non-strict branch.
     start_time = time.time()
     _ocfg = output_config_for_request()
     _extra: dict[str, Any] = {"thinking": {"type": "adaptive"}}
@@ -265,6 +278,7 @@ def run_user_understanding_agent(input_data: Agent1Input) -> Agent1Result:
             output_format=Agent1Result,
             extra=_extra,
             trace_id=input_data.trace_id,
+            prefer_non_strict=True,
         )
 
     # [error handling] Different error types for different retry strategies

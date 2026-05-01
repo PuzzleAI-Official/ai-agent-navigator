@@ -10,9 +10,10 @@ Architecture:
   - `wait_for_pending_merges(timeout_per_merge_s=60)` joins all pending
     merges at end-of-run with per-merge timeout. Hung merges are
     abandoned (per-turn audio still on disk, UI degrades gracefully).
-  - Agent 5 calls `wait_for_pending_merges()` after `_execute_all_tests`
-    and patches the resulting `merged_audio_path` + role-'conversation'
-    audio entry into the matching test result by `session_token`.
+  - Agent 5 calls `wait_for_pending_merges()` after all candidate
+    evaluation futures complete and patches the resulting
+    `merged_audio_path` + role-'conversation' audio entry into the
+    matching test result by `session_token`.
 
 These tests lock:
   1. Submit returns a Future immediately (worker thread doesn't block
@@ -400,24 +401,22 @@ class TestSourceGrepGuards:
             "submit_merge_in_background (not synchronous merge)"
         )
 
-    def test_agent_5_calls_wait_for_pending_merges_after_execute(self):
-        """Agent 5 must call wait_for_pending_merges() after
-        _execute_all_tests returns so per-test results get patched
-        with merged_audio_path."""
+    def test_agent_5_calls_wait_for_pending_merges_after_candidate_futures(self):
+        """Agent 5 must join pending merges after all candidate futures.
+
+        The merge queue is process-wide, so joining inside one candidate thread
+        can consume another candidate's merge before its TestCaseResult is
+        patched.
+        """
         src = (
             Path(__file__).resolve().parents[1] / "puzzleeval" /
             "agents" / "implement_test_env.py"
         ).read_text(encoding="utf-8")
-        # Find the _execute_all_tests assignment + wait call must
-        # appear within ~2000 chars after it
-        idx = src.find("raw_results = _execute_all_tests(")
-        assert idx != -1, "_execute_all_tests call site moved"
+        idx = src.find("for future in as_completed(futures):")
+        assert idx != -1, "candidate future collection moved"
         nearby = src[idx:idx + 3000]
-        assert "wait_for_pending_merges" in nearby, (
-            "Agent 5 must call voice_plugin.wait_for_pending_merges() "
-            "after _execute_all_tests returns to patch merged_audio_path "
-            "into per-test results."
-        )
+        assert "_patch_merged_voice_audio" in nearby
+        assert "wait_for_pending_merges" in src[src.find("def _patch_merged_voice_audio"):src.find("# ----------------------------------------------------------------------------", src.find("def _patch_merged_voice_audio"))]
 
     def test_agent_5_patches_audio_paths_with_conversation_role(self):
         """The patched audio_paths must prepend the merged conversation
@@ -427,8 +426,8 @@ class TestSourceGrepGuards:
             Path(__file__).resolve().parents[1] / "puzzleeval" /
             "agents" / "implement_test_env.py"
         ).read_text(encoding="utf-8")
-        idx = src.find("wait_for_pending_merges")
+        idx = src.find("def _patch_merged_voice_audio")
         assert idx != -1
-        nearby = src[idx:idx + 2000]
+        nearby = src[idx:idx + 3000]
         assert '"role": "conversation"' in nearby
         assert "merged_audio_path" in nearby

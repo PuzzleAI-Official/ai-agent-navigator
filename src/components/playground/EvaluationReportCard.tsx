@@ -87,17 +87,30 @@ function AudioClip({
   );
 }
 
-function AudioPathsBlock({ paths }: { paths?: AudioPath[] }) {
-  if (!paths || paths.length === 0) return null;
+function AudioPathsBlock({
+  paths,
+  mergedAudioPath,
+}: {
+  paths?: AudioPath[];
+  mergedAudioPath?: string | null;
+}) {
+  const normalized = [...(paths ?? [])];
+  if (
+    mergedAudioPath &&
+    !normalized.some((p) => p.role === "conversation" && p.path === mergedAudioPath)
+  ) {
+    normalized.unshift({ role: "conversation", path: mergedAudioPath });
+  }
+  if (normalized.length === 0) return null;
   // Split: "conversation" role(s) render first and wide (the whole call
   // is what most users want to hear); per-turn caller/agent clips
   // render below at the normal compact size.
-  const featured = paths.filter((p) => p.role === "conversation");
-  const perTurn = paths.filter((p) => p.role !== "conversation");
+  const featured = normalized.filter((p) => p.role === "conversation");
+  const perTurn = normalized.filter((p) => p.role !== "conversation");
   return (
     <div className="mt-2 rounded border border-zinc-800 bg-zinc-900/40 p-2">
       <div className="text-[10px] uppercase tracking-wide text-zinc-500 mb-1">
-        Audio ({paths.length})
+        Audio ({normalized.length})
       </div>
       {featured.map((ap, i) => (
         <AudioClip key={`f${i}`} role={ap.role} path={ap.path} featured />
@@ -260,6 +273,9 @@ interface EvidenceRow {
   // Each path is absolute under runs/<trace_id>/harnesses/<slug>/voice/.
   // Playable via the /runs/{id}/audio?path=... endpoint.
   audio_paths?: AudioPath[];
+  // Stable pointer to the merged full-conversation recording. The backend
+  // also mirrors this as audio_paths[{ role: "conversation" }].
+  merged_audio_path?: string | null;
   // Rubric verdict from the agentic conversational eval path. Mirrors
   // RubricVerdict shape — see src/types/pipeline.ts. Null/undefined for
   // non-conversational tests and for scripted-mode conversations.
@@ -617,7 +633,10 @@ function CandidateRow({ c }: { c: CandidateReport }) {
                     {ev.reasoning_excerpt}
                   </div>
                 )}
-                <AudioPathsBlock paths={ev.audio_paths} />
+                <AudioPathsBlock
+                  paths={ev.audio_paths}
+                  mergedAudioPath={ev.merged_audio_path}
+                />
                 <RubricBreakdownBlock
                   verdict={ev.rubric_verdict}
                   transcript={ev.transcript}
@@ -643,7 +662,10 @@ function CandidateRow({ c }: { c: CandidateReport }) {
                     {ev.reasoning_excerpt}
                   </div>
                 )}
-                <AudioPathsBlock paths={ev.audio_paths} />
+                <AudioPathsBlock
+                  paths={ev.audio_paths}
+                  mergedAudioPath={ev.merged_audio_path}
+                />
                 <RubricBreakdownBlock
                   verdict={ev.rubric_verdict}
                   transcript={ev.transcript}

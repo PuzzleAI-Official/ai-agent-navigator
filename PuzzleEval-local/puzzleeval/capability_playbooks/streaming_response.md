@@ -58,9 +58,11 @@ answers, tests fail randomly.
 def collect_response(connection, error_timeout_s):
     """Collect events until completion signal OR extended idle.
 
-    Reset the timeout on EVERY received event/message. Only exit when
-    no events arrive for `error_timeout_s` (= done OR errored) OR when
-    an explicit completion event lands.
+    Reset the timeout on every OUTPUT-BEARING event/message. Transport
+    keepalives (ping/pong/heartbeat/metadata-only events) do not prove
+    the agent is still answering and must not keep the collector alive
+    forever. Exit when no meaningful output arrives for `error_timeout_s`
+    OR when an explicit completion event lands.
     """
     last_event_at = time.time()
     collected = []
@@ -77,9 +79,19 @@ def collect_response(connection, error_timeout_s):
             process(event)
             break
         process(event)
-        last_event_at = time.time()  # ← KEY: reset on every event
+        if is_output_bearing_event(event):
+            last_event_at = time.time()  # reset on real response progress
     return collected
 ```
+
+### Keepalives are not response progress
+
+WebSocket APIs often send `ping`, `pong`, `heartbeat`, or metadata events
+while the agent is silent. A harness should respond to keepalives if the
+protocol requires it, but should not reset the response idle timer for
+keepalive-only traffic. Otherwise a dead or non-answering stream can run
+until the hard timeout, and the forensic log shows a long ping/pong tail
+instead of the real failure.
 
 ### Sizing `error_timeout_s` (apply judgment based on the API)
 

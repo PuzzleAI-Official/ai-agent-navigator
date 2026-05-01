@@ -362,8 +362,24 @@ def build_single_harness(
         GATE_FORENSICS_COVERAGE_ENABLED,
         RESEARCH_MODEL,
     )
+    from puzzleeval.agents.agent5.autonomy_directives import (
+        BUILD_PLAN_INIT_DIRECTIVE,
+        BUILD_PLAN_STALENESS_NUDGE,
+        EVENT_BUILD_PLAN_INIT_DIRECTIVE_FIRED,
+        EVENT_BUILD_PLAN_STALE_AT_TRIGGER,
+        EVENT_REFLECTION_PHASE_3_DIRECTIVE_FIRED,
+        REFLECTION_PHASE_3_DIRECTIVE,
+    )
+    from puzzleeval.agents.agent5.context_compaction import (
+        COMPACTION_EVENT_NAME,
+        compact_for_model_transition,
+    )
     from puzzleeval.agents.agent5.playbooks import VOICE_MODALITIES
-    from puzzleeval.agents.agent5.verification import verify_forensics_coverage
+    from puzzleeval.agents.agent5.runtime_state import update_runtime_state
+    from puzzleeval.agents.agent5.verification import (
+        verify_forensics_coverage,
+        verify_reflection_complete,
+    )
     from puzzleeval.agents.implement_test_env import (
         ALL_TOOLS,
         BUILDER_SYSTEM_PROMPT,
@@ -568,6 +584,10 @@ def build_single_harness(
         for tc in staged_test_cases
     )
     effective_max_turns = AGENT5_MAX_TURNS_VOICE if is_voice_build else AGENT5_MAX_TURNS
+    effective_max_budget_usd = (
+        AGENT5_MAX_BUDGET_PER_CANDIDATE_VOICE if is_voice_build
+        else AGENT5_MAX_BUDGET_PER_CANDIDATE
+    )
     if is_voice_build and effective_max_turns != AGENT5_MAX_TURNS:
         logger.info(
             "Voice-modality build: using effective_max_turns=%d (default %d) "
@@ -581,6 +601,56 @@ def build_single_harness(
                 "default_max_turns": AGENT5_MAX_TURNS,
             },
         )
+
+    # ── PR 1: stage autonomy artifacts (objective.md + runtime_state.json) ──
+    # See plan: Goal·Planning·State·Reflection. Orchestrator-owned files
+    # land in ``_agent_state/`` BEFORE turn 0 so the agent's first read
+    # has authoritative truth. Failure here is logged but doesn't abort
+    # the build — the legacy reactive path still works without these files.
+    from puzzleeval import config as _cfg
+    if _cfg.GATE_AUTONOMY_ARTIFACTS_ENABLED:
+        from puzzleeval.agents.agent5.playbooks import selected_playbook_ids
+        from puzzleeval.agents.agent5.sandbox import stage_agent_state
+        import sys as _sys
+        _platform_label = (
+            "windows" if _sys.platform == "win32"
+            else "macos" if _sys.platform == "darwin"
+            else "linux"
+        )
+        try:
+            _modality_playbook_ids = selected_playbook_ids(staged_test_cases)
+        except Exception:  # noqa: BLE001 — playbook composition is advisory here
+            _modality_playbook_ids = []
+        _staged_ok = stage_agent_state(
+            sandbox_dir=sandbox_dir,
+            candidate=candidate,
+            input_data=input_data,
+            modality_playbook_ids=_modality_playbook_ids,
+            effective_max_turns=effective_max_turns,
+            effective_max_budget_usd=effective_max_budget_usd,
+            platform=_platform_label,
+            initial_model=RESEARCH_MODEL,
+        )
+        logger.info(
+            "Autonomy artifacts staged for %s: %s",
+            candidate.name, "ok" if _staged_ok else "failed",
+            extra={
+                "operation": "autonomy_artifacts_staged",
+                "trace_id": trace_id,
+                "candidate_name": candidate.name,
+                "ok": _staged_ok,
+                "modality_playbook_ids": _modality_playbook_ids,
+                "platform": _platform_label,
+            },
+        )
+
+    # ── PR 1: track autonomy-directive firing state across the loop ──
+    # These flags ensure each one-shot directive fires AT MOST once per
+    # build. Build-plan trigger telemetry uses last_build_plan_mtime to
+    # detect staleness at trigger points (api_spec, smoke pass, etc.).
+    build_plan_init_directive_sent = False
+    reflection_phase_3_directive_sent = False
+    last_build_plan_mtime = 0.0  # 0.0 = never written
 
     while turn < effective_max_turns:
         # Turn-budget nudge — fire once when <=3 turns remain.
@@ -623,6 +693,38 @@ def build_single_harness(
                 "turns_used": turn,
             })
             break
+
+        # ── PR 1: refresh runtime_state.json for the agent to read this turn ──
+        # Orchestrator-owned authoritative state. Updated at the TOP of each
+        # iteration so the agent's first read this turn sees the prior turn's
+        # effects (files written, smoke status, errors). The state file is
+        # write-protected against the agent at the tool-dispatch boundary.
+        if _cfg.GATE_AUTONOMY_ARTIFACTS_ENABLED:
+            # Build a minimal in-flight ``BuildLoopState``-like object out of
+            # loop locals. The standalone build_loop hasn't migrated to the
+            # ``BuildLoopState`` dataclass for live state yet (migration is
+            # tracked separately); this duck-typed shim keeps the call site
+            # honest without a refactor.
+            class _InFlightState:
+                pass
+            _ifs = _InFlightState()
+            _ifs.turn = turn
+            _ifs.accumulated_cost = accumulated_cost
+            _ifs.api_spec_written = api_spec_written
+            _ifs.verification_attempts = verification_attempts
+            _ifs.verification_passed = verification_passed
+            _ifs.smoke_ever_passed = smoke_ever_passed
+            _ifs.smoke_passed_at_turn = smoke_passed_at_turn
+            _ifs.consecutive_errors = consecutive_errors
+            _ifs.total_reassessments = total_reassessments
+            try:
+                update_runtime_state(
+                    sandbox_dir=sandbox_dir,
+                    state=_ifs,
+                    current_model=(AGENT5_BUILDER_MODEL if api_spec_written else RESEARCH_MODEL),
+                )
+            except OSError:
+                pass  # Soft — runtime_state staleness is observable via mtime in tests.
 
         # ★ CORE: Call Claude with all tools + server-side context management.
         #
@@ -831,7 +933,7 @@ def build_single_harness(
             progress_callback,
             candidate_name=candidate.name,
             turn=turn,
-            max_turns=AGENT5_MAX_TURNS,
+            max_turns=effective_max_turns,
             api_spec_written=api_spec_written,
             smoke_ever_passed=smoke_ever_passed,
             current_model=current_model,
@@ -931,15 +1033,42 @@ def build_single_harness(
             smoke_ever_passed = True
             smoke_passed_at_turn = turn
 
-        # Check for HARNESS_COMPLETE signal in text
-        if smoke_ever_passed and detect_harness_signal(last_text) == "complete":
-            if response.stop_reason == "end_turn":
-                logger.info(f"Completion signal in text for {candidate.name}", extra={
-                    "operation": "completion_signal_text",
+        # ── Pre-HARNESS_COMPLETE reflection telemetry (early observation) ──
+        # Records whether reflection_phase_3.md was present at the moment
+        # the agent emitted HARNESS_COMPLETE — informational; the actual
+        # gate runs inside the verification sequence below. The
+        # directive-sent flag is set ONLY by the gate path so the
+        # template injection logic in the retry branch works correctly.
+        if (
+            _cfg.GATE_AUTONOMY_ARTIFACTS_ENABLED
+            and detect_harness_signal(last_text) == "complete"
+        ):
+            _reflection_path = sandbox_dir / "_agent_state" / "reflection_phase_3.md"
+            logger.info(
+                "Reflection phase 3 early telemetry for %s at turn %d (reflection_present=%s)",
+                candidate.name, turn, _reflection_path.exists(),
+                extra={
+                    "operation": "reflection_phase_3_early_telemetry",
                     "trace_id": trace_id,
-                })
-                verification_passed = True
-                break
+                    "candidate_name": candidate.name,
+                    "turn": turn,
+                    "reflection_present": _reflection_path.exists(),
+                },
+            )
+
+        # Do not accept HARNESS_COMPLETE here. The unified completion
+        # gate below runs structural, forensics, and reflection checks.
+        if smoke_ever_passed and detect_harness_signal(last_text) == "complete":
+            logger.info(
+                "Completion signal observed for %s; routing through verification gate",
+                candidate.name,
+                extra={
+                    "operation": "completion_signal_text_observed",
+                    "trace_id": trace_id,
+                    "candidate_name": candidate.name,
+                    "turn": turn,
+                },
+            )
 
         # ── Extract and save web_fetch content to files ──
         new_docs = _extract_and_save_web_content(
@@ -967,6 +1096,40 @@ def build_single_harness(
         _signal = detect_harness_signal(last_text)
         if response.stop_reason == "end_turn":
             if _signal == "complete":
+                # ── PR 1 (deferred wiring): build_plan staleness at pre-HARNESS_COMPLETE ──
+                # The agent is about to claim completion. If they haven't
+                # touched build_plan.md since the last trigger, that's a
+                # signal the artifact wasn't operational this build —
+                # nudge them once. Soft-tier: telemetry + one nudge, no
+                # block on completion.
+                if (
+                    _cfg.GATE_AUTONOMY_ARTIFACTS_ENABLED
+                    and _cfg.AUTONOMY_BUILD_PLAN_DIRECTIVES_ENABLED
+                ):
+                    _bp_path = sandbox_dir / "_agent_state" / "build_plan.md"
+                    _bp_mtime = 0.0
+                    if _bp_path.exists():
+                        try:
+                            _bp_mtime = _bp_path.stat().st_mtime
+                        except OSError:
+                            pass
+                    _bp_stale = _bp_mtime <= last_build_plan_mtime
+                    logger.info(
+                        "Build plan check at pre-HARNESS_COMPLETE for %s: stale=%s",
+                        candidate.name, _bp_stale,
+                        extra={
+                            "operation": (
+                                EVENT_BUILD_PLAN_STALE_AT_TRIGGER if _bp_stale
+                                else "autonomy_build_plan_updated_at_trigger"
+                            ),
+                            "trace_id": trace_id,
+                            "candidate_name": candidate.name,
+                            "turn": turn,
+                            "trigger": "pre-HARNESS_COMPLETE",
+                        },
+                    )
+                    last_build_plan_mtime = _bp_mtime
+
                 # ════════════════════════════════════════════
                 # ★ VERIFICATION GATE — the core hardening
                 # ════════════════════════════════════════════
@@ -1002,6 +1165,78 @@ def build_single_harness(
                                 },
                             )
                             issues = forensics_issue
+                    # ── PR 2: pre-HARNESS_COMPLETE reflection-evidence gate ──
+                    # Soft-tier per AD-007 — one retry-with-directive, then
+                    # accept on the next pass with `reflection_gate_fired`.
+                    # The gate runs ONLY on the FIRST verification attempt
+                    # (verification_attempts==0). On retries, we don't re-
+                    # gate reflection — the agent has already responded to
+                    # the first directive and shouldn't be ping-ponged.
+                    # Requires the autonomy layer to be enabled (the gate
+                    # checks an artifact the autonomy layer stages).
+                    inject_reflection_directive_with_feedback = False
+                    if (
+                        not issues
+                        and _cfg.GATE_AUTONOMY_ARTIFACTS_ENABLED
+                        and _cfg.GATE_REFLECTION_PHASE_3_ENABLED
+                        and verification_attempts == 0
+                    ):
+                        reflection_issue = verify_reflection_complete(
+                            sandbox_dir,
+                            candidate,
+                            client=client,
+                            judge_model=_cfg.REFLECTION_LLM_JUDGE_MODEL,
+                            llm_judge_enabled=_cfg.REFLECTION_LLM_JUDGE_ENABLED,
+                            logger=logger,
+                            trace_id=trace_id,
+                        )
+                        if reflection_issue is not None:
+                            inject_reflection_directive_with_feedback = (
+                                not reflection_phase_3_directive_sent
+                            )
+                            issues = reflection_issue
+                            logger.info(
+                                "Reflection gate retry for %s (attempt %d)",
+                                candidate.name, verification_attempts + 1,
+                                extra={
+                                    "operation": "reflection_gate_retry",
+                                    "trace_id": trace_id,
+                                    "candidate_name": candidate.name,
+                                    "attempt": verification_attempts + 1,
+                                    "inject_directive": inject_reflection_directive_with_feedback,
+                                },
+                            )
+                    elif (
+                        not issues
+                        and _cfg.GATE_AUTONOMY_ARTIFACTS_ENABLED
+                        and _cfg.GATE_REFLECTION_PHASE_3_ENABLED
+                        and verification_attempts > 0
+                    ):
+                        # Retry attempt — accept whatever the agent produced.
+                        # Emit gate_fired so operators see the soft acceptance
+                        # in run summaries.
+                        retry_check = verify_reflection_complete(
+                            sandbox_dir,
+                            candidate,
+                            client=client,
+                            judge_model=_cfg.REFLECTION_LLM_JUDGE_MODEL,
+                            llm_judge_enabled=_cfg.REFLECTION_LLM_JUDGE_ENABLED,
+                            logger=logger,
+                            trace_id=trace_id,
+                        )
+                        if retry_check is not None:
+                            logger.warning(
+                                "gate_fired",
+                                extra={
+                                    "operation": "gate_fired",
+                                    "gate_name": "reflection_phase_3",
+                                    "severity": "WARN",
+                                    "rejected": False,  # accepted on retry
+                                    "trace_id": trace_id,
+                                    "candidate_name": candidate.name,
+                                    "attempt": verification_attempts + 1,
+                                },
+                            )
                     if issues:
                         logger.info(f"Verification issues for {candidate.name}, retry {verification_attempts + 1}", extra={
                             "operation": "verification_gate_fail",
@@ -1019,6 +1254,30 @@ def build_single_harness(
                         )
                         messages.append({"role": "assistant", "content": response.content})
                         messages.append({"role": "user", "content": feedback})
+                        # When the reflection gate fired AND the directive
+                        # template hasn't been shown yet, append it as a
+                        # second user message so the agent has the canonical
+                        # section structure on hand. Subsequent retries see
+                        # only the brief feedback (avoids prompt bloat).
+                        if inject_reflection_directive_with_feedback:
+                            messages.append({
+                                "role": "user",
+                                "content": [{
+                                    "type": "text",
+                                    "text": REFLECTION_PHASE_3_DIRECTIVE,
+                                }],
+                            })
+                            reflection_phase_3_directive_sent = True
+                            logger.info(
+                                "Reflection phase 3 directive template injected for %s",
+                                candidate.name,
+                                extra={
+                                    "operation": EVENT_REFLECTION_PHASE_3_DIRECTIVE_FIRED,
+                                    "trace_id": trace_id,
+                                    "candidate_name": candidate.name,
+                                    "turn": turn,
+                                },
+                            )
                         conversation_log.append({
                             "turn": f"verify-{verification_attempts + 1}",
                             "stop_reason": "verification_gate",
@@ -1063,6 +1322,7 @@ def build_single_harness(
                     turns_attempted=turn + 1,
                     web_fetch_blocks=candidate_web_fetch_blocks,
                     build_cost_usd=round(accumulated_cost, 4),
+                    harness_dir=str(sandbox_dir),
                 )
             else:
                 # end_turn without signal — treat as complete if harness exists
@@ -1442,6 +1702,50 @@ def build_single_harness(
 
             # ── Detect smoke test passing in tool results ──
             # CRITICAL: Track across ALL turns (not just last_text).
+            expected_tool_results = [
+                (block.id, block.name)
+                for block in response.content
+                if getattr(block, "type", None) == "tool_use"
+                and getattr(block, "name", None) in CUSTOM_TOOL_NAMES
+            ]
+            returned_tool_ids = {
+                r.get("tool_use_id")
+                for r in tool_results
+                if isinstance(r, dict) and r.get("type") == "tool_result"
+            }
+            for missing_id, missing_name in expected_tool_results:
+                if missing_id in returned_tool_ids:
+                    continue
+                fallback = (
+                    f"{missing_name} produced no tool_result. PuzzleEval "
+                    "inserted this error placeholder so the builder can "
+                    "recover instead of sending an invalid Anthropic message."
+                )
+                tool_results.append({
+                    "type": "tool_result",
+                    "tool_use_id": missing_id,
+                    "content": fallback,
+                    "is_error": True,
+                })
+                logger.warning(
+                    "custom tool produced no tool_result",
+                    extra={
+                        "operation": "agent5_missing_tool_result_filled",
+                        "trace_id": trace_id,
+                        "candidate_name": candidate.name,
+                        "tool_name": missing_name,
+                        "turn": turn,
+                    },
+                )
+                if conversation_log:
+                    conversation_log[-1]["tool_results"].append({
+                        "tool": missing_name,
+                        "exit_code": -1,
+                        "is_error": True,
+                        "result": fallback,
+                        "result_length": len(fallback),
+                    })
+
             all_results_text_raw = " ".join(
                 r.get("content", "") for r in tool_results if isinstance(r.get("content"), str)
             )
@@ -1518,17 +1822,37 @@ def build_single_harness(
                 continue
 
             # ── Detect HARNESS_COMPLETE in tool results ──
+            # Route through the unified verification gate by asking the
+            # agent to re-emit HARNESS_COMPLETE in assistant text. We MUST
+            # append the assistant response + tool_results FIRST so the
+            # next API call sees a consistent message history (every
+            # tool_use block in the assistant turn must be paired with a
+            # tool_result in the following user turn — Anthropic API
+            # invariant).
             if smoke_ever_passed and detect_harness_signal(all_results_text_raw) == "complete":
-                logger.info(f"Integration test / HARNESS_COMPLETE for {candidate.name}", extra={
-                    "operation": "integration_test_passed",
-                    "trace_id": trace_id,
-                    "candidate_name": candidate.name,
-                    "turn": turn,
-                })
-                verification_passed = True
+                logger.info(
+                    "HARNESS_COMPLETE appeared in tool output for %s; requesting assistant-text completion",
+                    candidate.name,
+                    extra={
+                        "operation": "tool_result_completion_signal_observed",
+                        "trace_id": trace_id,
+                        "candidate_name": candidate.name,
+                        "turn": turn,
+                    },
+                )
                 messages.append({"role": "assistant", "content": response.content})
                 messages.append({"role": "user", "content": tool_results})
-                break
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "A tool result contained HARNESS_COMPLETE. If the harness "
+                        "is ready, signal HARNESS_COMPLETE in your next assistant "
+                        "message. The unified verification gate will then run "
+                        "structural, forensics, and reflection checks."
+                    ),
+                })
+                turn += 1
+                continue
 
             # ── Track consecutive errors for dead-end detection ──
             # Phase 4 Path B Step 2: error detection + classification
@@ -1586,17 +1910,247 @@ def build_single_harness(
             messages.append({"role": "assistant", "content": response.content})
             messages.append({"role": "user", "content": tool_results})
 
-            # ── Phase 1 → Phase 2 forcing directive ──
-            # AD-007 deterministic enforcement: when api_spec_written
-            # JUST flipped True this turn, inject PHASE2_DIRECTIVE as
-            # the most recent user message so Opus's first response
-            # after the boundary cannot inherit Sonnet's narrative arc.
-            # Pinned by tests/test_build_loop_behavior.py::TestPhase2Directive.
-            if api_spec_written and not api_spec_was_written:
+            # ── PR 1: build_plan init directive at turn-0 → turn-1 boundary ──
+            # Fires once per build when the agent finishes turn 0 still in
+            # Phase 1 (api_spec.txt not yet written). Asks the agent to write
+            # _agent_state/build_plan.md as the FIRST tool call of turn 1.
+            # When api_spec_written transitions True at turn 0 (FAST-PATH),
+            # we skip this directive — context compaction handles the
+            # build_plan teaching via the canonical state packet.
+            if (
+                _cfg.GATE_AUTONOMY_ARTIFACTS_ENABLED
+                and _cfg.AUTONOMY_BUILD_PLAN_DIRECTIVES_ENABLED
+                and turn == 0
+                and not api_spec_written
+                and not build_plan_init_directive_sent
+            ):
                 messages.append({
                     "role": "user",
-                    "content": [{"type": "text", "text": PHASE2_DIRECTIVE}],
+                    "content": [{"type": "text", "text": BUILD_PLAN_INIT_DIRECTIVE}],
                 })
+                build_plan_init_directive_sent = True
+                logger.info(
+                    "Build_plan init directive fired for %s at turn 0 boundary",
+                    candidate.name,
+                    extra={
+                        "operation": EVENT_BUILD_PLAN_INIT_DIRECTIVE_FIRED,
+                        "trace_id": trace_id,
+                        "candidate_name": candidate.name,
+                        "turn": turn,
+                    },
+                )
+
+            # ── Phase 1 → Phase 2 forcing directive (or context compaction) ──
+            # When api_spec_written JUST flipped True this turn, the model
+            # switches Sonnet → Opus on the next iteration.
+            #
+            # Three paths (most-aggressive → least):
+            #   * PR 3 SUPPRESSION (default): if the agent has been writing
+            #     phase observations to _agent_state/agent_observations.json
+            #     and the most recent observation says phase_2_build, then
+            #     the agent already knows; suppress the legacy
+            #     PHASE2_DIRECTIVE. Context compaction still runs when
+            #     enabled because it is the direct narrative-inertia fix.
+            #     Telemetry: directive_suppressed_agent_observed.
+            #     Controlled by PUZZLEEVAL_DIRECTIVE_SUPPRESS_ON_AGREEMENT.
+            #   * NEW (default fall-through): full context compaction —
+            #     REPLACE messages with a single canonical state packet
+            #     pointing at on-disk artifacts. Direct fix for run
+            #     749b09b1's narrative-inertia loop where Opus inherited
+            #     Sonnet's exit narration and emitted 33 turns of
+            #     "handing off to Opus" without writing code.
+            #     Controlled by PUZZLEEVAL_CONTEXT_COMPACTION_AT_MODEL_TRANSITION.
+            #   * LEGACY: append PHASE2_DIRECTIVE as a final user message
+            #     and keep the prior conversation. Pinned by
+            #     tests/test_build_loop_behavior.py::TestPhase2Directive.
+            #
+            # All three paths are AD-007 deterministic enforcement. PR 3
+            # makes prompt-injection state-management a backstop rather
+            # than the primary mechanism: when the agent's self-observed
+            # state agrees with the orchestrator's truth, no injection
+            # fires.
+            if api_spec_written and not api_spec_was_written:
+                # PR 3 — agreement check. Suppress when the agent's most
+                # recent phase observation matches phase_2_build.
+                _agreement_verdict = "no_observation"
+                _agent_phase_note: str | None = None
+                if (
+                    _cfg.GATE_AUTONOMY_ARTIFACTS_ENABLED
+                    and _cfg.DIRECTIVE_SUPPRESS_ON_AGREEMENT_ENABLED
+                ):
+                    from puzzleeval.agents.agent5.runtime_state import (
+                        evaluate_agent_phase_agreement,
+                    )
+                    _agreement_verdict, _agent_phase_note = evaluate_agent_phase_agreement(
+                        sandbox_dir, orchestrator_phase="phase_2_build",
+                    )
+
+                # PR 3 telemetry: log the verdict before any action, so
+                # operators can see the agreement/disagreement rate over
+                # a release cycle (the load-bearing data point for
+                # promoting suppression from soft-default to hard-default).
+                if _agreement_verdict == "disagreed":
+                    logger.warning(
+                        "Agent phase disagreement at Sonnet → Opus boundary "
+                        "for %s — orchestrator says phase_2_build, agent says: %r",
+                        candidate.name, (_agent_phase_note or "")[:160],
+                        extra={
+                            "operation": "agent_observation_phase_disagreement",
+                            "trace_id": trace_id,
+                            "candidate_name": candidate.name,
+                            "turn": turn,
+                            "orchestrator_phase": "phase_2_build",
+                            "agent_phase_note": (_agent_phase_note or "")[:160],
+                        },
+                    )
+                elif _agreement_verdict == "no_observation":
+                    logger.info(
+                        "No agent phase observation for %s at transition — "
+                        "using transition backstop (defensive default)",
+                        candidate.name,
+                        extra={
+                            "operation": "transition_backstop_no_agent_observation",
+                            "trace_id": trace_id,
+                            "candidate_name": candidate.name,
+                            "turn": turn,
+                        },
+                    )
+
+                if _agreement_verdict == "agreed":
+                    logger.info(
+                        "Directive suppressed at Sonnet → Opus boundary "
+                        "for %s — agent observed phase_2_build",
+                        candidate.name,
+                        extra={
+                            "operation": "directive_suppressed_agent_observed",
+                            "trace_id": trace_id,
+                            "candidate_name": candidate.name,
+                            "turn": turn,
+                            "agent_phase_note": (_agent_phase_note or "")[:160],
+                        },
+                    )
+                if _cfg.CONTEXT_COMPACTION_AT_MODEL_TRANSITION_ENABLED:
+                    # The transition happened after the normal top-of-loop
+                    # runtime_state refresh. Refresh immediately before
+                    # composing the canonical packet so it reflects Phase 2.
+                    try:
+                        class _TransitionState:
+                            pass
+                        _ts = _TransitionState()
+                        _ts.turn = turn
+                        _ts.accumulated_cost = accumulated_cost
+                        _ts.api_spec_written = True
+                        _ts.verification_attempts = verification_attempts
+                        _ts.verification_passed = verification_passed
+                        _ts.smoke_ever_passed = smoke_ever_passed
+                        _ts.smoke_passed_at_turn = smoke_passed_at_turn
+                        _ts.consecutive_errors = consecutive_errors
+                        _ts.total_reassessments = total_reassessments
+                        update_runtime_state(
+                            sandbox_dir=sandbox_dir,
+                            state=_ts,
+                            current_model=AGENT5_BUILDER_MODEL,
+                        )
+                    except OSError:
+                        pass
+                    # Capture the pre-compaction message count for logging,
+                    # then replace messages with the compacted single user
+                    # message. The next API call's payload is now bounded:
+                    # the system prompt + ONE user message + tool result the
+                    # next turn produces.
+                    _pre_compaction_count = len(messages)
+                    messages.clear()
+                    messages.extend(compact_for_model_transition(sandbox_dir))
+                    logger.info(
+                        "Context compacted at Sonnet → Opus transition for %s "
+                        "(was %d messages, now 1)",
+                        candidate.name, _pre_compaction_count,
+                        extra={
+                            "operation": COMPACTION_EVENT_NAME,
+                            "trace_id": trace_id,
+                            "candidate_name": candidate.name,
+                            "turn": turn,
+                            "pre_compaction_message_count": _pre_compaction_count,
+                        },
+                    )
+                elif _agreement_verdict != "agreed":
+                    messages.append({
+                        "role": "user",
+                        "content": [{"type": "text", "text": PHASE2_DIRECTIVE}],
+                    })
+
+            # ── PR 1 (deferred wiring): build_plan staleness at trigger ──
+            # When a meaningful state-change trigger fires this turn
+            # (api_spec.txt written, scaffold writes landed, smoke passed),
+            # we check whether the agent updated _agent_state/build_plan.md.
+            # Soft-tier — telemetry per trigger + ONE nudge per turn when
+            # stale. The plan stays "operational rather than ornamental"
+            # because the orchestrator pings the agent at exactly the moments
+            # a real plan would be revised.
+            if (
+                _cfg.GATE_AUTONOMY_ARTIFACTS_ENABLED
+                and _cfg.AUTONOMY_BUILD_PLAN_DIRECTIVES_ENABLED
+            ):
+                from puzzleeval.agents.agent5.dispatch_helpers import (
+                    detect_build_plan_triggers,
+                )
+                _smoke_just_passed = (
+                    smoke_ever_passed and smoke_passed_at_turn == turn
+                )
+                _bp_triggers = detect_build_plan_triggers(
+                    response.content,
+                    api_spec_was_written=api_spec_was_written,
+                    api_spec_now_written=api_spec_written,
+                    smoke_passed_this_turn=_smoke_just_passed,
+                    harness_complete_signaled=False,  # text-based path covers this
+                )
+                if _bp_triggers:
+                    _bp_path = sandbox_dir / "_agent_state" / "build_plan.md"
+                    _bp_mtime = 0.0
+                    if _bp_path.exists():
+                        try:
+                            _bp_mtime = _bp_path.stat().st_mtime
+                        except OSError:
+                            pass
+                    _bp_stale = _bp_mtime <= last_build_plan_mtime
+                    for _trigger_label in _bp_triggers:
+                        logger.info(
+                            "Build plan %s at trigger for %s: %s",
+                            "stale" if _bp_stale else "updated",
+                            candidate.name, _trigger_label,
+                            extra={
+                                "operation": (
+                                    EVENT_BUILD_PLAN_STALE_AT_TRIGGER
+                                    if _bp_stale
+                                    else "autonomy_build_plan_updated_at_trigger"
+                                ),
+                                "trace_id": trace_id,
+                                "candidate_name": candidate.name,
+                                "turn": turn,
+                                "trigger": _trigger_label,
+                            },
+                        )
+                    # Inject one nudge per turn naming the most recent
+                    # trigger. Suppress when api_spec_written transitioned
+                    # this turn — the existing PHASE2_DIRECTIVE / context
+                    # compaction already gave the agent a Phase 2-shaped
+                    # direction, and stacking another user message on top
+                    # is noise. (The transition trigger still emits
+                    # telemetry; just no separate nudge text.)
+                    _api_spec_just_transitioned = (
+                        api_spec_written and not api_spec_was_written
+                    )
+                    if _bp_stale and not _api_spec_just_transitioned:
+                        messages.append({
+                            "role": "user",
+                            "content": [{
+                                "type": "text",
+                                "text": BUILD_PLAN_STALENESS_NUDGE.format(
+                                    trigger=_bp_triggers[-1],
+                                ),
+                            }],
+                        })
+                    last_build_plan_mtime = _bp_mtime
 
             # ── Gate B4: pre-spec research budget ──
             # AD-007 soft enforcement. Counts turns (not calls) where the

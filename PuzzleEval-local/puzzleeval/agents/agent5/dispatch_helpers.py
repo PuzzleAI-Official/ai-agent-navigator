@@ -584,6 +584,81 @@ def is_phase1_scaffold_violation(filename: str, *, api_spec_written: bool) -> bo
     return filename.lower() in {name.lower() for name in SCAFFOLD_FILENAMES}
 
 
+# ---------------------------------------------------------------------------
+# Build-plan staleness triggers (PR 1 — Goal/Planning/State/Reflection)
+# ---------------------------------------------------------------------------
+# The orchestrator pings the agent at "trigger" moments to keep
+# ``_agent_state/build_plan.md`` operational rather than ornamental. The
+# triggers are observable transitions: api_spec.txt was just written,
+# scaffold writes landed, smoke just passed, the agent is about to
+# signal HARNESS_COMPLETE. At each point the orchestrator compares the
+# build_plan.md mtime against the prior trigger; if the file hasn't been
+# updated, a soft nudge fires.
+
+# Filenames whose write/patch counts as a "scaffold trigger" (one nudge
+# per turn even if multiple scaffold files land — write_file calls in the
+# same turn are typically intentional batch writes per the existing
+# Phase 2 contract).
+_SCAFFOLD_TRIGGER_FILENAMES: frozenset[str] = frozenset({
+    "harness.py",
+    "smoke_test.py",
+    "live_test.py",
+    "requirements.txt",
+})
+
+
+def detect_build_plan_triggers(
+    response_content: list,
+    *,
+    api_spec_was_written: bool,
+    api_spec_now_written: bool,
+    smoke_passed_this_turn: bool,
+    harness_complete_signaled: bool,
+) -> list[str]:
+    """Return the trigger labels that fired during this turn.
+
+    Pure function. Inspects the model's response_content for tool_use
+    blocks (api_spec.txt + scaffold writes) and the loop-state booleans
+    for state-flag transitions. Used by the build_loop's staleness check
+    to inject `BUILD_PLAN_STALENESS_NUDGE` when the agent's
+    `_agent_state/build_plan.md` hasn't been updated alongside the
+    triggers.
+
+    Trigger labels are short human-readable strings used by the nudge
+    template + telemetry. Order is deterministic: api_spec → scaffold →
+    smoke pass → pre-HARNESS_COMPLETE.
+    """
+    triggers: list[str] = []
+
+    if api_spec_now_written and not api_spec_was_written:
+        triggers.append("api_spec.txt written")
+
+    # One scaffold trigger per turn — break after first match. Phase 2's
+    # canonical pattern is to write all four scaffolds in a single turn,
+    # so multiple matches in one response are intentional.
+    for block in response_content or []:
+        if getattr(block, "type", "") != "tool_use":
+            continue
+        name = getattr(block, "name", "")
+        if name not in ("write_file", "patch_file"):
+            continue
+        block_input = getattr(block, "input", None) or {}
+        raw_filename = (block_input.get("filename") or "")
+        # Strip directory components and lowercase for the comparison.
+        filename = raw_filename.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if filename in _SCAFFOLD_TRIGGER_FILENAMES:
+            triggers.append(f"scaffold write: {filename}")
+            break
+
+    if smoke_passed_this_turn:
+        triggers.append("smoke test passed")
+
+    if harness_complete_signaled:
+        triggers.append("pre-HARNESS_COMPLETE")
+
+    return triggers
+
+
 __all__ = [
     "ERROR_SIGNATURES",
     "ErrorCategory",
@@ -597,6 +672,7 @@ __all__ = [
     "TRANSITION_FILES_WRITE",
     "build_reassessment_message",
     "classify_tool_result_error",
+    "detect_build_plan_triggers",
     "detect_harness_signal",
     "detect_phase_transition",
     "detect_smoke_pass",

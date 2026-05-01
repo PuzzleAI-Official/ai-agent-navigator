@@ -166,12 +166,34 @@ class TestFileParsers:
 
 
 class TestAgent1:
-    """Test the user understanding agent with mocked API calls."""
+    """Test the user understanding agent with mocked API calls.
+
+    Agent 1 uses ``parse_with_fallback(prefer_non_strict=True)`` because
+    ``Agent1Result`` reliably overflows Anthropic's compiled-grammar
+    budget (9 nested types, 60+ fields including the WorkflowBlueprint +
+    TestPlan additions). That means the actual API call is
+    ``client.messages.create`` with a forced ``emit_result`` tool, NOT
+    ``client.messages.parse``. Tests mock the non-strict path: a tool_use
+    block whose ``input`` deserializes (via Pydantic) into the expected
+    Agent1Result.
+    """
 
     def _make_mock_response(self, parsed_output: Agent1Result) -> MagicMock:
+        """Mock the non-strict tool path Agent 1 uses (post-prefer_non_strict).
+
+        Returns a response shaped like ``client.messages.create`` would
+        produce when forced to a tool_use: a tool_use content block with
+        ``input`` matching the Pydantic schema. parse_with_fallback's
+        non-strict branch reads ``block.input`` and Pydantic-validates it
+        into the output_format.
+        """
         mock_response = MagicMock()
-        mock_response.parsed_output = parsed_output
-        mock_response.stop_reason = "end_turn"
+        tool_use_block = MagicMock()
+        tool_use_block.type = "tool_use"
+        tool_use_block.name = "emit_result"
+        tool_use_block.input = parsed_output.model_dump()
+        mock_response.content = [tool_use_block]
+        mock_response.stop_reason = "tool_use"
         mock_response.usage = MagicMock()
         mock_response.usage.input_tokens = 500
         mock_response.usage.output_tokens = 200
@@ -208,7 +230,7 @@ class TestAgent1:
 
         mock_client = MagicMock()
         mock_anthropic_class.return_value = mock_client
-        mock_client.messages.parse.return_value = self._make_mock_response(expected_result)
+        mock_client.messages.create.return_value = self._make_mock_response(expected_result)
 
         input_data = Agent1Input(
             user_text="I need an AI chatbot for my Shopify store customer support",
@@ -241,7 +263,7 @@ class TestAgent1:
 
         mock_client = MagicMock()
         mock_anthropic_class.return_value = mock_client
-        mock_client.messages.parse.return_value = self._make_mock_response(expected_result)
+        mock_client.messages.create.return_value = self._make_mock_response(expected_result)
 
         input_data = Agent1Input(user_text="I need AI for my business", trace_id="test-456")
 
@@ -250,6 +272,75 @@ class TestAgent1:
 
         assert result.is_clear is False
         assert len(result.clarification_needed.critical_questions) >= 1
+
+    @patch("puzzleeval.structured_output.parse_with_fallback")
+    @patch("puzzleeval.agents.user_understanding.anthropic.Anthropic")
+    def test_uses_prefer_non_strict_to_skip_doomed_strict_grammar_call(
+        self, mock_anthropic_class, mock_parse_with_fallback,
+    ):
+        """Agent 1 MUST pass prefer_non_strict=True to parse_with_fallback.
+
+        Agent1Result reliably overflows Anthropic's compiled-grammar
+        budget. Without this flag, every Agent 1 call wastes one full
+        round-trip on a doomed strict-grammar attempt before falling
+        back to non-strict — observed cost: 20-60s per turn in
+        conversational mode. The flag flip makes Agent 1 skip the
+        strict attempt entirely and go directly to the non-strict tool
+        path.
+
+        Regression guard: if a future refactor drops the flag (or the
+        schema shrinks enough that strict starts working again and
+        someone removes the flag prematurely), this test catches it
+        before real users feel the latency regression.
+        """
+        # Arrange: parse_with_fallback returns a real-shaped response.
+        expected = Agent1Result(
+            is_clear=True,
+            result=UserUnderstandingOutput(
+                summary="x",
+                sub_tasks=[
+                    SubTask(
+                        description="d", capability="c",
+                        search_keywords=["k1", "k2"],
+                    ),
+                ],
+                search_strategy="both",
+                domain="test",
+                search_keywords=["x"],
+                constraints=Constraints(),
+                workflow_summary=None,
+            ),
+            clarification_needed=None,
+        )
+        shim = MagicMock()
+        shim.parsed_output = expected
+        shim.stop_reason = "tool_use"
+        shim.usage = MagicMock()
+        shim.usage.input_tokens = 100
+        shim.usage.output_tokens = 50
+        shim.usage.cache_creation_input_tokens = 0
+        shim.usage.cache_read_input_tokens = 0
+        mock_parse_with_fallback.return_value = shim
+
+        mock_anthropic_class.return_value = MagicMock()
+
+        # Act
+        from puzzleeval.agents.user_understanding import run_user_understanding_agent
+        run_user_understanding_agent(
+            Agent1Input(user_text="ok", trace_id="t-prefer-non-strict")
+        )
+
+        # Assert: parse_with_fallback was called with prefer_non_strict=True.
+        # This is the load-bearing assertion — drops if the flag is missing.
+        assert mock_parse_with_fallback.called, "parse_with_fallback was not invoked"
+        kwargs = mock_parse_with_fallback.call_args.kwargs
+        assert kwargs.get("prefer_non_strict") is True, (
+            "Agent 1 must pass prefer_non_strict=True to skip the doomed "
+            "strict-grammar round-trip. Agent1Result is too large for "
+            "Anthropic's compiled-grammar budget; without this flag "
+            "every Agent 1 call wastes 20-60s on a strict 400 + fallback. "
+            f"Actual call kwargs: {sorted(kwargs.keys())}"
+        )
 
 
 class TestLogging:

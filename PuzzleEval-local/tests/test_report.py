@@ -166,6 +166,68 @@ def test_pass_rate_and_evidence_extracted():
     assert any(ev.test_case_id == "t1" for ev in cr.success_evidence)
 
 
+def test_pass_rate_uses_passed_not_success():
+    """API success alone is not a passing test; report must honor passed=False."""
+    uo = _make_uo(blueprint_steps=["step_1"])
+    agent5 = _make_agent5([{
+        "candidate_name": "A",
+        "overall_score": 0.5,
+        "test_results": [
+            {
+                "test_case_id": "t1",
+                "scenario": "API returned but quality failed",
+                "success": True,
+                "passed": False,
+                "weighted_score": 0.2,
+            },
+        ],
+    }])
+    report = assemble_report(
+        run_id="r1", trace_id="t1",
+        agent1_result=uo,
+        agent2_result=_make_agent2([{"name": "A", "covers_step_ids": ["step_1"]}]),
+        agent4_result=None,
+        agent5_result=agent5,
+    )
+    cr = report.candidate_reports[0]
+    assert cr.passed_count == 0
+    assert cr.pass_rate == 0.0
+    assert cr.failure_evidence[0].test_case_id == "t1"
+
+
+def test_merged_audio_path_is_mirrored_into_audio_paths():
+    uo = _make_uo(blueprint_steps=["step_1"])
+    merged = r"C:\runs\x\harnesses\a\voice\conversation_abc.mp3"
+    agent5 = _make_agent5([{
+        "candidate_name": "A",
+        "overall_score": 1.0,
+        "test_results": [
+            {
+                "test_case_id": "voice-1",
+                "scenario": "full call",
+                "success": True,
+                "passed": True,
+                "weighted_score": 1.0,
+                "merged_audio_path": merged,
+                "audio_paths": [
+                    {"role": "caller", "path": r"C:\runs\x\caller_abc-t0.mp3"},
+                ],
+            },
+        ],
+    }])
+    report = assemble_report(
+        run_id="r1", trace_id="t1",
+        agent1_result=uo,
+        agent2_result=_make_agent2([{"name": "A", "covers_step_ids": ["step_1"]}]),
+        agent4_result=None,
+        agent5_result=agent5,
+    )
+    ev = report.candidate_reports[0].success_evidence[0]
+    assert ev.merged_audio_path == merged
+    assert ev.audio_paths[0]["role"] == "conversation"
+    assert ev.audio_paths[0]["path"] == merged
+
+
 # ---------------------------------------------------------------------------
 # Cost projection
 # ---------------------------------------------------------------------------

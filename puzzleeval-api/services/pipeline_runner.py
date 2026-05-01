@@ -149,13 +149,31 @@ async def mock_agent1_turn(state: RunState, user_message: str) -> dict:
 # ============================================================================
 
 async def real_agent1_turn(state: RunState, user_message: str) -> dict:
+    """Real Agent 1 chat turn — split design (classifier first, planner async).
+
+    Old design: this function ran the heavy ``run_user_understanding_agent``
+    (Opus 4.7 + adaptive thinking) synchronously. The user's chat input
+    blocked for 30-60s on every turn while the full Agent1Result —
+    WorkflowBlueprint, TestPlan, sub_tasks, integrations — was generated
+    BEFORE the chat response returned.
+
+    New design: this function runs ONLY the fast intent classifier
+    (Haiku 4.5, ~3-5s). The classifier decides is_clear and produces the
+    user-facing acknowledgement or clarifying questions. When is_clear=
+    True, the chat handler kicks off ``run_pipeline`` and the heavy
+    planner runs as the FIRST step inside the pipeline. The user sees
+    the pipeline page transition immediately and "Designing workflow
+    architecture…" while the planner generates the blueprint in the
+    background; the SSE ``workflow_blueprint`` event surfaces the
+    blueprint to the diagram pane when it's ready.
+    """
     from puzzleeval.schemas import Agent1Input
-    from puzzleeval.agents.user_understanding import run_user_understanding_agent
+    from puzzleeval.agents.agent1.intent_classifier import run_intent_classifier
 
     state.current_turn += 1
     state.conversation_history.append({"role": "user", "content": user_message})
 
-    # Build conversation history for Agent 1 (exclude current message)
+    # Build conversation history for the classifier (exclude current message)
     conv_history = None
     if state.current_turn > 1:
         conv_history = [
@@ -165,63 +183,120 @@ async def real_agent1_turn(state: RunState, user_message: str) -> dict:
 
     agent1_input = Agent1Input(
         user_text=user_message,
-        workflow_file_path=None,  # Files go to Agent 3F for test generation, not Agent 1
+        workflow_file_path=None,
         trace_id=state.trace_id,
         conversation_history=conv_history,
     )
 
-    result = await asyncio.to_thread(run_user_understanding_agent, agent1_input)
-    result_dict = result.model_dump()
+    intent = await asyncio.to_thread(run_intent_classifier, agent1_input)
+    intent_dict = intent.model_dump()
 
-    if result.is_clear:
-        summary = result.result.summary if result.result else "I understand your requirements."
+    if intent.is_clear:
         response = {
             "is_clear": True,
-            "assistant_message": f"{summary}\n\nStarting the evaluation pipeline now...",
+            "assistant_message": intent.assistant_message,
             "clarifying_questions": [],
         }
-        # Store BOTH dict (for mock compat) and raw result for real pipeline
-        state.agent1_result = result_dict
-        state._agent1_model = result  # Keep Pydantic model for downstream agents
+        # Stash the user message + conversation history for the planner.
+        # state.agent1_result is INTENTIONALLY left as None — run_pipeline
+        # detects this and runs the planner as its first step.
+        state._agent1_pending_planner = True
+        state._agent1_planner_input = agent1_input
     else:
-        clarification = result_dict.get("clarification_needed", {})
-
-
-        if isinstance(clarification, dict):
-            message = clarification.get("message", "Could you provide more details?")
-            questions = clarification.get("critical_questions", [])
-            optional_prompt = clarification.get("optional_prompt", "")
-        else:
-            message = str(clarification or "Could you provide more details?")
-            questions = []
-            optional_prompt = ""
-
-        # Build full assistant message: main message + questions + optional prompt
-        full_message = message
-        if questions:
-            full_message += "\n\n" + "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions))
-        if optional_prompt:
-            full_message += f"\n\n{optional_prompt}"
-
+        # Build full assistant message: lead-in + numbered questions
+        full_message = intent.assistant_message
+        if intent.clarifying_questions:
+            full_message += "\n\n" + "\n".join(
+                f"{i+1}. {q}" for i, q in enumerate(intent.clarifying_questions)
+            )
         response = {
             "is_clear": False,
             "assistant_message": full_message,
-            "clarifying_questions": questions,
+            "clarifying_questions": intent.clarifying_questions,
         }
 
     # Append assistant response to conversation history (critical for multi-turn)
-    state.conversation_history.append({"role": "assistant", "content": json.dumps(result_dict)})
-    # record_cost drives both the plain total AND the budget circuit-breaker.
-    # Raises BudgetExceededError if the run blew through the cap — we let it
-    # propagate; chat.py's outer handler catches and surfaces the clear error.
-    state.record_cost(result_dict.get("cost_usd", 0) or 0, reason="agent_1_turn")
+    state.conversation_history.append({
+        "role": "assistant",
+        "content": response["assistant_message"],
+    })
+    # Track the classifier's cost so the user-visible meter ticks.
+    state.record_cost(intent.cost_usd or 0, reason="agent_1_intent")
     state.event_bus.emit("cost_update", {
         "trace_id": state.trace_id,
         "total_cost_usd": state.total_cost_usd,
-        "source": "agent_1_turn",
+        "source": "agent_1_intent",
         "budget": state.budget.snapshot(),
     })
     return response
+
+
+async def _run_agent1_planner_inside_pipeline(state: RunState):
+    """Run the heavy Agent 1 planner as the first step of the pipeline.
+
+    Called from ``run_pipeline`` when ``state._agent1_pending_planner=True``
+    (i.e., the chat handler used the fast classifier and deferred the
+    full WorkflowBlueprint generation). Emits SSE so the user sees
+    "Designing workflow architecture…" while Opus is thinking, then the
+    blueprint diagram once the planner returns.
+
+    Side effect: populates ``state.agent1_result`` + ``state._agent1_model``
+    so the existing ``_get_user_understanding`` helper and downstream
+    workflow_blueprint emit work unchanged.
+    """
+    from puzzleeval.agents.user_understanding import run_user_understanding_agent
+
+    emit = state.event_bus.emit
+    agent1_input = getattr(state, "_agent1_planner_input", None)
+    if agent1_input is None:
+        # Defensive: something went wrong upstream; fall back to a minimal
+        # input built from the conversation history.
+        from puzzleeval.schemas import Agent1Input
+        last_user = next(
+            (m for m in reversed(state.conversation_history) if m["role"] == "user"),
+            {"content": ""},
+        )
+        agent1_input = Agent1Input(
+            user_text=last_user["content"],
+            workflow_file_path=None,
+            trace_id=state.trace_id,
+            conversation_history=state.conversation_history[:-2] or None,
+            proceed_with_partial_info=True,
+        )
+
+    # Tell Agent 1 that no human is around to answer follow-up questions —
+    # the classifier already said is_clear=True. The planner should
+    # produce a complete result using sensible defaults for any optional
+    # fields the user didn't specify.
+    try:
+        agent1_input = agent1_input.model_copy(update={"proceed_with_partial_info": True})
+    except Exception:
+        agent1_input.proceed_with_partial_info = True
+
+    emit("agent_started", {"agent": "agent_1", "name": "Designing workflow architecture"})
+    emit("agent_activity", {
+        "agent": "agent_1",
+        "message": "Designing your workflow architecture and test plan...",
+        "status": "progress",
+    })
+
+    result = await asyncio.to_thread(run_user_understanding_agent, agent1_input)
+    state.agent1_result = result.model_dump()
+    state._agent1_model = result
+    state._agent1_pending_planner = False
+
+    # Track planner cost separately from classifier cost.
+    plan_cost = float((state.agent1_result or {}).get("cost_usd", 0) or 0)
+    state.record_cost(plan_cost, reason="agent_1_plan")
+    setattr(state, "agent1_cost_usd", plan_cost)
+    emit("cost_update", {
+        "trace_id": state.trace_id,
+        "total_cost_usd": state.total_cost_usd,
+        "source": "agent_1_plan",
+        "delta_usd": plan_cost,
+        "budget": state.budget.snapshot(),
+    })
+    emit("agent_completed", {"agent": "agent_1", "cost_usd": plan_cost})
 
 
 # ============================================================================
@@ -328,15 +403,19 @@ async def run_pipeline(state: RunState):
             "budget": state.budget.snapshot(),
         })
 
-    # Save conversation history
+    # Save conversation history. agent_1_output.json may legitimately be
+    # None at this point under the split-agent-1 design — the planner
+    # runs inside run_pipeline and populates state.agent1_result later.
+    # We re-save it after the planner finishes so the on-disk artifact
+    # reflects the full Agent1Result, not the pre-planner null.
     _save_json("agent_1_conversation.json", state.conversation_history)
-    _save_json("agent_1_output.json", state.agent1_result)
-    # Record Agent 1 into the summary. Cost lives on the /chat turn
-    # records, not on state.agent1_result — extract from state's
-    # accumulated total minus what later agents will add. For now,
-    # surface Agent 1 as a known-completed agent with its recorded
-    # cost from the conversation phase (state.agent1_cost_usd if
-    # tracked, else 0 — safer than omitting the record entirely).
+    if state.agent1_result is not None:
+        _save_json("agent_1_output.json", state.agent1_result)
+    # Record Agent 1 into the summary. Under the split design Agent 1's
+    # actual cost lives in state.agent1_cost_usd (set by
+    # _run_agent1_planner_inside_pipeline). Pre-split runs still set this
+    # via the old chat-side code path; either way the field is the
+    # source of truth.
     try:
         from puzzleeval.pipeline import AgentRecord
         agent_1_cost = getattr(state, "agent1_cost_usd", None) or 0.0
@@ -352,6 +431,18 @@ async def run_pipeline(state: RunState):
 
     try:
         emit("pipeline_started", {"trace_id": state.trace_id})
+
+        # NEW (split Agent 1): when the chat handler used the fast intent
+        # classifier and deferred the heavy planner, run it now. This is
+        # what makes the user see the pipeline page immediately + the
+        # "Designing workflow architecture…" activity entry, instead of
+        # blocking the chat for 30-60s.
+        if getattr(state, "_agent1_pending_planner", False):
+            await _run_agent1_planner_inside_pipeline(state)
+            # Re-save the on-disk artifact so it reflects the full
+            # planner output (the earlier _save_json above ran when
+            # state.agent1_result was still None for split-agent-1 runs).
+            _save_json("agent_1_output.json", state.agent1_result)
 
         user_understanding = _get_user_understanding(state)
 

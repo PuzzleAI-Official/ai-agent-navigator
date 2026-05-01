@@ -76,6 +76,92 @@ from puzzleeval.agents.agent5.prompts import (
 from puzzleeval.agents.agent5 import tools as _agent5_tools
 
 
+def _voice_session_token_from_artifact(artifact: dict[str, Any]) -> str | None:
+    """Return the conversation-level session token for a voice artifact."""
+    token = artifact.get("token")
+    if token:
+        token = str(token)
+        return token.split("-t", 1)[0]
+
+    path = artifact.get("path")
+    if path:
+        name = Path(str(path)).name
+        for prefix in ("caller_", "response_", "conversation_"):
+            if name.startswith(prefix):
+                rest = name[len(prefix):]
+                return rest.split("-t", 1)[0].split("_", 1)[0].split(".", 1)[0]
+    return None
+
+
+def _patch_merged_voice_audio(
+    candidate_runs: list[CandidateTestRun],
+    *,
+    logger: logging.Logger,
+    trace_id: str,
+) -> None:
+    """Attach merged full-call recordings to TestCaseResult objects."""
+    try:
+        from puzzleeval.tool_plugins import get_plugin
+        voice_plugin = get_plugin("voice_realtime")
+    except Exception:  # noqa: BLE001
+        return
+    if not hasattr(voice_plugin, "wait_for_pending_merges"):
+        return
+
+    try:
+        merge_results = voice_plugin.wait_for_pending_merges()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "voice merge wait failed: %s",
+            exc,
+            extra={"operation": "voice_merge_wait_failed", "trace_id": trace_id},
+        )
+        return
+    if not merge_results:
+        return
+
+    patched = 0
+    for run in candidate_runs:
+        for tcr in run.test_results:
+            paths = list(getattr(tcr, "audio_paths", []) or [])
+            session_tokens: set[str] = set()
+            for artifact in paths:
+                if isinstance(artifact, dict):
+                    sess = _voice_session_token_from_artifact(artifact)
+                    if sess:
+                        session_tokens.add(sess)
+            for sess in session_tokens:
+                merged = merge_results.get(sess)
+                if not merged:
+                    continue
+                tcr.merged_audio_path = str(merged)
+                if not any(
+                    isinstance(a, dict)
+                    and a.get("role") == "conversation"
+                    and a.get("path") == str(merged)
+                    for a in paths
+                ):
+                    paths.insert(0, {
+                        "role": "conversation",
+                        "path": str(merged),
+                        "token": sess,
+                    })
+                tcr.audio_paths = paths
+                patched += 1
+                break
+
+    logger.info(
+        "patched merged voice audio into %s test result(s)",
+        patched,
+        extra={
+            "operation": "voice_merged_audio_patched",
+            "trace_id": trace_id,
+            "merge_count": len(merge_results),
+            "patched_count": patched,
+        },
+    )
+
+
 # ----------------------------------------------------------------------------
 # Phase 1 helper — load capability playbook content from packaged markdown
 # ----------------------------------------------------------------------------
@@ -2168,6 +2254,7 @@ your harness reads ALL of these variables and uses the correct API version that 
 {_format_modality_context_for_builder(input_data)}
 {_format_sandbox_contents_block(sandbox_dir, staged_test_cases)}
 {_format_prefetched_docs_block(sandbox_dir)}
+{_format_autonomy_artifacts_block(sandbox_dir)}
 {(
     "---\n\n"
     "### ⚡ FAST PATH — api_spec.txt PRE-RENDERED (with cross-check + augment)\n\n"
@@ -2297,6 +2384,12 @@ def _format_prefetched_docs_block(sandbox_dir: Path | None) -> str:
     return format_prefetched_docs_block(sandbox_dir)
 
 
+def _format_autonomy_artifacts_block(sandbox_dir: Path | None) -> str:
+    """Back-compat shim — use ``agent5.initial_message.format_autonomy_artifacts_block``."""
+    from puzzleeval.agents.agent5.initial_message import format_autonomy_artifacts_block
+    return format_autonomy_artifacts_block(sandbox_dir)
+
+
 
 # ============================================================================
 # [CORE] Build a single harness — autonomous multi-turn tool-use loop
@@ -2386,6 +2479,7 @@ def _finalize_build_result(
             turns_attempted=turn,
             web_fetch_blocks=candidate_web_fetch_blocks,
             build_cost_usd=round(accumulated_cost, 4),
+            harness_dir=str(sandbox_dir),
         )
 
     requirements = _read_requirements(sandbox_dir)
@@ -2408,6 +2502,7 @@ def _finalize_build_result(
             turns_attempted=turn,
             web_fetch_blocks=candidate_web_fetch_blocks,
             build_cost_usd=round(accumulated_cost, 4),
+            harness_dir=str(sandbox_dir),
         )
 
     auth_env_vars = _extract_env_vars_from_code(harness_code)
@@ -2584,6 +2679,7 @@ def _setup_sandbox_and_credentials(
                 partial_code=None,
                 turns_attempted=0,
                 web_fetch_blocks=0,
+                harness_dir=str(sandbox_dir),
             )
 
     # ★ Resolve credentials for the builder loop (used for live validation)
@@ -3375,6 +3471,7 @@ def run_implement_test_env_agent(
                     partial_code=None,
                     turns_attempted=0,
                     web_fetch_blocks=0,
+                    harness_dir=str(harness_base / _candidate_slug(candidate_name)),
                 )
                 if progress_callback:
                     progress_callback("harness_failed", {
@@ -3496,6 +3593,7 @@ def run_implement_test_env_agent(
                             partial_code=None,
                             turns_attempted=0,
                             web_fetch_blocks=0,
+                            harness_dir=str(harness_base / _candidate_slug(fb_name)),
                         ))
             # total_candidates_attempted should reflect the true number of
             # builds attempted (primary + fallback) so the validator's count
@@ -3702,47 +3800,11 @@ def run_implement_test_env_agent(
             )
 
             # ─────────────────────────────────────────────────────────
-            # Background audio-merge join (item 5 of
-            # PLAN_VOICE_RUN_OPTIMIZATIONS.md)
+            # Background voice merge ownership
             # ─────────────────────────────────────────────────────────
-            # The voice_realtime plugin submits per-test audio merges
-            # to a daemon thread pool to free worker threads at
-            # conversation-end (instead of conversation-end + 70s
-            # merge-time). We now block until every pending merge for
-            # this candidate's tests resolves (or times out at
-            # PUZZLEEVAL_VOICE_MERGE_TIMEOUT_S, default 60s). For each
-            # resolved merge, patch the merged_audio_path + role-
-            # 'conversation' audio entry into the matching test result
-            # by session_token. No-op when no voice tests ran in this
-            # candidate (wait_for_pending_merges returns {}).
-            try:
-                from puzzleeval.tool_plugins import get_plugin
-                voice_plugin = get_plugin("voice_realtime")
-            except Exception:  # noqa: BLE001
-                voice_plugin = None
-            if voice_plugin is not None and hasattr(
-                voice_plugin, "wait_for_pending_merges",
-            ):
-                merge_results = voice_plugin.wait_for_pending_merges()
-                if merge_results:
-                    for _tc, _r in raw_results:
-                        sess = _r.get("session_token") if isinstance(_r, dict) else None
-                        if not sess or sess not in merge_results:
-                            continue
-                        merged = merge_results[sess]
-                        if not merged:
-                            continue
-                        _r["merged_audio_path"] = merged
-                        # Prepend the merged conversation entry so UIs
-                        # that play "first audio" default to the full
-                        # call. Match the role tagging used by
-                        # voice_realtime's pre-bg-merge code path.
-                        existing = _r.get("audio_paths", []) or []
-                        _r["audio_paths"] = [
-                            {"role": "conversation",
-                             "path": merged,
-                             "token": sess}
-                        ] + existing
+            # Background voice merges are joined once after all candidate
+            # evaluation futures finish. Joining here is unsafe because the
+            # voice plugin's pending-merge queue is process-wide.
 
             eval_items = []
             test_case_results = []
@@ -3782,6 +3844,8 @@ def run_implement_test_env_agent(
                         latency_ms=result.get("latency_ms", 0.0),
                         tokens_used=result.get("tokens_used"),
                         cost_usd=result.get("cost_usd"),
+                        audio_paths=list(result.get("audio_paths", []) or []),
+                        merged_audio_path=result.get("merged_audio_path"),
                         success=False,
                         error=annotated_error,
                         skip_reason=skip,
@@ -3816,6 +3880,8 @@ def run_implement_test_env_agent(
                     latency_ms=result.get("latency_ms", 0.0),
                     tokens_used=result.get("tokens_used"),
                     cost_usd=result.get("cost_usd"),
+                    audio_paths=list(result.get("audio_paths", []) or []),
+                    merged_audio_path=result.get("merged_audio_path"),
                     success=True,
                     error=None,
                     skip_reason=None,
@@ -3901,6 +3967,27 @@ def run_implement_test_env_agent(
                     )
 
                 # ── Per-test cost + latency aggregation (NEW-AM gap fix) ──
+                if isinstance(verdict_detail, dict):
+                    merged_audio_path = verdict_detail.get("merged_audio_path")
+                    if merged_audio_path:
+                        tcr_target.merged_audio_path = str(merged_audio_path)
+                        paths = list(getattr(tcr_target, "audio_paths", []) or [])
+                        session_token = verdict_detail.get("session_token")
+                        if not any(
+                            isinstance(a, dict)
+                            and a.get("role") == "conversation"
+                            and a.get("path") == str(merged_audio_path)
+                            for a in paths
+                        ):
+                            entry = {
+                                "role": "conversation",
+                                "path": str(merged_audio_path),
+                            }
+                            if session_token:
+                                entry["token"] = str(session_token)
+                            paths.insert(0, entry)
+                            tcr_target.audio_paths = paths
+
                 # Real-run audit (2026-04-25, trace 8ded6706) showed every
                 # TestCaseResult had `cost_usd: None` and `latency_ms: 0`
                 # despite agentic conversational tests genuinely costing
@@ -4715,6 +4802,17 @@ def run_implement_test_env_agent(
                             sample_errors=[str(e)[:200]],
                             recovery_attempted=False,
                         ))
+
+            # Voice conversation audio merges are queued by the plugin during
+            # per-test evaluation. Join the process-wide merge pool once after
+            # every candidate finishes, then patch matching TestCaseResult
+            # objects by session token. This avoids a cross-candidate race
+            # where one candidate thread consumes another candidate's merge.
+            _patch_merged_voice_audio(
+                candidate_runs,
+                logger=logger,
+                trace_id=input_data.trace_id,
+            )
 
     # Build test execution summary
     test_summary = ""

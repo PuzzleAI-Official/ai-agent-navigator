@@ -771,6 +771,54 @@ class Agent1Result(BaseModel):
     )
 
 
+class Agent1IntentResult(BaseModel):
+    """Fast intent-classifier output. Shipped on every chat turn so the
+    user sees an acknowledgement (or clarifying questions) in ~3-5s
+    instead of waiting 30-60s for the full Agent 1 planner to finish.
+
+    When ``is_clear=True``, the heavy planner (``run_user_understanding_agent``)
+    runs as the first step inside ``run_pipeline`` so the user sees the
+    pipeline-view immediately and the WorkflowBlueprint appears via SSE
+    when the planner completes.
+    """
+
+    is_clear: bool = Field(
+        description=(
+            "True iff the user's message + conversation history give a "
+            "concrete sub-task with a testable input→output behavior AND a "
+            "business domain (inferred when reasonable). When True, the "
+            "planner runs in the background and the chat returns a brief "
+            "acknowledgement immediately."
+        )
+    )
+
+    assistant_message: str = Field(
+        description=(
+            "What the user sees in chat. When is_clear=True this is a "
+            "1-2 sentence acknowledgement that names the workflow being "
+            "designed (e.g., 'Got it — voice agent for Bean & Brew "
+            "handling FAQs and pickup orders. Designing the workflow "
+            "now…'). When is_clear=False this is the conversational lead-"
+            "in that precedes clarifying_questions."
+        )
+    )
+
+    clarifying_questions: list[str] = Field(
+        default_factory=list,
+        description=(
+            "1-3 specific follow-up questions when is_clear=False. Empty "
+            "list when is_clear=True. Each question targets ONE missing "
+            "critical fact (concrete sub-task or domain) — never optional "
+            "info like budget or technical level."
+        ),
+    )
+
+    cost_usd: float = Field(
+        default=0.0,
+        description="Total API cost for this classifier call.",
+    )
+
+
 # ============================================================================
 # Agent 2 Input Schema
 # ============================================================================
@@ -3472,6 +3520,15 @@ class FailedHarness(BaseModel):
         ),
     )
 
+    harness_dir: str | None = Field(
+        default=None,
+        description=(
+            "Sandbox directory used for this failed build, when one was "
+            "created. Lets reporting attach harness_forensics.jsonl tail "
+            "events instead of surfacing an opaque build failure."
+        ),
+    )
+
 
 class ScopeTestRun(BaseModel):
     """Phase 9: test results for one scope in a multi-scope workflow."""
@@ -3704,6 +3761,16 @@ class TestCaseResult(BaseModel):
             "tts, transcription). Empty list for any non-voice test. The "
             "EvaluationReport surfaces these as playback links in evidence so "
             "users can hear the actual exchange, not just read transcripts."
+        ),
+    )
+
+    merged_audio_path: str | None = Field(
+        default=None,
+        description=(
+            "Absolute path to the merged full-conversation audio file when a "
+            "voice or conversation plugin produced one. This mirrors the "
+            "role='conversation' entry in audio_paths for consumers that want "
+            "a stable field instead of scanning the artifact list."
         ),
     )
 

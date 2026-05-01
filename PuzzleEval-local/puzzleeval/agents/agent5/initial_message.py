@@ -553,9 +553,71 @@ def format_prefetched_docs_block(sandbox_dir: Path | None) -> str:
     return "\n".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# Autonomy artifacts block (PR 1 — Goal/Planning/State/Reflection)
+# ---------------------------------------------------------------------------
+# When ``GATE_AUTONOMY_ARTIFACTS_ENABLED`` is on, the orchestrator stages
+# ``_agent_state/`` with system-generated objective.md + runtime_state.json
+# before the build loop starts. This formatter renders the section of the
+# initial user message that teaches the agent the file roles + access
+# discipline. Returns empty string when the directory is absent (autonomy
+# disabled OR staging failed — agent falls back to legacy reactive mode).
+
+
+def format_autonomy_artifacts_block(sandbox_dir: Path | None) -> str:
+    """Tell the agent about the ``_agent_state/`` directory and its contents.
+
+    Returns empty string when the directory doesn't exist (legacy / autonomy-
+    disabled builds work as before). Otherwise returns a structured block
+    naming each file, who owns it, and the read-before-act discipline.
+
+    Pure function — reads the filesystem only. No mutation.
+    """
+    if sandbox_dir is None:
+        return ""
+    state_dir = sandbox_dir / "_agent_state"
+    if not state_dir.exists():
+        return ""
+
+    objective_path = state_dir / "objective.md"
+    runtime_state_path = state_dir / "runtime_state.json"
+    if not (objective_path.exists() and runtime_state_path.exists()):
+        return ""
+
+    return (
+        "\n---\n"
+        "## Autonomy artifacts — `_agent_state/`\n"
+        "\n"
+        "Your sandbox now contains a `_agent_state/` directory. These files are "
+        "load-bearing for the build loop. **Read them at the top of every "
+        "significant turn.** Treat them as your durable memory — they survive "
+        "context compaction and replace ad-hoc narrative tracking.\n"
+        "\n"
+        "| File | Owner | You can... |\n"
+        "|------|-------|------------|\n"
+        "| `_agent_state/objective.md` | **orchestrator** (read-only to you) | READ to see DELIVERABLE + SUCCESS CRITERIA + CONSTRAINTS + OUT OF SCOPE. The CANDIDATE NOTES section is appendable by you (timestamped, ≤50 words/entry). |\n"
+        "| `_agent_state/runtime_state.json` | **orchestrator** (read-only to you) | READ to see authoritative state — `current_phase`, `files_present`, `files_pending`, `smoke_test_status`, `directives_fired`, etc. Updated every turn. Trust this OVER the conversation history. |\n"
+        "| `_agent_state/build_plan.md` | YOU | WRITE at turn 1 (orchestrator will direct you). UPDATE at trigger points: after api_spec.txt, after scaffold writes, after a failed smoke/live test, after a pivot, before HARNESS_COMPLETE. |\n"
+        "| `_agent_state/agent_observations.json` | YOU (optional) | WRITE noteworthy decisions or uncertainty flags. Never authoritative — `runtime_state.json` is. Useful for the orchestrator's PR 3 agreement check. |\n"
+        "| `_agent_state/reflection_phase_3.md` | YOU | WRITE before HARNESS_COMPLETE (orchestrator will direct you). Must cite specific evidence (file:line, test output, forensics events) — not self-attestation. |\n"
+        "\n"
+        "**Discipline:**\n"
+        "- Turn opening: `read_file('_agent_state/runtime_state.json')` to ground "
+        "your mental model. The conversation history can drift; this file cannot.\n"
+        "- Before any major decision: re-read `_agent_state/objective.md` SUCCESS "
+        "CRITERIA to make sure you're optimizing for the right bar.\n"
+        "- At trigger points: `patch_file('_agent_state/build_plan.md', ...)` to "
+        "check off completed todos and add new ones the trigger surfaced.\n"
+        "- Attempts to write `_agent_state/objective.md` or "
+        "`_agent_state/runtime_state.json` will be REJECTED by the tool gate. "
+        "These are orchestrator-owned. Write to your own files instead.\n"
+    )
+
+
 __all__ = [
     "USEFULNESS_PATTERNS",
     "format_atlas_context_for_builder",
+    "format_autonomy_artifacts_block",
     "format_checklist_context_for_builder",
     "format_modality_context_for_builder",
     "format_prefetched_docs_block",

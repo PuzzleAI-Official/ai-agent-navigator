@@ -160,16 +160,20 @@ class TestGateB1ForbiddenFilenames:
         assert not result.startswith("Error:"), result
         assert (tmp_path / "notes.txt").exists()
 
-    def test_md_extension_already_blocked_independent_of_gate(self, tmp_path: Path):
-        # Documents the pre-existing extension allowlist behavior: .md files
-        # are rejected by ALLOWED_EXTENSIONS regardless of B1's decision. So
-        # even the "forbidden" .md names like NOTES.md are doubly defended.
+    def test_md_filename_blocked_by_b1_when_in_forbidden_set(self, tmp_path: Path):
+        # ``.md`` is now an ALLOWED extension (autonomy artifacts like
+        # build_plan.md need it). Forbidden meta-files like NOTES.md are
+        # still rejected — but by B1 (forbidden-meta-filename), not by the
+        # extension allowlist. Defense in depth via filename, not via type.
         result = tools.write_file(
             {"filename": "NOTES.md", "content": "x"},
             tmp_path,
             phase_state=_phase_state(api_spec_written=True),
         )
-        assert result.startswith("Error: file extension"), result
+        assert result.startswith("Error:"), result
+        assert "meta/state-tracking" in result, (
+            f"Expected B1 forbidden-meta-filename rejection, got: {result}"
+        )
 
     def test_structured_logging_fires_on_reject(self, tmp_path: Path, caplog):
         with caplog.at_level(logging.WARNING, logger="puzzleeval.agents.agent5.tools"):

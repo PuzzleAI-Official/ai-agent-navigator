@@ -475,6 +475,82 @@ AGENT5_CODE_TIMEOUT = int(os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT", "120"
 GATE_FORENSICS_COVERAGE_ENABLED = (
     os.environ.get("PUZZLEEVAL_GATE_FORENSICS_COVERAGE", "1") != "0"
 )
+# Autonomy artifacts (PR 1 — Goal/Planning/State/Reflection plan).
+# When enabled, the orchestrator stages ``_agent_state/`` with
+# objective.md (system-generated contract from Agent 1-4 outputs) +
+# runtime_state.json (orchestrator-owned authoritative state, updated
+# every turn). The agent reads both via read_file. Agent-owned artifacts
+# (build_plan.md, agent_observations.json, reflection_phase_<n>.md) are
+# written by the agent in response to directives. Disabling this flag
+# falls back to the legacy reactive build path (existing AD-007 gates
+# still fire as the safety net). Soft-by-default — failure to stage
+# artifacts is logged but doesn't abort the build.
+GATE_AUTONOMY_ARTIFACTS_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_AUTONOMY_ARTIFACTS", "1") != "0"
+)
+# Build-plan directives are intentionally off by default. The passive
+# artifact may still be staged for operator/debug inspection, but the latest
+# voice run showed forced build_plan.md updates adding turn cost without
+# changing behavior. Re-enable only when the planning loop is redesigned and
+# measured.
+AUTONOMY_BUILD_PLAN_DIRECTIVES_ENABLED = (
+    os.environ.get("PUZZLEEVAL_AUTONOMY_BUILD_PLAN_DIRECTIVES", "0") != "0"
+)
+# Context compaction at the Sonnet → Opus model transition. Direct fix
+# for run 749b09b1's narrative-inertia loop (Opus inheriting Sonnet's
+# exit narration and emitting 33 turns of "handing off" without writing
+# code). When enabled, ``messages`` is cleared at the api_spec_written
+# transition and replaced with a single canonical state packet pointing
+# at on-disk artifacts. The KV-cache is lost (~$0.10-0.30 per build) in
+# exchange for the reliability gain. When disabled, falls back to the
+# legacy PHASE2_DIRECTIVE-only path (the user message gets appended but
+# the prior conversation history stays). Scoped to the model transition
+# only — other phase boundaries keep their existing mechanisms.
+CONTEXT_COMPACTION_AT_MODEL_TRANSITION_ENABLED = (
+    os.environ.get("PUZZLEEVAL_CONTEXT_COMPACTION_AT_MODEL_TRANSITION", "1") != "0"
+)
+# Pre-HARNESS_COMPLETE reflection-evidence gate (PR 2 of the autonomy plan).
+# When enabled, the build loop:
+#   * Injects ``REFLECTION_PHASE_3_DIRECTIVE`` once when HARNESS_COMPLETE
+#     is detected without a substantive ``_agent_state/reflection_phase_3.md``.
+#   * Calls ``verify_reflection_complete`` after structural + forensics
+#     gates pass; rejects HARNESS_COMPLETE on missing/vacuous reflection.
+#   * Soft tier per AD-007 — one retry, then accept with
+#     ``reflection_gate_fired`` telemetry.
+# Disabling falls back to PR 1 telemetry-only behavior. Bypass is the
+# emergency unblock; the phased-rollout mechanism for risk management is
+# the promotion criteria documented in the plan, not this flag.
+GATE_REFLECTION_PHASE_3_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_REFLECTION_PHASE_3", "1") != "0"
+)
+# LLM-judge fallback for borderline reflection patterns. When enabled,
+# pattern-check verdicts of BORDERLINE invoke a Sonnet call to evaluate
+# whether cited evidence actually supports claims. Capped at one
+# invocation per build (~$0.005). Disable to fall back to defensive PASS
+# on borderline cases (cheaper, less stringent).
+REFLECTION_LLM_JUDGE_ENABLED = (
+    os.environ.get("PUZZLEEVAL_REFLECTION_LLM_JUDGE_ENABLED", "1") != "0"
+)
+# Model used for the reflection LLM-judge fallback. Default Sonnet 4.6
+# matches the cost/quality balance the plan targets. Override for
+# experiments (e.g. Haiku 4.5 for cheaper, Opus 4.7 for stricter).
+REFLECTION_LLM_JUDGE_MODEL = os.environ.get(
+    "PUZZLEEVAL_REFLECTION_LLM_JUDGE_MODEL", "claude-sonnet-4-6"
+)
+# Directive suppression on agreement (PR 3 of the autonomy plan).
+# When enabled, the orchestrator reads ``_agent_state/agent_observations.json``
+# at the api_spec_written transition and SUPPRESSES the redundant
+# prompt-injection (context compaction OR PHASE2_DIRECTIVE) when the
+# agent's most recent phase observation matches the orchestrator's
+# current phase. Telemetry distinguishes:
+#   * directive_suppressed_agent_observed - agreement, no injection
+#   * agent_observation_phase_disagreement - disagreement, fire to correct
+#   * directive_fired_no_agent_observation - no observation, default fire
+# The autonomy artifacts flag must also be enabled (the agent's
+# observation file is staged under ``_agent_state/``).
+DIRECTIVE_SUPPRESS_ON_AGREEMENT_ENABLED = (
+    os.environ.get("PUZZLEEVAL_DIRECTIVE_SUPPRESS_ON_AGREEMENT", "0") != "0"
+)
 # Stack-dump-on-hang inside the harness shim. faulthandler.dump_traceback_later
 # fires after this many seconds with no progress on any thread, printing the
 # full traceback to stderr. Set to 0 to disable. Default 45s catches genuine

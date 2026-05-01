@@ -38,6 +38,7 @@ from puzzleeval.agents.agent5.sandbox import _read_harness_code
 
 if TYPE_CHECKING:
     import logging
+    import anthropic
     from puzzleeval.schemas import ScreenedCandidate
 
 
@@ -80,6 +81,177 @@ def run_verification_checks(
     if not _read_harness_code(sandbox_dir):
         return "harness.py does not exist or is empty."
     return None
+
+
+# ---------------------------------------------------------------------------
+# Reflection-evidence gate (PR 2 — Goal/Planning/State/Reflection plan)
+# ---------------------------------------------------------------------------
+# When the builder signals HARNESS_COMPLETE, the build loop calls
+# ``verify_reflection_complete`` after the structural + forensics gates
+# pass. The gate REQUIRES ``_agent_state/reflection_phase_3.md`` to
+# exist and to cite specific evidence (file:line refs, test output
+# snippets, code excerpts). Self-attestation ("yes, handled") is
+# rejected.
+#
+# The gate is SOFT per AD-007:
+#   1. First HARNESS_COMPLETE: if reflection missing or vacuous, return
+#      a short error string; caller injects the directive + retries.
+#   2. Second HARNESS_COMPLETE: if still missing/vacuous, return None
+#      (accept) but emit ``reflection_gate_fired`` telemetry. The build
+#      proceeds; operators see the warning in the run summary.
+#
+# The hybrid pattern + LLM-judge check lives in
+# ``agent5/reflection_evidence_check.py``. This module owns the gate
+# integration and the telemetry plumbing.
+
+
+REFLECTION_PHASE_3_FILENAME = "reflection_phase_3.md"
+"""Canonical filename inside the ``_agent_state/`` directory."""
+
+
+def verify_reflection_complete(
+    sandbox_dir: "Path",
+    candidate: "ScreenedCandidate",
+    *,
+    client: "anthropic.Anthropic | None" = None,
+    judge_model: str = "claude-sonnet-4-6",
+    llm_judge_enabled: bool = True,
+    logger: "logging.Logger | None" = None,
+    trace_id: str = "",
+) -> str | None:
+    """Verify the agent's pre-HARNESS_COMPLETE reflection has evidence.
+
+    Returns ``None`` when the reflection passes (or when the gate is in
+    fail-soft mode and the LLM-judge errors). Returns a short error
+    string when the reflection is missing or vacuous; the caller treats
+    this like other gate retries — append the error to the next user
+    message + the directive, then loop.
+
+    Args:
+        sandbox_dir: The candidate's sandbox.
+        candidate: ScreenedCandidate (used for telemetry).
+        client: Optional Anthropic client for the LLM-judge fallback.
+            None disables the judge — pattern check alone decides.
+        judge_model: Model ID for the judge call. Defaults to Sonnet 4.6.
+        llm_judge_enabled: When False, BORDERLINE pattern verdicts
+            accept rather than invoking the judge.
+        logger: Standard logger for telemetry.
+        trace_id: Run trace_id for log correlation.
+
+    Telemetry events:
+        * reflection_phase_3_missing - file absent at gate time.
+        * reflection_phase_3_pattern_pass / _fail / _borderline - pattern
+          check verdicts.
+        * reflection_llm_judge_invoked / _accepted / _rejected - judge
+          outcomes.
+        * reflection_gate_retry - gate returned an error string (caller
+          will inject directive).
+        * reflection_gate_accepted - gate returned None.
+    """
+    from puzzleeval.agents.agent5 import reflection_evidence_check as rec
+
+    reflection_path = sandbox_dir / "_agent_state" / REFLECTION_PHASE_3_FILENAME
+
+    log_extra = {
+        "trace_id": trace_id,
+        "candidate_name": getattr(candidate, "name", ""),
+    }
+
+    if not reflection_path.exists():
+        if logger is not None:
+            logger.info(
+                "Reflection phase 3 missing for %s",
+                getattr(candidate, "name", ""),
+                extra={
+                    "operation": "reflection_phase_3_missing",
+                    **log_extra,
+                },
+            )
+        return (
+            "_agent_state/reflection_phase_3.md is missing. Before "
+            "HARNESS_COMPLETE is accepted, write the reflection (the "
+            "orchestrator will inject the template). Each section MUST "
+            "cite specific evidence (file references like harness.py:42, "
+            "test output snippets, code excerpts). Self-attestation will "
+            "be rejected."
+        )
+
+    try:
+        reflection_md = reflection_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        # Treat read failures as missing — fail open is too lenient when
+        # the file IS there but can't be read. Caller retries with the
+        # directive.
+        if logger is not None:
+            logger.warning(
+                "Reflection read failed for %s: %s",
+                getattr(candidate, "name", ""), exc,
+                extra={
+                    "operation": "reflection_phase_3_read_error",
+                    **log_extra,
+                },
+            )
+        return f"_agent_state/reflection_phase_3.md exists but is unreadable: {exc}"
+
+    # Read upstream context for the LLM-judge.
+    objective_path = sandbox_dir / "_agent_state" / "objective.md"
+    objective_md = ""
+    if objective_path.exists():
+        try:
+            objective_md = objective_path.read_text(encoding="utf-8")
+        except OSError:
+            objective_md = ""
+
+    harness_code = _read_harness_code(sandbox_dir)
+
+    final_verdict, evidence, judge_reason = rec.evaluate(
+        reflection_md=reflection_md,
+        objective_md=objective_md,
+        harness_code=harness_code,
+        sandbox_dir=sandbox_dir,
+        client=client,
+        judge_model=judge_model,
+        llm_judge_enabled=llm_judge_enabled,
+        logger=logger,
+        trace_id=trace_id,
+        candidate_name=getattr(candidate, "name", ""),
+    )
+
+    if logger is not None:
+        logger.info(
+            "Reflection phase 3 evaluated for %s: pattern=%s final=%s",
+            getattr(candidate, "name", ""),
+            evidence.verdict.value, final_verdict.value,
+            extra={
+                "operation": "reflection_phase_3_evaluated",
+                "pattern_verdict": evidence.verdict.value,
+                "final_verdict": final_verdict.value,
+                "total_file_refs": evidence.total_file_refs,
+                "total_code_blocks": evidence.total_code_blocks,
+                "total_forensics_refs": evidence.total_forensics_refs,
+                "word_count": evidence.word_count,
+                "sections_with_evidence": evidence.sections_with_evidence,
+                "missing_sections_count": len(evidence.missing_section_headers),
+                "judge_reason": judge_reason,
+                **log_extra,
+            },
+        )
+
+    if final_verdict == rec.ReflectionVerdict.PASS:
+        return None
+
+    # FAIL — produce a directive-prompt-shaped error message.
+    detail = evidence.reason
+    if judge_reason:
+        detail = f"{detail}; {judge_reason}"
+    return (
+        f"_agent_state/reflection_phase_3.md is present but lacks substantive "
+        f"evidence: {detail}. Cite file:line references "
+        f"(e.g. harness.py:42), test output snippets, or forensics events "
+        f"for each section. The pre-HARNESS_COMPLETE reflection is the "
+        f"agent's commitment that the harness meets objective.md SUCCESS "
+        f"CRITERIA — self-attestation is not enough."
+    )
 
 
 # ---------------------------------------------------------------------------

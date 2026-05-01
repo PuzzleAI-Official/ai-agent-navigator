@@ -268,6 +268,70 @@ Every meta-file costs ~$0.30 and zero build progress.
 If you feel the urge to "save state," patch ``api_spec.txt`` with the
 relevant finding instead — that IS your memory and it survives compaction.
 
+## Autonomy artifacts — `_agent_state/` (read every turn)
+
+The orchestrator stages a `_agent_state/` directory before turn 0. This
+is a DIFFERENT category from the meta-memory files forbidden above —
+these artifacts are LOAD-BEARING for the build loop and the file gate
+explicitly allows the names listed below. The forbidden-files rule
+above still applies to ``plan.md`` / ``status.txt`` / ``state.md`` etc.
+
+**Orchestrator-owned (read-only to you):**
+  - ``_agent_state/objective.md`` — system-generated success contract.
+    Read this at every significant turn boundary. The DELIVERABLE +
+    SUCCESS CRITERIA + CONSTRAINTS + OUT OF SCOPE sections are
+    write-protected. Put candidate-specific notes in
+    `_agent_state/agent_observations.json`, not in objective.md.
+  - ``_agent_state/runtime_state.json`` — authoritative state, updated
+    every turn by the orchestrator. Trust this OVER any narrative
+    impression from the conversation history. Fields include
+    `current_phase`, `files_present`, `files_pending`,
+    `smoke_test_status`, `directives_fired`, `errors_history`.
+
+**You write (in `_agent_state/`):**
+  - ``_agent_state/build_plan.md`` — your living todo list. The
+    orchestrator seeds an initial plan before turn 0 so fast-path
+    builds have a planning artifact before scaffold writes. Replace
+    or update it when the orchestrator's turn-1 directive fires.
+    Update via `patch_file('_agent_state/build_plan.md', ...)` at
+    TRIGGER POINTS (after api_spec.txt, after scaffold writes, after
+    a failed smoke or live test, after a pivot, before
+    HARNESS_COMPLETE) — NOT every turn.
+  - ``_agent_state/agent_observations.json`` — your running notes file.
+    Optional in spirit, **strongly recommended in practice**. Append a
+    ``{"category": "phase", ...}`` entry whenever you NOTICE a phase
+    transition (api_spec.txt was just written → you're now in Phase 2;
+    smoke test passed → Phase 3; etc.). The orchestrator reads your most
+    recent phase observation to decide whether to inject redundant
+    "you are now in Phase X" directives. When your observation matches
+    its truth, the directive is SUPPRESSED — saving turns and avoiding
+    narrative-inertia bias. Use this exact shape:
+
+    ```json
+    {"turn": <N>, "category": "phase", "phase": "phase_2_build", "note": "I see api_spec.txt now exists; transitioning to scaffold writes."}
+    ```
+
+    Valid phase values: ``phase_1_research``, ``phase_2_build``,
+    ``phase_3_verify``, ``phase_4_deliver``. Append (don't overwrite)
+    via ``patch_file('_agent_state/agent_observations.json', ...)``.
+    Also useful for non-obvious decisions (``"category": "decision"``)
+    the orchestrator should be able to read for diagnostics.
+  - ``_agent_state/reflection_phase_3.md`` — pre-HARNESS_COMPLETE
+    reflection. The orchestrator will direct you to write this when you
+    signal HARNESS_COMPLETE. Each section MUST cite specific evidence
+    (file references like `harness.py:42`, test output snippets,
+    forensics events). Self-attestation is rejected by the verifier.
+
+**Discipline:**
+  1. Top of every significant turn: `read_file('_agent_state/runtime_state.json')`
+     to ground your mental model.
+  2. Before any major decision: re-read `_agent_state/objective.md`
+     SUCCESS CRITERIA. Optimize for that bar — not what the
+     conversation history makes feel important this turn.
+  3. Attempts to `write_file` or `patch_file` ``_agent_state/objective.md``
+     or ``_agent_state/runtime_state.json`` are REJECTED by the tool
+     gate. They're orchestrator-owned. Write your own files instead.
+
 ## OBSERVABILITY CONTRACT (every harness MUST self-instrument)
 
 The sandbox auto-injects ``_forensics.py`` next to your harness with a

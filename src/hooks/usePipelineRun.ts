@@ -38,8 +38,15 @@ const DEFAULT_MODES: AgentModes = {
   agent5: "real",
 };
 
+// Agent 1 is no longer "completed" by the time pipeline_started fires.
+// Under the split-Agent-1 design (intent classifier in chat handler →
+// heavy planner runs inside the pipeline), Agent 1 is the FIRST agent
+// the pipeline view should highlight as active. The backend emits
+// agent_started: agent_1 ("Designing workflow architecture") immediately
+// after pipeline_started; the existing agent_started SSE handler then
+// flips this node from pending → active.
 const INITIAL_NODES: PipelineNodeState[] = [
-  { agentId: "agent_1", label: "Understand", status: "completed" },
+  { agentId: "agent_1", label: "Design", status: "pending" },
   { agentId: "agent_2", label: "Research", status: "pending" },
   { agentId: "agent_3", label: "Test Cases", status: "pending" },
   { agentId: "agent_4", label: "Screen", status: "pending" },

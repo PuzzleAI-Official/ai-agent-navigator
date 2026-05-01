@@ -41,7 +41,7 @@ export interface PipelineNodeState {
 }
 
 export const AGENT_LABELS: Record<string, string> = {
-  agent_1: "Understand",
+  agent_1: "Design",
   agent_2: "Research",
   agent_3: "Test Cases",
   agent_4: "Screening",

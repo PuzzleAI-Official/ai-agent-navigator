@@ -670,6 +670,111 @@ def stage_forensics_shim(sandbox_dir: Path) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Autonomy-artifact staging (PR 1 — Goal/Planning/State/Reflection)
+# ---------------------------------------------------------------------------
+# At sandbox setup, the orchestrator writes two files into ``_agent_state/``:
+#   * ``objective.md`` — system-generated success contract from upstream
+#     agent outputs (Codex's "orchestrator owns the goal" critique).
+#   * ``runtime_state.json`` — orchestrator-owned authoritative state the
+#     agent reads each turn (Codex's "orchestrator owns state" critique).
+#
+# Agent-owned artifacts (``build_plan.md``, ``agent_observations.json``,
+# ``reflection_phase_<n>.md``) are written by the agent in response to
+# directives fired during the build loop — NOT staged here.
+#
+# The directory + the two orchestrator files are write-protected against
+# the agent at the tool-dispatch boundary (see ``ORCHESTRATOR_OWNED_ARTIFACTS``
+# in ``puzzleeval.agents.agent5.tools``).
+
+
+def stage_agent_state(
+    sandbox_dir: Path,
+    candidate: "ScreenedCandidate",
+    input_data: "Agent5Input",
+    *,
+    modality_playbook_ids: list[str],
+    effective_max_turns: int,
+    effective_max_budget_usd: float,
+    platform: str,
+    initial_model: str,
+) -> bool:
+    """Create ``_agent_state/`` and write the orchestrator-owned artifacts.
+
+    Idempotent: re-running rewrites the files with current content.
+    Returns True on success; False on OSError (logged by caller but
+    never raises — autonomy artifacts are soft per the PR 1 plan;
+    failure to stage falls back to the legacy reactive build path).
+
+    Args:
+        sandbox_dir: The candidate's sandbox.
+        candidate: ScreenedCandidate the build targets.
+        input_data: Agent5Input (user_understanding + test_cases).
+        modality_playbook_ids: IDs of capability playbooks composed for
+            this build (for the CONSTRAINTS section of objective.md).
+        effective_max_turns: Per-build turn cap (after voice bump).
+        effective_max_budget_usd: Per-build dollar cap.
+        platform: One of "windows", "linux", "macos".
+        initial_model: The model used for turn 0 (typically Sonnet).
+    """
+    # Lazy imports to avoid a sandbox → objective_synthesis → schemas
+    # import-time chain that would risk cycles. These modules are stable
+    # peers under agent5/ and import quickly.
+    from puzzleeval.agents.agent5 import objective_synthesis
+    from puzzleeval.agents.agent5 import runtime_state as rt_state
+    from puzzleeval.agents.agent5.autonomy_directives import (
+        initial_build_plan_content,
+    )
+
+    state_dir = sandbox_dir / "_agent_state"
+    try:
+        state_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return False
+
+    # Write objective.md (system-generated contract).
+    try:
+        objective_md = objective_synthesis.synthesize_objective(
+            candidate=candidate,
+            input_data=input_data,
+            modality_playbook_ids=modality_playbook_ids,
+            effective_max_turns=effective_max_turns,
+            effective_max_budget_usd=effective_max_budget_usd,
+            platform=platform,
+        )
+        (state_dir / "objective.md").write_text(objective_md, encoding="utf-8")
+    except OSError:
+        return False
+
+    # Seed build_plan.md so fast-path/pre-rendered api_spec builds have a
+    # planning artifact before scaffold writes. This file is intentionally
+    # agent-writable; the agent patches/replaces it at trigger points.
+    try:
+        build_plan_path = state_dir / "build_plan.md"
+        if not build_plan_path.exists():
+            build_plan_path.write_text(
+                initial_build_plan_content(candidate.name),
+                encoding="utf-8",
+            )
+    except OSError:
+        return False
+
+    # Write the initial runtime_state.json.
+    try:
+        rt_state.init_runtime_state(
+            sandbox_dir=sandbox_dir,
+            candidate=candidate,
+            input_data=input_data,
+            effective_max_turns=effective_max_turns,
+            effective_max_budget_usd=effective_max_budget_usd,
+            initial_model=initial_model,
+        )
+    except OSError:
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Per-sandbox lock registry — race-safe venv creation
 # ---------------------------------------------------------------------------
 # Both ``precreate_venvs_for_candidates`` (background, post-selection) and

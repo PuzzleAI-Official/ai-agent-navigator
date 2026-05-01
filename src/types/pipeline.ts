@@ -105,6 +105,9 @@ export interface TestResult {
   // Populated by voice/audio plugins when the test produced playable audio.
   // Empty array for non-voice tests — safe to ignore when absent.
   audio_paths?: AudioArtifact[];
+  // Merged full-conversation recording, when produced. Also mirrored as
+  // audio_paths[{ role: "conversation" }] for backward compatibility.
+  merged_audio_path?: string | null;
   // Which plugin(s) scored this test case, in invocation order.
   // Includes 'tool_runner', 'llm_judge', and specific plugin names.
   tools_used?: string[];

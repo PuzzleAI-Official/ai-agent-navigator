@@ -35,6 +35,7 @@ from puzzleeval.agents.agent5.api_call import (
     _build_context_management_edits,
     _is_ptl_error,
     make_builder_api_call,
+    sanitize_messages_for_anthropic,
 )
 from puzzleeval.schemas import FailedHarness
 
@@ -256,6 +257,46 @@ class TestSuccessPath:
         assert kw["primary_model"] == "claude-sonnet-4-6"
         assert kw["trace_id"] == "test-trace-001"
         assert "TestCand" in kw["operation_label"]
+
+
+class TestMessageSanitizer:
+    def test_drops_empty_text_messages(self):
+        messages = [
+            {"role": "user", "content": "hello"},
+            {"role": "assistant", "content": "   "},
+            {"role": "user", "content": [{"type": "text", "text": ""}]},
+        ]
+        logger = MagicMock()
+        repaired = sanitize_messages_for_anthropic(
+            messages,
+            logger=logger,
+            trace_id="trace",
+            candidate_name="Candidate",
+        )
+        assert repaired == 2
+        assert messages == [{"role": "user", "content": "hello"}]
+        logger.warning.assert_called_once()
+
+    def test_repairs_empty_tool_result_content(self):
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": ""},
+                ],
+            }
+        ]
+        repaired = sanitize_messages_for_anthropic(
+            messages,
+            logger=MagicMock(),
+            trace_id="trace",
+            candidate_name="Candidate",
+        )
+        assert repaired == 1
+        block = messages[0]["content"][0]
+        assert block["tool_use_id"] == "toolu_1"
+        assert "tool returned no content" in block["content"]
+        assert block["is_error"] is True
 
 
 # ---------------------------------------------------------------------------

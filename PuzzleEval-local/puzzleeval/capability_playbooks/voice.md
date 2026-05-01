@@ -38,6 +38,10 @@ that playbook's "error-timeout + reset-on-event" pattern before
 sizing your collection timeouts; "silence threshold" heuristics
 confuse inference latency with completion and produce zero-audio
 responses even when the shape contract here is correct.
+For WebSocket voice APIs, ping/pong/heartbeat traffic is transport
+maintenance, not agent output. Respond to it, but do not use it to keep
+the response collector alive after the agent has stopped producing audio
+or transcript events.
 
 The voice plugin (`tool_plugins/voice_realtime.py`) drives multi-turn
 conversations by calling your harness once per turn and extracting the

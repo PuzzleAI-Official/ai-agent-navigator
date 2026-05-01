@@ -52,6 +52,10 @@ class TestEvidence:
     # Empty list for non-voice tests. Frontend renders these as in-browser
     # playback controls in the evidence panel.
     audio_paths: list[dict] = field(default_factory=list)
+    # Stable pointer to the merged full-conversation recording when present.
+    # The same path is also included in audio_paths with role="conversation"
+    # so older frontend code keeps working.
+    merged_audio_path: str | None = None
     # Rubric verdict from the agentic conversational eval path. When
     # present, the frontend renders an expandable "Rubric breakdown" card
     # showing per-criterion scores + critical failures + summary. Null
@@ -239,20 +243,13 @@ def _extract_test_evidence(
         max_items = REPORT_MAX_EVIDENCE_PER_KIND
     passed = []
     failed = []
-    for tr in test_results:
+    for raw_tr in test_results:
+        tr = _test_result_to_dict(raw_tr)
         score = float(tr.get("weighted_score") or tr.get("score") or 0.0)
         # Normalize audio_paths: accept list[dict] with {role, path} keys.
         # Silently drop any malformed entries — evidence is best-effort and
         # a broken entry shouldn't break the whole report.
-        raw_audio = tr.get("audio_paths") or []
-        audio_paths: list[dict] = []
-        if isinstance(raw_audio, list):
-            for a in raw_audio:
-                if isinstance(a, dict) and "path" in a:
-                    audio_paths.append({
-                        "role": str(a.get("role") or "unknown"),
-                        "path": str(a["path"]),
-                    })
+        audio_paths, merged_audio_path = _normalize_audio_artifacts(tr)
         # Normalize rubric_verdict + transcript (agentic conversational
         # path). Both are optional — dict shapes come straight from
         # TestCaseResult.rubric_verdict.model_dump() and .transcript
@@ -274,12 +271,13 @@ def _extract_test_evidence(
         ev = TestEvidence(
             test_case_id=str(tr.get("test_case_id") or tr.get("id") or ""),
             scenario=str(tr.get("scenario") or "")[:120],
-            passed=bool(tr.get("success") or tr.get("passed", False)),
+            passed=_test_result_passed(tr),
             score=score,
             reasoning_excerpt=str(
                 tr.get("reasoning") or tr.get("error") or ""
             )[:240],
             audio_paths=audio_paths,
+            merged_audio_path=merged_audio_path,
             rubric_verdict=rubric_dict,
             transcript=transcript_list,
         )
@@ -319,6 +317,58 @@ def _derive_pros_cons(
             "Tested in sandbox / DRY_RUN mode — production behavior may differ"
         )
     return pros, cons
+
+
+def _test_result_passed(tr: dict) -> bool:
+    """Return the authoritative pass/fail bit for a test result.
+
+    `success` means the harness/API call returned a syntactically usable
+    response. `passed` means the evaluated output satisfied the test. Reports
+    must use `passed` when present; otherwise a successful-but-low-quality API
+    call is incorrectly counted as a passing test.
+    """
+    if "passed" in tr:
+        return bool(tr.get("passed"))
+    return bool(tr.get("success", False))
+
+
+def _test_result_to_dict(tr: Any) -> dict:
+    if isinstance(tr, dict):
+        return tr
+    if hasattr(tr, "model_dump"):
+        return tr.model_dump()
+    if hasattr(tr, "__dict__"):
+        return dict(tr.__dict__)
+    return {}
+
+
+def _normalize_audio_artifacts(tr: dict) -> tuple[list[dict], str | None]:
+    """Normalize audio artifacts and ensure merged conversation audio is first."""
+    raw_audio = tr.get("audio_paths") or []
+    audio_paths: list[dict] = []
+    if isinstance(raw_audio, list):
+        for a in raw_audio:
+            if isinstance(a, dict) and "path" in a:
+                clean = {
+                    "role": str(a.get("role") or "unknown"),
+                    "path": str(a["path"]),
+                }
+                if a.get("token"):
+                    clean["token"] = str(a["token"])
+                audio_paths.append(clean)
+
+    merged_audio_path = tr.get("merged_audio_path")
+    if merged_audio_path:
+        merged_audio_path = str(merged_audio_path)
+        if not any(
+            a.get("role") == "conversation" and a.get("path") == merged_audio_path
+            for a in audio_paths
+        ):
+            audio_paths.insert(0, {
+                "role": "conversation",
+                "path": merged_audio_path,
+            })
+    return audio_paths, merged_audio_path if merged_audio_path else None
 
 
 # ---------------------------------------------------------------------------
@@ -419,7 +469,7 @@ def assemble_report(
         test_results = _safe_get(cr, "test_results", []) or []
         passed_count = sum(
             1 for tr in test_results
-            if bool(_safe_get(tr, "success", False) or _safe_get(tr, "passed", False))
+            if _test_result_passed(_test_result_to_dict(tr))
         )
         total_count = len(test_results)
         pass_rate = (passed_count / total_count) if total_count else 0.0

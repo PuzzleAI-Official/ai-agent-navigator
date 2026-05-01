@@ -159,6 +159,110 @@ def _is_ptl_error(exc: anthropic.BadRequestError) -> bool:
     return any(marker in error_msg for marker in PTL_MARKERS)
 
 
+def _is_empty_content(value: Any) -> bool:
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return value.strip() == ""
+    if isinstance(value, list):
+        return len(value) == 0
+    return False
+
+
+def _sanitize_message_content(content: Any) -> tuple[Any, bool, bool]:
+    """Return (clean_content, changed, is_empty_message).
+
+    Anthropic rejects messages with empty text content. Tool-result messages are
+    special: dropping them can break assistant tool_use pairing, so empty
+    tool_result content is replaced with an explicit diagnostic string.
+    """
+    if isinstance(content, str):
+        if content.strip():
+            return content, False, False
+        return "", True, True
+
+    if not isinstance(content, list):
+        return content, False, False
+
+    cleaned: list[Any] = []
+    changed = False
+    for block in content:
+        if isinstance(block, dict):
+            block_type = block.get("type")
+            if block_type == "tool_result":
+                result_content = block.get("content")
+                if _is_empty_content(result_content):
+                    block = dict(block)
+                    block["content"] = (
+                        "(tool returned no content; PuzzleEval inserted this "
+                        "diagnostic placeholder so the Anthropic message "
+                        "contract remains valid)"
+                    )
+                    block["is_error"] = block.get("is_error", True)
+                    changed = True
+                cleaned.append(block)
+                continue
+            if block_type == "text" and str(block.get("text") or "").strip() == "":
+                changed = True
+                continue
+            cleaned.append(block)
+            continue
+
+        block_type = getattr(block, "type", None)
+        if block_type == "text" and str(getattr(block, "text", "") or "").strip() == "":
+            changed = True
+            continue
+        cleaned.append(block)
+
+    if len(cleaned) != len(content):
+        changed = True
+    return cleaned, changed, len(cleaned) == 0
+
+
+def sanitize_messages_for_anthropic(
+    messages: list,
+    *,
+    logger: Any,
+    trace_id: str,
+    candidate_name: str,
+) -> int:
+    """Remove/repair empty message content before an Anthropic API call.
+
+    This is a defensive API-boundary invariant, not a provider-specific patch:
+    no tool, server result, context compaction, or future helper may pass empty
+    user/assistant text to Anthropic. Returns the number of repaired/dropped
+    messages for telemetry.
+    """
+    repaired = 0
+    sanitized: list[Any] = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            sanitized.append(msg)
+            continue
+        content, changed, empty = _sanitize_message_content(msg.get("content"))
+        if empty:
+            repaired += 1
+            continue
+        if changed:
+            repaired += 1
+            msg = dict(msg)
+            msg["content"] = content
+        sanitized.append(msg)
+
+    if repaired:
+        messages[:] = sanitized
+        logger.warning(
+            "sanitized empty builder message content before Anthropic call",
+            extra={
+                "operation": "agent5_message_sanitized",
+                "trace_id": trace_id,
+                "candidate_name": candidate_name,
+                "repaired_messages": repaired,
+            },
+        )
+    return repaired
+
+
 # ---------------------------------------------------------------------------
 # Input + outcome types
 # ---------------------------------------------------------------------------
@@ -289,6 +393,12 @@ def make_builder_api_call(ctx: BuilderAPICallContext) -> APICallOutcome:
             # with PUZZLEEVAL_CACHE_MESSAGES_ENABLED=0.
             if CACHE_MESSAGES_ENABLED:
                 ctx.apply_message_cache_breakpoint(ctx.messages)
+            sanitize_messages_for_anthropic(
+                ctx.messages,
+                logger=ctx.logger,
+                trace_id=ctx.trace_id,
+                candidate_name=candidate_name,
+            )
 
             # Wrap in model-fallback ladder: on persistent 429 at
             # ``current_model`` (Opus 4.7 by default), degrade to Sonnet
@@ -361,6 +471,7 @@ def make_builder_api_call(ctx: BuilderAPICallContext) -> APICallOutcome:
                     turns_attempted=ctx.turn,
                     web_fetch_blocks=ctx.candidate_web_fetch_blocks,
                     build_cost_usd=round(ctx.accumulated_cost, 4),
+                    harness_dir=str(ctx.sandbox_dir),
                 )
             )
 
@@ -401,6 +512,7 @@ def make_builder_api_call(ctx: BuilderAPICallContext) -> APICallOutcome:
                     turns_attempted=ctx.turn,
                     web_fetch_blocks=ctx.candidate_web_fetch_blocks,
                     build_cost_usd=round(ctx.accumulated_cost, 4),
+                    harness_dir=str(ctx.sandbox_dir),
                 )
             )
 
@@ -424,6 +536,7 @@ def make_builder_api_call(ctx: BuilderAPICallContext) -> APICallOutcome:
                     turns_attempted=ctx.turn,
                     web_fetch_blocks=ctx.candidate_web_fetch_blocks,
                     build_cost_usd=round(ctx.accumulated_cost, 4),
+                    harness_dir=str(ctx.sandbox_dir),
                 )
             )
 
@@ -445,4 +558,5 @@ __all__ = [
     "BuilderAPICallContext",
     "PTL_MARKERS",
     "make_builder_api_call",
+    "sanitize_messages_for_anthropic",
 ]

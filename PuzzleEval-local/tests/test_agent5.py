@@ -37,6 +37,30 @@ from puzzleeval.schemas import (
 from puzzleeval.validators import validate_agent5_output, ValidationResult
 
 
+@pytest.fixture(autouse=True)
+def _disable_legacy_blocking_gates_for_agent5_mocks(monkeypatch):
+    """The legacy integration tests in this file mock 2-3 API responses
+    per build. After the autonomy + forensics gates were unified into the
+    completion path (Goal/Planning/State/Reflection PR 1-3), those gates
+    can fire on minimal mock harnesses that don't import ``_forensics``
+    or write a reflection — consuming an extra API call that the mocks
+    don't provide. Disable the gates that aren't the focus of these
+    integration tests; the gates have their own dedicated test files
+    (``test_autonomy_artifacts.py``, ``test_reflection_gate.py``,
+    ``test_forensics_layer.py``).
+    """
+    monkeypatch.setenv("PUZZLEEVAL_GATE_AUTONOMY_ARTIFACTS", "0")
+    monkeypatch.setenv("PUZZLEEVAL_GATE_FORENSICS_COVERAGE", "0")
+    monkeypatch.setenv("PUZZLEEVAL_GATE_REFLECTION_PHASE_3", "0")
+    monkeypatch.setenv("PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK", "0")
+    monkeypatch.setenv("PUZZLEEVAL_VENV_PREINSTALL", "0")
+    monkeypatch.setenv("PUZZLEEVAL_DIRECTIVE_SUPPRESS_ON_AGREEMENT", "0")
+    import importlib
+    import puzzleeval.config as cfg
+    importlib.reload(cfg)
+    yield
+
+
 # ============================================================================
 # Test Fixtures — Reusable test data
 # ============================================================================

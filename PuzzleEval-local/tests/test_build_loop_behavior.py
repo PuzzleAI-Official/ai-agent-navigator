@@ -60,7 +60,16 @@ def _disable_phase1_scaffold_gate_for_legacy_mocks(monkeypatch):
     Windows/Anaconda.
     """
     monkeypatch.setenv("PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK", "0")
+    monkeypatch.setenv("PUZZLEEVAL_GATE_FORENSICS_COVERAGE", "0")
     monkeypatch.setenv("PUZZLEEVAL_VENV_PREINSTALL", "0")
+    # PR 1 (autonomy artifacts) — these tests pin the LEGACY build-loop
+    # behavior (PHASE2_DIRECTIVE injection, message accumulation through
+    # the model transition). The autonomy layer is verified separately by
+    # tests/test_autonomy_*.py. Disable both flags here so legacy contracts
+    # remain pinned. Tests that explicitly want the new behavior re-enable
+    # them via their own monkeypatch.
+    monkeypatch.setenv("PUZZLEEVAL_GATE_AUTONOMY_ARTIFACTS", "0")
+    monkeypatch.setenv("PUZZLEEVAL_CONTEXT_COMPACTION_AT_MODEL_TRANSITION", "0")
     import puzzleeval.config as cfg
     importlib.reload(cfg)
     from puzzleeval.agents import implement_test_env as ite
@@ -392,6 +401,72 @@ class TestVerificationGateContract:
         # smoke_test_passed reflects either real smoke run OR
         # SMOKE TEST PASSED in last_text OR HARNESS_COMPLETE in last_text
         assert h.smoke_test_passed is True
+
+    @patch("puzzleeval.agents.implement_test_env.anthropic.Anthropic")
+    def test_complete_signal_routes_through_reflection_gate_when_autonomy_enabled(
+        self, mock_anthropic_cls, monkeypatch,
+    ):
+        """SMOKE TEST PASSED + HARNESS_COMPLETE must not bypass the
+        reflection gate when autonomy artifacts are enabled."""
+        monkeypatch.setenv("PUZZLEEVAL_GATE_AUTONOMY_ARTIFACTS", "1")
+        monkeypatch.setenv("PUZZLEEVAL_GATE_REFLECTION_PHASE_3", "1")
+        monkeypatch.setenv("PUZZLEEVAL_GATE_FORENSICS_COVERAGE", "0")
+        import puzzleeval.config as cfg
+        importlib.reload(cfg)
+
+        from puzzleeval.agents.implement_test_env import run_implement_test_env_agent
+
+        mock_client = MagicMock()
+        mock_anthropic_cls.return_value = mock_client
+
+        write_harness = _make_mock_response(
+            [
+                _make_tool_use_block("write_file", {
+                    "filename": "harness.py",
+                    "content": (
+                        'def run(input_data):\n'
+                        '    return {"output":"x","latency_ms":1,"tokens_used":None,'
+                        '"cost_usd":None,"raw_response":{},"success":True,"error":None}\n'
+                    ),
+                }, "tu_1"),
+            ],
+            stop_reason="tool_use",
+        )
+        complete_without_reflection = _make_mock_response(
+            [_make_text_block("SMOKE TEST PASSED\nHARNESS_COMPLETE")],
+            stop_reason="end_turn",
+        )
+        failed_after_retry = _make_mock_response(
+            [_make_text_block("HARNESS_FAILED")],
+            stop_reason="end_turn",
+        )
+        mock_client.beta.messages.create.side_effect = [
+            write_harness,
+            complete_without_reflection,
+            failed_after_retry,
+        ]
+
+        result = run_implement_test_env_agent(
+            _make_input_with_one_candidate("ReflectionGateE2E")
+        )
+
+        assert len(result.harnesses) == 0
+        assert len(result.failed_harnesses) == 1
+
+        third_call_messages = mock_client.beta.messages.create.call_args_list[2].kwargs["messages"]
+        all_user_text = ""
+        for msg in third_call_messages:
+            if msg.get("role") != "user":
+                continue
+            content = msg.get("content")
+            if isinstance(content, str):
+                all_user_text += content
+            elif isinstance(content, list):
+                for blk in content:
+                    if isinstance(blk, dict):
+                        all_user_text += blk.get("text", "")
+        assert "reflection_phase_3.md" in all_user_text
+        assert "Verification Issues" in all_user_text
 
 
 # ---------------------------------------------------------------------------

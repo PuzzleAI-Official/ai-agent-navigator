@@ -9,11 +9,13 @@
 # it correctly.
 # ============================================================================
 
+import json
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from puzzleeval.schemas import (
+    Agent3GenerationResult,
     Agent3Input,
     Agent3Result,
     Constraints,
@@ -224,6 +226,38 @@ class TestSchemas:
         assert tc.test_file_path is None
         assert tc.input_type == "structured_data"
 
+    def test_test_case_serializes_structured_text_payload_fields(self):
+        """Non-strict tool output may emit JSON objects for JSON-text fields."""
+        tc = TestCase(
+            id="tc-json",
+            sub_task_ref="Create bill entries in QuickBooks from structured data",
+            scenario="Structured payload arrives from an upstream workflow step",
+            input_type="structured_data",
+            input_data={"invoice_id": "INV-1", "total": 42.5},
+            output_type="structured_json",
+            expected_output={"created": True, "invoice_id": "INV-1"},
+            judgement_criteria=[
+                JudgementCriterion(
+                    criterion="Must preserve invoice id",
+                    weight=0.5,
+                    eval_type="exact_match",
+                ),
+                JudgementCriterion(
+                    criterion="Must report created status",
+                    weight=0.5,
+                    eval_type="format_compliance",
+                ),
+            ],
+            difficulty="easy",
+            tags=["happy_path"],
+        )
+
+        assert json.loads(tc.input_data) == {"invoice_id": "INV-1", "total": 42.5}
+        assert json.loads(tc.expected_output) == {
+            "created": True,
+            "invoice_id": "INV-1",
+        }
+
     def test_test_case_with_file(self):
         """A TestCase with a user-uploaded file should have test_file_path set."""
         tc = _make_sample_test_cases()[0]  # Invoice OCR — has file
@@ -236,6 +270,14 @@ class TestSchemas:
         assert len(result.test_cases) == 3
         assert "Extract structured data from invoice photos" in result.coverage_summary
         assert result.coverage_summary["Extract structured data from invoice photos"] == 2
+
+    def test_agent3_generation_schema_excludes_business_fixture(self):
+        """The LLM-emitted schema must not include orchestrator metadata."""
+        generation_schema = Agent3GenerationResult.model_json_schema()
+        persisted_schema = Agent3Result.model_json_schema()
+
+        assert "business_fixture" not in generation_schema.get("properties", {})
+        assert "business_fixture" in persisted_schema.get("properties", {})
 
     def test_agent3_input_requires_fields(self):
         """Agent3Input needs user_understanding and trace_id."""
@@ -402,6 +444,41 @@ class TestSyntheticTestsAgent:
 
         # Verify messages.parse was called (single step, not two)
         assert mock_client.messages.parse.call_count == 1
+        parse_call = mock_client.messages.parse.call_args
+        assert parse_call.kwargs.get("output_format") is Agent3GenerationResult
+        from puzzleeval.anthropic_client import (
+            AGENT3_GENERATION_MAX_RETRIES,
+            AGENT3_GENERATION_TIMEOUT_S,
+        )
+        client_call = mock_anthropic_class.call_args
+        assert client_call.kwargs.get("timeout") == AGENT3_GENERATION_TIMEOUT_S
+        assert client_call.kwargs.get("max_retries") == AGENT3_GENERATION_MAX_RETRIES
+
+    @patch("puzzleeval.agents.agent3.core.anthropic.Anthropic")
+    def test_business_fixture_attached_after_generation(self, mock_anthropic_class):
+        """Fixture is passed as context, not emitted by the LLM schema."""
+        expected_result = _make_agent3_result()
+        fixture = {"canonical_facts": ["Latte: $5.50"], "synthetic": False}
+
+        mock_client = MagicMock()
+        mock_anthropic_class.return_value = mock_client
+        mock_client.messages.parse.return_value = self._make_mock_response(
+            expected_result
+        )
+
+        input_data = Agent3Input(
+            user_understanding=_make_user_understanding(),
+            trace_id="test-agent3-fixture",
+            business_fixture=fixture,
+        )
+
+        from puzzleeval.agents.agent3.core import run_synthetic_tests_agent
+
+        result = run_synthetic_tests_agent(input_data)
+
+        parse_call = mock_client.messages.parse.call_args
+        assert parse_call.kwargs.get("output_format") is Agent3GenerationResult
+        assert result.business_fixture == fixture
 
     @patch("puzzleeval.agents.agent3.core.anthropic.Anthropic")
     def test_api_connection_error_raises_agent_error(self, mock_anthropic_class):

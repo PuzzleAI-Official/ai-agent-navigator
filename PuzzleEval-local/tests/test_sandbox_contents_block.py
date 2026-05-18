@@ -56,16 +56,16 @@ class TestSandboxContentsBlockExists:
             "so the contents listing actually appears in the prompt."
         )
 
-    def test_helper_listed_before_prefetched_docs(self):
+    def test_helper_listed_before_research_inputs(self):
         """Ordering: the sandbox inventory should appear BEFORE the
-        prefetched-docs teaching section. Otherwise the builder reads
+        consolidated research-inputs section. Otherwise the builder reads
         the teaching first but doesn't have the inventory to act on."""
         fn_start = IMPL_SRC.find("def _build_initial_message")
         next_fn = IMPL_SRC.find("\ndef ", fn_start + 1)
         fn_body = IMPL_SRC[fn_start:next_fn if next_fn != -1 else len(IMPL_SRC)]
         contents_pos = fn_body.find("_format_sandbox_contents_block")
-        prefetched_pos = fn_body.find("_format_prefetched_docs_block")
-        assert contents_pos < prefetched_pos
+        research_inputs_pos = fn_body.find("_format_research_inputs_block")
+        assert contents_pos < research_inputs_pos
 
 
 class TestSandboxContentsRenders:

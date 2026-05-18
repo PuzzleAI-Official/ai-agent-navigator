@@ -40,6 +40,7 @@ Tag each test case with the dimensions it covers (a test can cover multiple).
 ## Input Data Rules
 
 - input_data MUST contain the ACTUAL test content (not a description of what to generate)
+- input_data and expected_output are ALWAYS strings in the TestCase schema. If the content is structured, emit a JSON-encoded string, not a raw JSON object.
 - For text-based tests: write the actual text (customer email, chat message, query, document text)
 - Make data REALISTIC and domain-appropriate — use plausible names, numbers, dates
 - Vary the data across test cases — don't reuse the same names/values
@@ -93,7 +94,7 @@ When sub-tasks include `[Architecture]` annotations:
   - output_format=action → output_type="action"
 - `input_source` tells you what feeds this step:
   - "user provides input directly" → input_type matches the sub-task's nature (text, document_content, conversation, etc.)
-  - "receives output from step_N" → input_type should be "structured_data" or "text" depending on step_N's output_format. The test case input_data should SIMULATE what the upstream step would produce (e.g., if step_1 is OCR with output_format=structured_json, then step_2's input_data should be a realistic JSON object with extracted invoice fields, NOT a raw invoice image)
+  - "receives output from step_N" → input_type should be "structured_data" or "text" depending on step_N's output_format. The test case input_data should SIMULATE what the upstream step would produce (e.g., if step_1 is OCR with output_format=structured_json, then step_2's input_data should be a JSON-encoded string containing extracted invoice fields, NOT a raw JSON object or raw invoice image)
 - `requires_test_files=True` means the sub-task ideally tests with real files. When generating synthetic tests for a file-based sub-task, use input_type="document_content" and write realistic text representations of what the file would contain.
 - `step_id` is the scope identifier. Set sub_task_ref to the sub-task's EXACT description string (as before), but be aware this test case will be routed to candidates covering that step_id during Phase 9 testing.
 
@@ -140,7 +141,7 @@ authoritative; every subsection below refines it.
 
 | Modality group                              | `input_data`                       | `input_context`                    | `persona`/`goal`/`constraints`/`rubric`/`max_turns` | `evaluation_mode`  |
 |---------------------------------------------|------------------------------------|------------------------------------|-----------------------------------------------------|--------------------|
-| **Conversational multi-turn**<br>(`conversation`, `voice_conversation`)   | minimal JSON placeholder (`{"channel":"chat"}` or `{"shape":"twilio"}`) — the simulator generates utterances at runtime | **`instructions` REQUIRED** — agent's system prompt (persona/domain/policy) | **ALL REQUIRED** — populated with persona + goal + rubric (4-6 weighted criteria) | `"agentic"`        |
+| **Conversational multi-turn**<br>(`conversation`, `voice_conversation`)   | minimal JSON string placeholder (`"{\"channel\":\"chat\"}"` or `"{\"shape\":\"twilio\"}"`) — the simulator generates utterances at runtime | **`instructions` REQUIRED** — agent's system prompt (persona/domain/policy) | **ALL REQUIRED** — populated with persona + goal + rubric (4-6 weighted criteria) | `"agentic"`        |
 | **Conversational single-turn**<br>(`voice_turn`, `chat`) | utterance payload (`spoken_text`, `expected_response_substring`, etc.) | **`instructions` REQUIRED** — agent's system prompt | `rubric` optional (2-4 criteria for LLM judge); `persona`/`goal`/`constraints`/`max_turns` EMPTY  | `"agentic"` when rubric present, else `"auto"` |
 | **Document / OCR**<br>(`document_content` → `structured_json`/`extraction`) | text description of doc (or the doc content itself) | `{}` or per-test metadata only (language, format, page_count) — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
 | **Image / vision**<br>(`image_description`, `output_type=media_url`)      | prompt text OR description of image content | `{}` or metadata (size, style) — **NEVER instructions** | **ALL EMPTY**                                       | `"auto"` (unused)  |
@@ -190,10 +191,11 @@ test silently degrades to the broken legacy path.
 **Required TestCase fields** (refer to the matrix above — this section
 details each):
 
-- **`input_data`**: minimal JSON placeholder — the simulator generates
+- **`input_data`**: minimal JSON string placeholder — the simulator generates
   user utterances at runtime, so `input_data` is NOT the driver. Use
-  `{"channel": "chat"}` for text conversation. The schema requires a
-  non-empty value; that's all this field carries here.
+  `"{\"channel\":\"chat\"}"` for text conversation. Emit this as a
+  string value, not as a JSON object. The schema requires a non-empty
+  value; that's all this field carries here.
 
 - **`input_context.instructions`**: the AGENT's system prompt. Required
   for conversational tests; see the co-located rule below for the
@@ -239,9 +241,10 @@ details each):
   can judge `scope_adherence`/`policy_compliance` against the actual
   rules you defined, not guess them.
 
-- **`max_turns`**: hard cap on conversation length. 4-6 for information
-  requests; 6-8 for booking/transactional flows. Clamped by
-  CONVERSATION_MAX_TURNS_CEILING (default 12).
+- **`max_turns`**: hard cap on conversation length. 3-4 for information
+  requests; 4-5 for typical booking/transactional flows; 6 only when
+  the scenario truly needs a longer call. Clamped by
+  CONVERSATION_MAX_TURNS_CEILING (default 6).
 
 - **`evaluation_mode`**: set to `"agentic"` explicitly. Do NOT leave as
   `"auto"` — explicit triggers a validator warning if any of
@@ -257,6 +260,26 @@ something stated earlier). Add (5) domain-specific edge case and (6)
 policy-violation bait (agent should refuse/escalate) when the scope
 has those failure modes in scope.
 
+Every multi-turn conversational rubric must include a continuity/memory
+criterion. It should explicitly penalize repeated first-turn behavior:
+after the opening exchange, the agent must not reintroduce itself, repeat
+the same opener, or ask for facts the caller already gave unless it is
+confirming them.
+
+Rubrics must match the scenario's achievable outcome. If the setup says
+an item, time slot, service area, capability, or request is unavailable
+or out-of-scope, the goal/rubric must reward the correct decline,
+redirection, escalation, or alternative offer. Do not demand successful
+booking, ordering, dispatch, or completion of work the scenario itself
+made impossible.
+
+When the request message includes a **Canonical Business Fixture**, treat
+it as authoritative. Do not invent menu items, prices, hours, service
+areas, policies, SKUs, or appointment constraints absent from that
+fixture. If the fixture is a synthetic gap marker, test clarification,
+uncertainty handling, refusal, or escalation rather than exact totals or
+exact unavailable facts.
+
 **Each test = ONE agentic conversation, NOT N static scripts.** The
 simulator branches per turn based on what the agent actually says;
 running one conversation exercises 3-8 turns of quality signal —
@@ -268,7 +291,7 @@ needs only 3 scenarios; emit 3 + a note explaining why.
 
 For back-compat only. When `evaluation_mode` is explicitly set to
 `"scripted"`:
-- **input_data**: `{"conversation_script": {"user_turns": [...], "assertions": [...]}}`
+- **input_data**: a JSON string like `"{\"conversation_script\":{\"user_turns\":[...],\"assertions\":[...]}}"`
 
 `turn_index` is 0-based for the agent's reply to user turn N; -1 means
 the final agent turn. `check_type` is one of `contains` / `not_contains`
@@ -345,9 +368,10 @@ single-turn exchanges (IVR press-1-for-sales).
 
 Voice-specific deltas vs text conversation:
 
-- **`input_data`**: protocol-shape placeholder only —
-  `{"shape": "twilio"}` (or `"vonage"` / `"generic"`). `shape` selects
-  the response parser; it does NOT affect evaluation. Do NOT put
+- **`input_data`**: protocol-shape JSON string placeholder only —
+  `"{\"shape\":\"twilio\"}"` (or `"vonage"` / `"generic"` inside the
+  JSON string). Emit it as a string value, not a JSON object. `shape`
+  selects the response parser; it does NOT affect evaluation. Do NOT put
   `instructions` here (see the matrix above).
 - **`persona`**: tune demographics + emotional state for PHONE callers
   (e.g., "3am call, panicked, talks fast, asks price upfront").
@@ -359,9 +383,16 @@ Voice-specific deltas vs text conversation:
   `accuracy_no_hallucination` (`critical=True`) — agents commonly
   invent hours/prices/capabilities under time pressure. Add
   `call_etiquette` (greeting, hold handling, transfer offer) for
-  high-contact customer-service scopes.
-- **`max_turns`**: 4-8 for typical phone flows (booking 6-8,
-  information 3-4).
+  high-contact customer-service scopes. Add `continuity_memory` for
+  every voice conversation: greet once at the start, then maintain call
+  context without repeating the opener or reintroducing the business on
+  later turns.
+- **Consistency check**: for unavailable/off-menu/out-of-service-area
+  scenarios, the voice rubric should score graceful refusal, escalation,
+  or alternatives. It must not ask the judge to reward completing the
+  unavailable action.
+- **`max_turns`**: 3-5 for typical phone flows (booking usually 4-5,
+  information 3-4); use 6 only for genuinely complex scenarios.
 
 Generate 3-5 voice tests per multi-turn voice scope covering: happy
 path, ambiguous/frustrated caller, out-of-scope request, context-
@@ -369,7 +400,7 @@ dependency.
 
 Legacy scripted mode (`evaluation_mode="scripted"`): preserved for
 back-compat only. Shape:
-`{"shape": "twilio", "turns": [{"user_text": "...", "expected_agent_contains": "..."}]}`.
+`"{\"shape\":\"twilio\",\"turns\":[{\"user_text\":\"...\",\"expected_agent_contains\":\"...\"}]}"`.
 Do NOT use for new tests — misses adaptive-conversation + rubric
 quality signal.
 
@@ -382,10 +413,10 @@ substring-matching.
 
 Populate:
 
-- **input_data**: `{"shape": "twilio"|"vonage"|"generic",
-   "spoken_text": "What time do you close today?",
-   "expected_response_substring": "9 PM"}` — the spoken text still
-   drives the single caller turn.
+- **input_data**: a JSON string like
+  `"{\"shape\":\"twilio\",\"spoken_text\":\"What time do you close today?\",\"expected_response_substring\":\"9 PM\"}"`
+  — the spoken text still drives the single caller turn. Emit the
+  payload as a string value, not as a JSON object.
 - **rubric**: optional but recommended — 2-4 criteria. Example:
   ```json
   [{"name": "answered_correctly", "description": "Did the agent give the correct closing time (9 PM)?", "weight": 0.7, "critical": true, "min_passing_score": 0.5},
@@ -393,7 +424,7 @@ Populate:
   ```
 - Leave `persona` / `goal` / `constraints` empty — unused for single-turn.
 - `evaluation_mode`: `"agentic"` to use rubric judging; `"scripted"` to
-  use substring-match only (legacy).
+  use legacy deterministic evidence checks only.
 
 Generate 2-4 cases per voice scope.
 

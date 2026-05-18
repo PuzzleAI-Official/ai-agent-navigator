@@ -48,7 +48,10 @@
 
 import time
 
-import anthropic
+try:
+    import anthropic
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    from puzzleeval.anthropic_client import anthropic  # type: ignore
 
 from functools import lru_cache
 from importlib import resources
@@ -1011,8 +1014,8 @@ def inject_explicit_candidates(
         ahead of most Agent 2 finds but behind true user-added via the
         SelectionPanel's "+ Add provider" which uses 0.99), and
         coverage over every blueprint step (we don't know which scope
-        the user had in mind, so claim all of them — Phase 6.5's
-        deep-verify will narrow it).
+        the user had in mind, so claim all of them — later
+        selected-candidate screening/research will narrow it).
 
     Returns a NEW Agent2Result. Never mutates the input.
     """
@@ -1026,7 +1029,7 @@ def inject_explicit_candidates(
 
     step_ids = sorted(blueprint_step_ids or [])
     # When there's no blueprint, we still inject but leave covers empty
-    # so Phase 6.5 / Phase 9 fall back to flat-flow behavior.
+    # so selected-candidate verification/testing fall back to flat flow.
     covers = step_ids
     confidence = {sid: "claimed" for sid in covers}
 
@@ -1102,7 +1105,8 @@ def inject_explicit_candidates(
             description=(
                 f"{raw_name.strip()} — auto-injected because the user "
                 "explicitly mentioned this provider in their request. "
-                "Phase 6.5 will deep-verify the public API surface."
+                "Selected-candidate screening/research will verify the "
+                "public API surface."
             ),
             api_available=True,
             api_docs_url=None,
@@ -1144,10 +1148,10 @@ def inject_user_candidates(
     - Every user-added candidate gets `source="user_provided"`,
       `relevance_score=0.99` (guarantees top-K inclusion at every scope
       it covers), and explicit `covers_step_ids` / `coverage_confidence`
-      derived from the user's claim (all "claimed" — Phase 6.5 verifies
-      later).
-    - `api_docs_url` passes through when provided; Phase 6.5's 4A uses
-      it as the starting point for deep verify.
+      derived from the user's claim (all "claimed" — selected-candidate
+      screening/research verifies later).
+    - `api_docs_url` passes through when provided; Agent 4 uses it as
+      the starting point for docs-entrypoint/access verification.
 
     Returns a NEW Agent2Result. Never mutates the input.
     """

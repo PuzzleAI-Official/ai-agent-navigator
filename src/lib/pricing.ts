@@ -7,7 +7,7 @@
 // behavior stays in sync — any change here should land in pricing.py too.
 //
 // All functions accept `null | undefined` breakdowns gracefully — the
-// deep-verify pass may not have populated pricing for every candidate,
+// selected-candidate verification may not have populated pricing for every candidate,
 // so every call site needs a null-safe path.
 // ============================================================================
 

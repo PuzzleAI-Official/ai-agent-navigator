@@ -1,4 +1,4 @@
-"""Conversation simulator — multi-turn test runner for chatbot/inbound agents.
+﻿"""Conversation simulator â€” multi-turn test runner for chatbot/inbound agents.
 
 Single-shot request/response harness can't evaluate "does the bot keep
 state across 5 turns + ask the right clarifying questions?" or
@@ -16,7 +16,7 @@ script:
     mention required topics? did it stay on intent? did it ask the
     expected clarifying question?
 
-The simulator is harness-agnostic — it calls the candidate's
+The simulator is harness-agnostic â€” it calls the candidate's
 ``run(input_data)`` with conversation history in the input. The shape
 is whatever the harness expects; common forms:
 
@@ -36,6 +36,7 @@ from typing import Any, Callable
 
 from puzzleeval.tool_plugins import (
     EvaluationResult,
+    HARNESS_EXECUTION_SINGLE_CALL,
     PluginCapabilities,
     SynthesisResult,
     ToolPlugin,
@@ -56,10 +57,10 @@ class ConversationAssertion:
 
     ``turn_index``: 0-based index of the agent turn this assertion checks.
                     -1 means the FINAL agent turn.
-    ``check_type``: ``contains`` (case-insensitive substring),
-                    ``not_contains``, ``regex_match``, ``intent_match``
-                    (semantic — uses LLM judge fallback).
-    ``value``: the substring / regex / expected intent.
+    ``check_type``: ``contains`` / ``not_contains`` / ``regex_match`` are
+                    deterministic evidence extractors; ``intent_match`` and
+                    production scripted evaluation use semantic review.
+    ``value``: the literal/regex/expected intent to evaluate.
     """
     turn_index: int
     check_type: str
@@ -95,6 +96,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
             # Drives the harness: needs a harness_runner to invoke
             # harness.run() once per turn in the conversation script.
             requires_harness_runner=True,
+            harness_execution_mode=HARNESS_EXECUTION_SINGLE_CALL,
             notes=(
                 "Multi-turn replay. Harness-agnostic: works with any "
                 "{messages: [...]} / {conversation: [...]} / "
@@ -112,7 +114,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
         """Build a domain-neutral 3-turn conversation script.
 
         Real test cases override this with detailed scripts. The default
-        seed exercises: greeting → information request → follow-up.
+        seed exercises: greeting â†’ information request â†’ follow-up.
         """
         script = ConversationScript(
             user_turns=[
@@ -161,10 +163,10 @@ class ConversationSimulatorPlugin(ToolPlugin):
 
         Two modes, selected automatically based on what's in ``expected``:
 
-            **Scripted** (legacy): ``expected`` carries a ``conversation_script``
-            with user_turns[] + assertions[]. Each user turn is fed to
-            the harness in order; assertions are substring-matched against
-            the recorded agent turns. Today's behavior — unchanged.
+            **Scripted**: ``expected`` carries a ``conversation_script`` with
+            user_turns[] + assertions[]. Each user turn is fed to the harness
+            in order; deterministic assertions become evidence signals, and
+            production callers may require evidence-grounded semantic review.
 
             **Agentic** (new): when kwargs contain ``persona`` + ``goal`` +
             ``rubric``, the plugin runs user_simulator to generate each
@@ -182,7 +184,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
         (``{success, output, latency_ms, raw_response, error}``). Same
         contract in both modes.
 
-        ``response`` is unused — this plugin DRIVES the harness rather
+        ``response`` is unused â€” this plugin DRIVES the harness rather
         than judging an existing response.
 
         Agentic kwargs:
@@ -195,7 +197,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
             anthropic_client: optional; built lazily if omitted
             trace_id: correlation ID for logs
         """
-        # ── Resolve mode ──
+        # â”€â”€ Resolve mode â”€â”€
         try:
             from puzzleeval.config import CONVERSATION_EVAL_MODE as _GLOBAL_MODE
         except Exception:  # pragma: no cover
@@ -209,7 +211,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
         rubric = kwargs.get("rubric")
         # Merge caller-provided input_context into expected so the
         # downstream agent_system_prompt extraction has ONE unified
-        # source. Caller's wins on key conflict — Agent 5 knows the
+        # source. Caller's wins on key conflict â€” Agent 5 knows the
         # authoritative TestCase.input_context.
         _caller_ic = kwargs.get("input_context")
         if _caller_ic and isinstance(expected, dict):
@@ -218,7 +220,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
             expected = dict(expected)
             expected["input_context"] = merged_ic
         elif _caller_ic:
-            # `expected` wasn't a dict — synthesize a minimal wrapper
+            # `expected` wasn't a dict â€” synthesize a minimal wrapper
             # so the input_context reaches the judge.
             expected = {"input_context": dict(_caller_ic)}
 
@@ -231,10 +233,10 @@ class ConversationSimulatorPlugin(ToolPlugin):
         if effective_mode == "agentic" and not (
             persona is not None and goal and rubric
         ):
-            # Missing pieces — fall back to scripted
+            # Missing pieces â€” fall back to scripted
             logger.warning(
                 "conversation_simulator: agentic mode requested but "
-                "persona/goal/rubric incomplete — falling back to scripted.",
+                "persona/goal/rubric incomplete â€” falling back to scripted.",
                 extra={"operation": "agentic_mode_fallback"},
             )
             effective_mode = "scripted"
@@ -268,7 +270,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
                 persona=persona, goal=goal,
                 constraints=kwargs.get("constraints") or [],
                 rubric=rubric,
-                max_turns=kwargs.get("max_turns") or 6,
+                max_turns=kwargs.get("max_turns") or 4,
                 harness_runner=harness_runner,
                 conversation_format=conversation_format,
                 anthropic_client=kwargs.get("anthropic_client"),
@@ -277,7 +279,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
                 agent_system_prompt=agent_system_prompt,
             )
 
-        # ── Scripted path ──
+        # â”€â”€ Scripted path â”€â”€
         script = self._extract_script(expected)
         if script is None:
             return EvaluationResult(
@@ -291,9 +293,22 @@ class ConversationSimulatorPlugin(ToolPlugin):
                 reasoning="no harness_runner provided to drive the conversation",
                 fallback_reason="no_runner",
             )
+        agent_system_prompt = ""
+        if isinstance(expected, dict):
+            ic = expected.get("input_context")
+            if isinstance(ic, dict):
+                for _alias in ("instructions", "system_prompt", "system", "brief", "agent_prompt"):
+                    _val = ic.get(_alias)
+                    if isinstance(_val, str) and _val.strip():
+                        agent_system_prompt = _val.strip()
+                        break
         return self._evaluate_scripted(
             script=script, harness_runner=harness_runner,
             conversation_format=conversation_format,
+            anthropic_client=kwargs.get("anthropic_client"),
+            trace_id=kwargs.get("trace_id", "no-trace"),
+            agent_system_prompt=agent_system_prompt,
+            semantic_review_required=bool(kwargs.get("semantic_review_required")),
         )
 
     def _evaluate_scripted(
@@ -302,13 +317,24 @@ class ConversationSimulatorPlugin(ToolPlugin):
         script: "ConversationScript",
         harness_runner: Callable[[dict], dict],
         conversation_format: str,
+        anthropic_client=None,
+        trace_id: str = "no-trace",
+        agent_system_prompt: str = "",
+        semantic_review_required: bool = False,
     ) -> EvaluationResult:
-        """Legacy script-driven path — preserved as-is for back-compat."""
+        """Script-driven replay with semantic review when available."""
         history: list[dict[str, str]] = []
+        transcript: list[dict[str, Any]] = []
         agent_turns: list[str] = []
         per_turn_errors: list[str] = []
-        for user_turn in script.user_turns:
+        for turn_index, user_turn in enumerate(script.user_turns):
             history.append({"role": "user", "content": user_turn})
+            transcript.append({
+                "turn_index": len(transcript),
+                "role": "user",
+                "text": user_turn,
+                "meta": {"script_turn_index": turn_index},
+            })
             payload = self._payload_for_format(history, conversation_format)
             try:
                 turn_result = harness_runner(payload)
@@ -324,6 +350,12 @@ class ConversationSimulatorPlugin(ToolPlugin):
             agent_text = self._extract_agent_text(output)
             agent_turns.append(agent_text)
             history.append({"role": "assistant", "content": agent_text})
+            transcript.append({
+                "turn_index": len(transcript),
+                "role": "agent",
+                "text": agent_text,
+                "meta": {"script_turn_index": turn_index},
+            })
 
         # Score assertions
         passed_weights = 0.0
@@ -355,6 +387,29 @@ class ConversationSimulatorPlugin(ToolPlugin):
             1.0 if not per_turn_errors else 0.0
         )
         passed = (score >= 0.6) and not per_turn_errors
+        semantic_review = None
+        if semantic_review_required and not per_turn_errors and script.assertions:
+            from puzzleeval.semantic_review import review_scripted_conversation_semantics
+
+            semantic_review = review_scripted_conversation_semantics(
+                transcript=transcript,
+                assertions=[
+                    {
+                        "turn_index": assertion.turn_index,
+                        "check_type": assertion.check_type,
+                        "value": assertion.value,
+                        "weight": assertion.weight,
+                    }
+                    for assertion in script.assertions
+                ],
+                candidate_role="text conversation harness",
+                agent_system_prompt=agent_system_prompt,
+                client=anthropic_client,
+                trace_id=trace_id,
+            )
+            if semantic_review.get("available"):
+                passed = bool(semantic_review.get("passed"))
+                score = float(semantic_review.get("score") or 0.0)
         return EvaluationResult(
             passed=passed,
             score=score,
@@ -362,6 +417,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
                 f"{len(agent_turns)} turn(s) executed; "
                 f"{sum(1 for d in assertion_detail if d['passed'])}/"
                 f"{len(assertion_detail)} assertions passed"
+                + ("; semantic review applied" if semantic_review and semantic_review.get("available") else "")
                 + (f"; errors: {per_turn_errors}" if per_turn_errors else "")
             ),
             detail={
@@ -369,6 +425,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
                 "assertion_results": assertion_detail,
                 "per_turn_errors": per_turn_errors,
                 "evaluation_mode": "scripted",
+                "semantic_review": semantic_review,
             },
         )
 
@@ -389,7 +446,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
     ) -> EvaluationResult:
         """Agentic drive: user_simulator turns + rubric_judge scoring.
 
-        Mirrors voice_realtime._drive_conversation_agentic but for text —
+        Mirrors voice_realtime._drive_conversation_agentic but for text â€”
         no TTS/STT needed, conversation is pure text from first turn to
         judge. Same contract as scripted path for the harness_runner
         (receives payload dict, returns {success, output, ...}).
@@ -506,9 +563,13 @@ class ConversationSimulatorPlugin(ToolPlugin):
                 persona=persona,
                 goal=goal,
                 rubric=rubric,
-                candidate_role="",  # text chat — no scope_role wiring here
+                candidate_role="",  # text chat â€” no scope_role wiring here
                 agent_system_prompt=agent_system_prompt,
-                client=anthropic_client,
+                # Use rubric_judge's bounded client policy. The simulator may
+                # use a broader client for turn generation, but transcript
+                # judging has no server tools and should fail this test rather
+                # than consume the general API timeout budget.
+                client=None,
                 trace_id=trace_id,
             )
             judge_cost = rubric_verdict.cost_usd
@@ -593,7 +654,7 @@ class ConversationSimulatorPlugin(ToolPlugin):
                 "user_input": history[-1]["content"] if history else "",
                 "history": list(history[:-1]),
             }
-        # Generic fallback — pass both
+        # Generic fallback â€” pass both
         return {
             "messages": list(history),
             "user_input": history[-1]["content"] if history else "",
@@ -653,3 +714,5 @@ __all__ = [
     "ConversationScript",
     "ConversationSimulatorPlugin",
 ]
+
+

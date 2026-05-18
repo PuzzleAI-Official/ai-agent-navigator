@@ -192,7 +192,8 @@ class TestObjectiveSections:
         assert "https://elevenlabs.io/docs/conversational-ai" in self.md
 
     def test_out_of_scope_lists_standard_items(self):
-        assert "Session pooling" in self.md
+        assert "State leakage across independent test cases" in self.md
+        assert "conversation/session-local state is allowed" in self.md
         assert "Retry logic" in self.md
 
     def test_candidate_notes_section_points_to_observations(self):
@@ -200,6 +201,54 @@ class TestObjectiveSections:
         # agent_observations.json.
         assert "## CANDIDATE NOTES" in self.md
         assert "agent_observations.json" in self.md
+
+
+class TestObjectiveSourceAudit:
+    def test_audit_accepts_synthesized_objective(self):
+        candidate = _make_candidate()
+        input_data = _make_input()
+        md = objective_synthesis.synthesize_objective(
+            candidate=candidate,
+            input_data=input_data,
+            modality_playbook_ids=["voice", "streaming_response"],
+            effective_max_turns=65,
+            effective_max_budget_usd=5.0,
+            platform="windows",
+        )
+
+        verdict = objective_synthesis.audit_objective_source_consistency(
+            md,
+            candidate=candidate,
+            input_data=input_data,
+            modality_playbook_ids=["voice", "streaming_response"],
+            platform="windows",
+        )
+
+        assert verdict.ok is True
+        assert verdict.issues == []
+
+    def test_audit_rejects_objective_with_wrong_candidate(self):
+        candidate = _make_candidate()
+        input_data = _make_input()
+        md = objective_synthesis.synthesize_objective(
+            candidate=candidate,
+            input_data=input_data,
+            modality_playbook_ids=["voice"],
+            effective_max_turns=65,
+            effective_max_budget_usd=5.0,
+            platform="windows",
+        ).replace(candidate.name, "Wrong Candidate")
+
+        verdict = objective_synthesis.audit_objective_source_consistency(
+            md,
+            candidate=candidate,
+            input_data=input_data,
+            modality_playbook_ids=["voice"],
+            platform="windows",
+        )
+
+        assert verdict.ok is False
+        assert any("candidate name" in issue for issue in verdict.issues)
 
 
 class TestObjectiveSubtaskFallback:

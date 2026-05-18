@@ -10,7 +10,7 @@
 // which POSTs to /runs/{id}/select-candidates.
 //
 // Coverage confidence dots: amber ⦿ = claimed (Agent 2 search-only),
-// emerald ✓ = verified (Phase 6.5 — won't appear until then).
+// emerald ✓ = verified by selected-candidate verification.
 //
 // All candidates default to SELECTED (keep=true). Users deselect what
 // they don't want tested — opt-out, not opt-in, because most Agent 2

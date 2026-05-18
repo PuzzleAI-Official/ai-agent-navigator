@@ -52,15 +52,15 @@ ALLOWED_AGENTS = frozenset({
 # Criticality — does downstream behavior DEPEND on this contract?
 # ---------------------------------------------------------------------------
 # Per Codex pushback A: required contracts must be selected DETERMINISTICALLY.
-# The LLM router (Tier 2, when implemented) can suggest OPTIONAL contracts but
-# must NOT be capable of skipping a required contract — that would silently
-# break correctness.
+# If a future optional-contract consumer is added, it must never be capable of
+# skipping required contracts; required coverage remains deterministic.
 #
 # required: a CoverageRequirement may depend on this contract being selected.
 #           Layer 4 will report a coverage gap if it's missing. Cannot be
-#           selection_mode=llm_routed.
-# optional: nice-to-have guidance. The LLM router may include or skip it.
-#           Never appears in CoverageRequirement.required_contract_ids.
+#           speculative routing.
+# optional: nice-to-have guidance. Optional contracts are not selected by the
+#           current production selector until a real optional-contract consumer
+#           exists. Never appears in CoverageRequirement.required_contract_ids.
 # ---------------------------------------------------------------------------
 ALLOWED_CRITICALITIES = frozenset({"required", "optional"})
 
@@ -110,9 +110,9 @@ class ContractMetadata(BaseModel):
     description: str = Field(
         description=(
             "One-paragraph description of what this contract teaches. "
-            "USED BY TIER 2 LLM ROUTER — write this as a short, accurate "
-            "summary of when the contract should apply. Keep under 500 "
-            "characters; the router reads this verbatim."
+            "Write this as a short, accurate summary of when the contract "
+            "should apply. Keep under 500 characters so telemetry and "
+            "authoring tools stay readable."
         ),
     )
     category: str = Field(
@@ -129,7 +129,7 @@ class ContractMetadata(BaseModel):
         description=(
             "Predicate against TaskContext. Empty selectors + "
             "selection_mode=deterministic → contract never selects "
-            "(intentional: forces explicit always_on or llm_routed)."
+            "(intentional: forces explicit always_on or a concrete predicate)."
         ),
     )
     selection_mode: str = Field(
@@ -204,11 +204,11 @@ class ContractMetadata(BaseModel):
             "Whether downstream behavior DEPENDS on this contract being "
             "selected (required) or merely benefits from it (optional). "
             "Required contracts MUST be selected deterministically — they "
-            "cannot use selection_mode=llm_routed. Optional contracts can "
-            "use any selection mode including the LLM router. Default is "
+            "cannot depend on speculative routing. Optional contracts are "
+            "reserved for a future explicit optional-contract consumer. Default is "
             "'required' so legacy + new contracts default to the safe "
-            "side; flip to 'optional' explicitly when adding LLM-routable "
-            "contracts."
+            "side; flip to 'optional' explicitly only when adding a real "
+            "consumer for optional contracts."
         ),
     )
 
@@ -279,7 +279,6 @@ class ContractMetadata(BaseModel):
                 f"Contract {self.id!r} has selection_mode=deterministic "
                 "but no selectors declared. Either:\n"
                 "  - Set selection_mode=always_on if it should always load.\n"
-                "  - Set selection_mode=llm_routed if the LLM should decide.\n"
                 "  - Add at least one trigger_types / trigger_platforms / "
                 "trigger_candidate_metadata predicate."
             )

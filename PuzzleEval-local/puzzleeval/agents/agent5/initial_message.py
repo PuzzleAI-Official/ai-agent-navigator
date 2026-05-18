@@ -2,8 +2,8 @@
 
 Owns the family of formatter functions that build sections of the
 initial user message Claude sees when the build loop starts. Each
-formatter takes structured input (a candidate, a sandbox dir, a
-checklist) and returns a markdown-formatted string.
+formatter takes structured input (a candidate, a sandbox dir, and
+orchestrator-staged artifacts) and returns a markdown-formatted string.
 
 Phase 3.4 of the architecture cleanup — extracted from
 ``puzzleeval/agents/implement_test_env.py``. Migrated incrementally
@@ -14,11 +14,11 @@ Sub-PR boundaries:
   * 3.4.a (this commit) — trivial wrappers: with_shared_preamble,
     with_builder_appendix, usefulness_signal.
   * 3.4.b (next) — schema-coupled: format_modality_context_for_builder,
-    format_atlas_context_for_builder, format_checklist_context_for_builder.
+    format_atlas_context_for_builder.
   * 3.4.c (last) — filesystem-bound: format_sandbox_contents_block,
     format_prefetched_docs_block.
 
-The legacy names (``_with_shared_preamble``, ``_with_builder_appendix``,
+The public shim names (``_with_shared_preamble``, ``_with_builder_appendix``,
 ``_usefulness_signal``, etc.) are preserved as one-line shims in
 ``implement_test_env.py`` for back-compat with source-grep tests +
 external callers.
@@ -58,7 +58,7 @@ def with_builder_appendix(prompt: str) -> str:
     The two appendices give the builder explicit knowledge of common
     patterns (so it doesn't rediscover REST + Bearer / multipart /
     async polling on every harness) and a clear pre-HARNESS_COMPLETE
-    checklist.
+    evidence sequence.
     """
     from puzzleeval.api_patterns import (
         API_PATTERNS_CATALOG,
@@ -75,8 +75,8 @@ def with_builder_appendix(prompt: str) -> str:
 #
 # This replaces the prior density-tier system which conflated "page has
 # structural richness" with "page tells you how to BUILD" — two
-# different questions. The BuildReadinessChecklist (NEW-AK) answers
-# "how to build" via per-field source URLs; this signal answers "what
+# different questions. Agent-5-owned research_synthesis and
+# implementation_plan answer "how to build"; this signal answers "what
 # to read first as background." Pure ranking, no thresholds or gates.
 # ---------------------------------------------------------------------------
 USEFULNESS_PATTERNS = (
@@ -162,10 +162,10 @@ def format_modality_context_for_builder(input_data: "Agent5Input") -> str:
 def format_atlas_context_for_builder(candidate: "ScreenedCandidate") -> str:
     """Return structured hints from ScreenedCandidate's enrichment fields.
 
-    Architecture note: Agent 4 now only does a shallow verify (exists/
-    blocked). It does NOT produce an atlas JSON. Agent 5 does its own
-    Phase-1 research via web_search + web_fetch and writes its own
-    api_spec.txt into the sandbox.
+    Architecture note: Agent 4 now verifies the docs entrypoint and
+    lightweight metadata. It does NOT produce an authoritative atlas JSON.
+    Agent 5 owns research strategy, research_synthesis.json, and
+    implementation_plan.json.
 
     This helper still surfaces any simple enrichment fields Agent 4
     happens to populate (sandbox_available, upstream_provider,
@@ -219,155 +219,6 @@ def format_atlas_context_for_builder(candidate: "ScreenedCandidate") -> str:
     if not sections:
         return ""
     return "\n---\n## ENRICHMENT HINTS FROM AGENT 4\n\n" + "\n".join(sections)
-
-
-def format_checklist_context_for_builder(candidate: "ScreenedCandidate") -> str:
-    """Surface Agent 4's BuildReadinessChecklist to the Phase 1 builder.
-
-    This is the load-bearing handoff: the checklist enumerates what's
-    known/inferred/unknown across the ten build-readiness fields plus
-    the provider's relevant API surface. Agent 5 reads it during Phase A
-    (Inventory), uses Phase B trigger rules to identify which unknowns
-    matter for the test case, fills only those (Phase C), then writes
-    the spec (Phase D).
-
-    Three render modes:
-      - checklist is None        → cached / legacy candidate; tell
-                                    builder to do full research from
-                                    scratch.
-      - populated_by == "system_failure" → Agent 4 sentinel; warn
-                                    builder and route to full research,
-                                    surface the failure reason.
-      - normal                   → render the surface, the selection,
-                                    each of the ten fields with status
-                                    + value + source, and the
-                                    per-test-case trigger rules.
-    """
-    from puzzleeval.schemas import BUILD_READINESS_FIELDS, NON_NEGOTIABLE_FIELDS
-
-    checklist = getattr(candidate, "checklist", None)
-
-    # Mode 1: no checklist (cached / legacy)
-    if checklist is None:
-        return (
-            "\n---\n"
-            "## BUILD-READINESS CHECKLIST (from Agent 4)\n\n"
-            "Agent 4 did not produce a checklist for this candidate "
-            "(typically a cached candidate from a run predating the "
-            "checklist schema). Treat this as full-research mode: do "
-            "Phase A by reading the prefetched docs in your sandbox + "
-            f"the `verified_api_docs_url` ({candidate.verified_api_docs_url}), "
-            "then proceed through Phases B-E as normal."
-        )
-
-    # Mode 2: sentinel (system failure)
-    if checklist.populated_by == "system_failure":
-        reason = ""
-        for n in BUILD_READINESS_FIELDS:
-            r = getattr(checklist, n).reasoning
-            if r:
-                reason = r
-                break
-        reason_line = f"\n  Reason: {reason}" if reason else ""
-        return (
-            "\n---\n"
-            "## BUILD-READINESS CHECKLIST (from Agent 4)\n\n"
-            "Agent 4 hit a snag producing the checklist for this "
-            "candidate (parser failure, malformed JSON, or schema "
-            f"validation error).{reason_line}\n\n"
-            "Treat this as full-research mode: do Phase A by reading "
-            "the prefetched docs in your sandbox + the "
-            f"`verified_api_docs_url` ({candidate.verified_api_docs_url}), "
-            "then proceed through Phases B-E. Don't trust any field "
-            "in the checklist; all are flagged unknown for diagnostic "
-            "reasons."
-        )
-
-    # Mode 3: real checklist — render in full
-    lines: list[str] = [
-        "",
-        "---",
-        "## BUILD-READINESS CHECKLIST (from Agent 4 — Phase A inventory)",
-        "",
-    ]
-
-    confirmed = len(checklist.fields_with_status("confirmed"))
-    inferred = len(checklist.fields_with_status("inferred"))
-    unknown = len(checklist.fields_with_status("unknown"))
-    verified_pass = checklist.is_verified_pass()
-    lines.append(
-        f"Status: {confirmed}/10 confirmed, {inferred} inferred, "
-        f"{unknown} unknown. "
-        f"Verified Pass: {'YES' if verified_pass else 'NO'} "
-        "(four non-negotiables — endpoint_path, auth_method, "
-        "request_body_shape, response_body_shape — all confirmed)."
-    )
-    lines.append("")
-
-    if checklist.provider_surface:
-        lines.append("### Provider surface (endpoints Agent 4 considered)")
-        for ep in checklist.provider_surface:
-            tag = ep.relevance_to_use_case.upper()
-            note = f" — {ep.selection_note}" if ep.selection_note else ""
-            lines.append(f"  [{tag:<11}] `{ep.name}` — {ep.purpose}{note}")
-        lines.append("")
-    if checklist.selected_endpoint:
-        lines.append(f"Selected endpoint: `{checklist.selected_endpoint}`")
-        if checklist.selection_justification:
-            lines.append(f"Justification: {checklist.selection_justification}")
-        lines.append("")
-
-    lines.append("### Build-readiness fields (10)")
-    lines.append("")
-    for fname in BUILD_READINESS_FIELDS:
-        fs = getattr(checklist, fname)
-        non_neg_marker = "★" if fname in NON_NEGOTIABLE_FIELDS else " "
-        lines.append(f"{non_neg_marker} {fname}: [{fs.status.upper()}]")
-        if fs.value:
-            value_preview = fs.value[:200] + ("…" if len(fs.value) > 200 else "")
-            lines.append(f"    value: {value_preview}")
-        if fs.source_url:
-            lines.append(f"    source: {fs.source_url}")
-        if fs.reasoning:
-            reasoning_preview = fs.reasoning[:200] + ("…" if len(fs.reasoning) > 200 else "")
-            lines.append(f"    reasoning: {reasoning_preview}")
-    lines.append("")
-    lines.append("(★ = non-negotiable for Verified Pass)")
-    lines.append("")
-
-    lines.append("### Phase B trigger rules (which fields matter for THIS test case)")
-    lines.append("")
-    lines.append(
-        "The four non-negotiables are ALWAYS required (Agent 4 should have "
-        "confirmed them; if any is `unknown`/`inferred`, you fill them in "
-        "Phase C). The six conditional fields are required only when the "
-        "test case actually exercises them:"
-    )
-    lines.append(
-        "  - error_response_schema, rate_limit_signal: required IF the test "
-        "exercises retry / failure paths"
-    )
-    lines.append(
-        "  - auth_refresh: required IF the test session is long-running (>10 min)"
-    )
-    lines.append(
-        "  - async_pattern: required IF the API is async or streaming"
-    )
-    lines.append(
-        "  - content_type_quirks: required IF non-standard content types "
-        "(multipart, SSE, binary)"
-    )
-    lines.append(
-        "  - sandbox_availability: required IF the candidate has side_effects "
-        "(creates/modifies/deletes records)"
-    )
-    lines.append("")
-    lines.append(
-        "Fields irrelevant to your test case stay `unknown` and that's fine "
-        "— don't research them out of habit."
-    )
-
-    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +279,7 @@ def format_sandbox_contents_block(
         elif p.name.startswith("fetched_docs_") and p.name.endswith(".txt"):
             fetched_docs.append(p.name)
         elif p.name in ("harness.py", "requirements.txt", "smoke_test.py",
-                        "live_test.py", "api_spec.txt"):
+                        "live_test.py"):
             other_files.append(p.name + "  [already exists — patch_file, don't rewrite]")
         else:
             other_files.append(p.name)
@@ -463,8 +314,8 @@ def format_sandbox_contents_block(
     lines.append(
         "**Turn 0 rule**: your very first tool call should be productive "
         "work (web_fetch for research, read_file for a prefetched doc, "
-        "or write_file to start the spec). NOT `os.listdir` / `ls` / "
-        "`dir`. That inventory is already above."
+        "or write_file for `_agent_state/research_plan.json`). NOT "
+        "`os.listdir` / `ls` / `dir`. That inventory is already above."
     )
     return "\n".join(lines)
 
@@ -475,9 +326,8 @@ def format_prefetched_docs_block(sandbox_dir: Path | None) -> str:
     Files are ordered by ``usefulness_signal`` so the builder sees the
     code-heavy / endpoint-heavy pages first when scanning the list. The
     signal is purely RANKING — there are no gates, no tier instructions,
-    no "skip to STEP X" branches. The checklist (rendered separately
-    above this block) is the load-bearing handoff; this block is
-    background reading material.
+    no "skip to STEP X" branches. docs_entrypoint/research_handoff provide
+    routing; this block is background reading material.
 
     Returns empty string when sandbox_dir is None / missing / empty —
     Agent 5 then falls back to web_fetch / web_search.
@@ -536,11 +386,13 @@ def format_prefetched_docs_block(sandbox_dir: Path | None) -> str:
         "",
         (
             "When to read these files (`read_file('fetched_docs_<n>.txt')`): "
-            "during Phase A to ground the BuildReadinessChecklist's "
-            "`source_url` references; during Phase C as targeted background "
-            "for the specific gap you're researching. The checklist (above) "
-            "is the load-bearing artifact — this block is background "
-            "material."
+            "during initial inventory to ground docs_entrypoint; during planned "
+            "research as targeted background for the specific gap you're "
+            "researching. The docs-entrypoint artifact is the authorization "
+            "source; this block is background material. Do not fetch discovery "
+            "or source URLs when Agent 4 already gave a verified docs URL or "
+            "prefetched mirror; use older source URLs only when tied to a "
+            "named unresolved question."
         ),
         "",
     ]
@@ -560,15 +412,260 @@ def format_prefetched_docs_block(sandbox_dir: Path | None) -> str:
 # ``_agent_state/`` with system-generated objective.md + runtime_state.json
 # before the build loop starts. This formatter renders the section of the
 # initial user message that teaches the agent the file roles + access
-# discipline. Returns empty string when the directory is absent (autonomy
-# disabled OR staging failed — agent falls back to legacy reactive mode).
+# discipline. Returns empty string when the directory is absent.
+
+
+def format_research_handoff_block(sandbox_dir: Path | None) -> str:
+    """Render the compact Agent 4 -> Agent 5 research handoff."""
+
+    if sandbox_dir is None:
+        return ""
+    try:
+        from puzzleeval.research_handoff import read_research_handoff
+
+        handoff = read_research_handoff(sandbox_dir)
+    except Exception:  # noqa: BLE001 - initial message should be robust
+        handoff = None
+    if not handoff:
+        return ""
+
+    def _items(values, limit=5):
+        out: list[str] = []
+        for item in values or []:
+            text = str(item).strip()
+            if text:
+                out.append(text[:240])
+            if len(out) >= limit:
+                break
+        return out
+
+    lines = [
+        "",
+        "### Compact Research Handoff (Agent 4 -> Agent 5)",
+        "",
+        (
+            "Start from this handoff before fresh web research. Use fresh "
+            "web_search/web_fetch only for unresolved questions or fields "
+            "not covered by the handoff or prefetched docs."
+        ),
+        "",
+        f"- Auth / transport: {handoff.get('auth_method', 'unknown')} / {handoff.get('sdk_or_transport', 'unknown')}",
+    ]
+    docs = _items(handoff.get("canonical_docs_urls"))
+    if docs:
+        lines.append("- Canonical docs:")
+        lines.extend(f"  - {u}" for u in docs)
+    discovered = _items(handoff.get("discovered_docs_urls"))
+    if discovered:
+        lines.append("- Discovered but not verified/current docs (inspect only if canonical docs are insufficient):")
+        lines.extend(f"  - {u}" for u in discovered)
+    prefetched = _items(handoff.get("prefetched_doc_files"))
+    if prefetched:
+        lines.append("- Prefetched docs to read first:")
+        lines.extend(f"  - `{u}`" for u in prefetched)
+    endpoints = _items(handoff.get("primary_endpoints"))
+    if endpoints:
+        lines.append("- Primary endpoint/API surface hints:")
+        lines.extend(f"  - {u}" for u in endpoints)
+    notes = _items(handoff.get("streaming_or_session_notes"))
+    if notes:
+        lines.append("- Streaming/session notes:")
+        lines.extend(f"  - {u}" for u in notes)
+    unresolved = _items(handoff.get("unresolved_questions"))
+    if unresolved:
+        lines.append("- Unresolved questions only:")
+        lines.extend(f"  - {u}" for u in unresolved)
+    blocked = handoff.get("dead_or_blocked_urls") or []
+    if blocked:
+        lines.append("- Do not retry terminal/blocked URLs unless a later search result justifies it:")
+        for item in blocked[:5]:
+            if isinstance(item, dict):
+                lines.append(f"  - {item.get('url')} ({item.get('reason')})")
+    lines.append("- Full JSON: `_agent_state/research_handoff.json`")
+    return "\n".join(lines)
+
+
+def format_research_inputs_block(
+    candidate: "ScreenedCandidate",
+    sandbox_dir: Path | None,
+) -> str:
+    """Render the canonical Agent 4 -> Agent 5 research input surface.
+
+    This block consolidates the prompt surfaces:
+    - docs_entrypoint.json: Agent 4 docs authorization artifact.
+    - research_handoff.json: compact routing/dead-URL index.
+    - fetched_docs_*.txt: raw evidence cache.
+
+    The initial message should use this single block so
+    Agent 5 sees one source-precedence policy rather than three competing
+    prompt sections.
+    """
+
+    def _items(values, limit=5):
+        out: list[str] = []
+        for item in values or []:
+            text = str(item).strip()
+            if text:
+                out.append(text[:240])
+            if len(out) >= limit:
+                break
+        return out
+
+    docs_entrypoint = None
+    handoff = None
+    if sandbox_dir is not None:
+        try:
+            from puzzleeval.docs_entrypoint import read_docs_entrypoint
+
+            docs_entrypoint = read_docs_entrypoint(sandbox_dir)
+        except Exception:  # noqa: BLE001 - initial message should be robust
+            docs_entrypoint = None
+        try:
+            from puzzleeval.research_handoff import read_research_handoff
+
+            handoff = read_research_handoff(sandbox_dir)
+        except Exception:  # noqa: BLE001 - initial message should be robust
+            handoff = None
+
+    lines: list[str] = [
+        "",
+        "---",
+        "## Research Inputs (Agent 4 -> Agent 5)",
+        "",
+        "Use these inputs in this order:",
+        "1. `_agent_state/docs_entrypoint.json` for verified docs authorization and official starting URL.",
+        "2. `_agent_state/research_handoff.json` for source routing, unresolved questions, and dead/blocked URLs.",
+        "3. `fetched_docs_*.txt` for raw evidence behind the docs verdict.",
+        "4. Fresh web_search/web_fetch only for named unresolved questions or missing build-critical facts.",
+        "",
+    ]
+
+    if docs_entrypoint:
+        lines.append("### Docs entrypoint")
+        verdict = docs_entrypoint.get("docs_verdict", "unknown")
+        primary = docs_entrypoint.get("primary_docs_entrypoint", "")
+        confidence = docs_entrypoint.get("confidence", "unknown")
+        lines.append(f"- Verdict: {verdict} (confidence: {confidence})")
+        if primary:
+            lines.append(f"- Primary official docs entrypoint: {primary}")
+        domain = docs_entrypoint.get("official_domain", "")
+        if domain:
+            lines.append(f"- Official domain: {domain}")
+        alternates = _items(docs_entrypoint.get("alternate_entrypoints"))
+        if alternates:
+            lines.append("- Alternate entrypoints:")
+            lines.extend(f"  - {u}" for u in alternates)
+        blocked = docs_entrypoint.get("deprecated_or_blocked_urls") or []
+        if blocked:
+            lines.append("- Do not retry deprecated/blocked URLs unless fresh evidence changes this:")
+            for item in blocked[:5]:
+                if isinstance(item, dict):
+                    lines.append(f"  - {item.get('url')} ({item.get('reason')})")
+        lines.append(
+            f"- Auth/access/pricing metadata: {docs_entrypoint.get('auth_method', 'unknown')} / "
+            f"{docs_entrypoint.get('api_access_method', 'unknown')} / "
+            f"{str(docs_entrypoint.get('pricing_summary', '') or 'unknown')[:180]}"
+        )
+        capabilities = _items(docs_entrypoint.get("capability_hints"))
+        if capabilities:
+            lines.append("- Capability hints:")
+            lines.extend(f"  - {u}" for u in capabilities)
+        lines.append("- Full docs-entrypoint JSON: `_agent_state/docs_entrypoint.json`")
+        lines.append("")
+    else:
+        lines.append(
+            "No docs-entrypoint JSON is present. This direct-build path must "
+            "verify docs before treating any URL as authoritative."
+        )
+        lines.append("")
+
+    if handoff:
+        lines.append("### Compact handoff index")
+        lines.append(
+            f"- Auth / transport: {handoff.get('auth_method', 'unknown')} / "
+            f"{handoff.get('sdk_or_transport', 'unknown')}"
+        )
+        docs = _items(handoff.get("canonical_docs_urls"))
+        if docs:
+            lines.append("- Canonical docs:")
+            lines.extend(f"  - {u}" for u in docs)
+        discovered = _items(handoff.get("discovered_docs_urls"))
+        if discovered:
+            lines.append("- Discovered but not verified/current docs:")
+            lines.extend(f"  - {u}" for u in discovered)
+        prefetched = _items(handoff.get("prefetched_doc_files"))
+        if prefetched:
+            lines.append("- Prefetched docs to read first:")
+            lines.extend(f"  - `{u}`" for u in prefetched)
+        endpoints = _items(handoff.get("primary_endpoints"))
+        if endpoints:
+            lines.append("- Primary endpoint/API surface hints:")
+            lines.extend(f"  - {u}" for u in endpoints)
+        notes = _items(handoff.get("streaming_or_session_notes"))
+        if notes:
+            lines.append("- Streaming/session notes:")
+            lines.extend(f"  - {u}" for u in notes)
+        unresolved = _items(handoff.get("unresolved_questions"))
+        if unresolved:
+            lines.append("- Research only these unresolved questions unless tests reveal a new gap:")
+            lines.extend(f"  - {u}" for u in unresolved)
+        blocked = handoff.get("dead_or_blocked_urls") or []
+        if blocked:
+            lines.append("- Do not retry terminal/blocked URLs unless a later search result justifies it:")
+            for item in blocked[:5]:
+                if isinstance(item, dict):
+                    lines.append(f"  - {item.get('url')} ({item.get('reason')})")
+        lines.append("- Full handoff JSON: `_agent_state/research_handoff.json`")
+        lines.append("")
+    else:
+        lines.append(
+            "No compact handoff JSON is present. Fall back to prefetched docs "
+            "and verified_api_docs_url after verifying them."
+        )
+        lines.append("")
+
+    # Keep the raw evidence inventory compact.
+    if sandbox_dir is not None and sandbox_dir.exists():
+        try:
+            from puzzleeval.web_doc_cache import count_existing_fetched_docs
+
+            count = count_existing_fetched_docs(sandbox_dir)
+        except Exception:  # noqa: BLE001 - diagnostics only
+            count = 0
+        if count:
+            lines.append("### Raw evidence files")
+            for i in range(min(count, 8)):
+                filename = f"fetched_docs_{i}.txt"
+                path = sandbox_dir / filename
+                source_url = ""
+                size_kb = 0
+                try:
+                    content = path.read_text(encoding="utf-8")
+                    size_kb = max(1, len(content) // 1024)
+                    first_line = content.splitlines()[0] if content else ""
+                    if first_line.startswith("# Fetched from: "):
+                        source_url = first_line[len("# Fetched from: "):]
+                    elif first_line.startswith("# Search results"):
+                        source_url = "<aggregated search snippets>"
+                except OSError:
+                    pass
+                suffix = f" - {source_url}" if source_url else ""
+                lines.append(f"- `{filename}` ({size_kb}KB){suffix}")
+            if count > 8:
+                lines.append(f"- ... {count - 8} more fetched docs available in the sandbox.")
+            lines.append("")
+
+    lines.append(
+        "Rule: do not fetch discovery/source URLs when the handoff already "
+        "gives canonical docs, unless the URL answers a named unresolved question."
+    )
+    return "\n".join(lines)
 
 
 def format_autonomy_artifacts_block(sandbox_dir: Path | None) -> str:
     """Tell the agent about the ``_agent_state/`` directory and its contents.
 
-    Returns empty string when the directory doesn't exist (legacy / autonomy-
-    disabled builds work as before). Otherwise returns a structured block
+    Returns empty string when the directory doesn't exist. Otherwise returns a structured block
     naming each file, who owns it, and the read-before-act discipline.
 
     Pure function — reads the filesystem only. No mutation.
@@ -588,26 +685,46 @@ def format_autonomy_artifacts_block(sandbox_dir: Path | None) -> str:
         "\n---\n"
         "## Autonomy artifacts — `_agent_state/`\n"
         "\n"
-        "Your sandbox now contains a `_agent_state/` directory. These files are "
-        "load-bearing for the build loop. **Read them at the top of every "
-        "significant turn.** Treat them as your durable memory — they survive "
-        "context compaction and replace ad-hoc narrative tracking.\n"
+        "Your sandbox now contains a `_agent_state/` directory. The "
+        "orchestrator-owned files are load-bearing for the build loop. "
+        "**Use the restored snapshot or summarize_build_state() at the top "
+        "of significant turns.** Read runtime_state.json/objective.md only "
+        "when the summary lacks a detail needed for the next action. Durable "
+        "artifacts survive context compaction and replace ad-hoc narrative "
+        "tracking.\n"
         "\n"
         "| File | Owner | You can... |\n"
         "|------|-------|------------|\n"
-        "| `_agent_state/objective.md` | **orchestrator** (read-only to you) | READ to see DELIVERABLE + SUCCESS CRITERIA + CONSTRAINTS + OUT OF SCOPE. The CANDIDATE NOTES section is appendable by you (timestamped, ≤50 words/entry). |\n"
+        "| `_agent_state/objective.md` | **orchestrator** (read-only to you) | READ to see DELIVERABLE + SUCCESS CRITERIA + CONSTRAINTS + OUT OF SCOPE. Do not write or patch this file. |\n"
         "| `_agent_state/runtime_state.json` | **orchestrator** (read-only to you) | READ to see authoritative state — `current_phase`, `files_present`, `files_pending`, `smoke_test_status`, `directives_fired`, etc. Updated every turn. Trust this OVER the conversation history. |\n"
-        "| `_agent_state/build_plan.md` | YOU | WRITE at turn 1 (orchestrator will direct you). UPDATE at trigger points: after api_spec.txt, after scaffold writes, after a failed smoke/live test, after a pivot, before HARNESS_COMPLETE. |\n"
-        "| `_agent_state/agent_observations.json` | YOU (optional) | WRITE noteworthy decisions or uncertainty flags. Never authoritative — `runtime_state.json` is. Useful for the orchestrator's PR 3 agreement check. |\n"
+        "| `_agent_state/test_case_manifest.json` | **orchestrator** (read-only to you) | READ to see the actual Agent 3 test families and representative cases final evaluation will exercise. Use this to avoid generic provider prep that does not change the harness. |\n"
+        "| `_agent_state/build_plan.md` | deprecated context aid | Ignore for action selection. Do not spend turns reading or maintaining it unless explicitly asked. |\n"
+        "| `_agent_state/research_plan.json` | YOU | WRITE when several independent research gaps remain. Include focused `research_tasks` with question, where_to_look, evidence_required, and why_needed_for_build. Planned workers use this for parallel research when enabled. |\n"
+        "| `_agent_state/research_findings/*.json` | orchestrator/research workers (read-only to you) | READ worker evidence and citations. Do not write these files; synthesize them instead. |\n"
+        "| `_agent_state/research_build_brief.json` | orchestrator/research workers (read-only to you) | READ first after planned research as an advisory index. It is keyword-bucketed triage, not authoritative synthesis. |\n"
+        "| `_agent_state/research_synthesis.json` | YOU | WRITE after reading research findings. This is the durable provider understanding/doc map: provider_doc_map, chosen_api_surface, credential_model, request_response_contract, input_compatibility, routing_table, working_examples, errors_and_limits, sdk_package, lead-authored build_brief, constraints, cited facts, assumptions, risks, and whether to proceed. |\n"
+        "| `_agent_state/implementation_plan.json` | YOU | WRITE when you interpret objective.md into a candidate-specific plan. Include objective_coverage entries that reference stable objective IDs (`OBJ-1`, `OBJ-2`, ...), chosen API surface, credential env vars, interaction pattern, live-test strategy, no blocking open questions, and `ready_to_build=true`. This is the default build gate. |\n"
+        "| `_agent_state/representative_probe_evidence.json` | orchestrator gate | READ if completion fails. It records representative test cases run through the production evaluator/plugin path; debug from its evidence instead of replacing it with a toy live test. |\n"
+        "| `_agent_state/code_diagnostics.json` | orchestrator diagnostics (read-only to you) | READ or summarize when syntax diagnostics are active. It records mechanical Python syntax findings from successful writes/patches. |\n"
+        "| `_agent_state/post_compaction_snapshot.json` | orchestrator audit (read-only to you) | Audit trail for the restored compaction packet; not an action source unless debugging compaction itself. |\n"
+        "| `_agent_state/business_fixture.json` | orchestrator/context aid | READ for canonical business facts (menu, pricing, hours, service area, policies) when present. Live tests and rubrics should use these same facts. |\n"
+        "| `_agent_state/abandon_candidate.json` | YOU | WRITE only for a validated evidence-based early exit when more patching is the wrong next action. Cite docs/provider/failure evidence. |\n"
+        "| `_agent_state/agent_observations.json` | optional diagnostic scratch | Do not create this as a ritual. It is never authoritative; `runtime_state.json` is. |\n"
         "| `_agent_state/reflection_phase_3.md` | YOU | WRITE before HARNESS_COMPLETE (orchestrator will direct you). Must cite specific evidence (file:line, test output, forensics events) — not self-attestation. |\n"
         "\n"
         "**Discipline:**\n"
-        "- Turn opening: `read_file('_agent_state/runtime_state.json')` to ground "
-        "your mental model. The conversation history can drift; this file cannot.\n"
-        "- Before any major decision: re-read `_agent_state/objective.md` SUCCESS "
-        "CRITERIA to make sure you're optimizing for the right bar.\n"
-        "- At trigger points: `patch_file('_agent_state/build_plan.md', ...)` to "
-        "check off completed todos and add new ones the trigger surfaced.\n"
+        "- Turn opening: use `summarize_build_state()` or the restored "
+        "compaction packet to ground your mental model. Read runtime_state.json "
+        "only when you need fields absent from the summary.\n"
+        "- Before any major decision: ensure `_agent_state/objective.md` SUCCESS "
+        "CRITERIA are represented in context. Read the file when the summary "
+        "does not include the needed criterion detail.\n"
+        "- Before delegating several initial research gaps: write `_agent_state/research_plan.json`; "
+        "broad unplanned ask_research is blocked while planned research workers are enabled, "
+        "but one concrete FIELD NEEDED/WHY debug gap is allowed and recorded durably.\n"
+        "- Debugging: use `summarize_build_state()`, `summarize_forensics()`, "
+        "`read_forensics(last_n)`, and `read_file_range(...)` before writing "
+        "custom diagnostic scripts.\n"
         "- Attempts to write `_agent_state/objective.md` or "
         "`_agent_state/runtime_state.json` will be REJECTED by the tool gate. "
         "These are orchestrator-owned. Write to your own files instead.\n"
@@ -618,9 +735,10 @@ __all__ = [
     "USEFULNESS_PATTERNS",
     "format_atlas_context_for_builder",
     "format_autonomy_artifacts_block",
-    "format_checklist_context_for_builder",
     "format_modality_context_for_builder",
     "format_prefetched_docs_block",
+    "format_research_inputs_block",
+    "format_research_handoff_block",
     "format_sandbox_contents_block",
     "usefulness_signal",
     "with_builder_appendix",

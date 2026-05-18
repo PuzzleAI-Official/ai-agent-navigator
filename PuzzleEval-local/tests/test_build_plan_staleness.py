@@ -1,4 +1,4 @@
-"""Tests for ``detect_build_plan_triggers``.
+﻿"""Tests for ``detect_build_plan_triggers``.
 
 PR 1 (deferred wiring): the orchestrator pings the agent at meaningful
 state-change moments to keep ``_agent_state/build_plan.md`` operational.
@@ -34,41 +34,41 @@ def _make_text_block(text: str) -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# api_spec.txt transition trigger
+# implementation-plan build-gate trigger
 # ---------------------------------------------------------------------------
 
 
-class TestApiSpecTrigger:
+class TestBuildGateTrigger:
 
     def test_fires_on_transition(self):
         triggers = detect_build_plan_triggers(
             response_content=[],
-            api_spec_was_written=False,
-            api_spec_now_written=True,
+            build_gate_was_accepted=False,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=False,
             harness_complete_signaled=False,
         )
-        assert "api_spec.txt written" in triggers
+        assert "implementation plan accepted" in triggers
 
     def test_does_not_fire_when_already_written(self):
         triggers = detect_build_plan_triggers(
             response_content=[],
-            api_spec_was_written=True,
-            api_spec_now_written=True,
+            build_gate_was_accepted=True,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=False,
             harness_complete_signaled=False,
         )
-        assert "api_spec.txt written" not in triggers
+        assert "implementation plan accepted" not in triggers
 
     def test_does_not_fire_when_still_phase_1(self):
         triggers = detect_build_plan_triggers(
             response_content=[],
-            api_spec_was_written=False,
-            api_spec_now_written=False,
+            build_gate_was_accepted=False,
+            build_gate_now_accepted=False,
             smoke_passed_this_turn=False,
             harness_complete_signaled=False,
         )
-        assert "api_spec.txt written" not in triggers
+        assert "implementation plan accepted" not in triggers
 
 
 # ---------------------------------------------------------------------------
@@ -88,16 +88,16 @@ class TestScaffoldTrigger:
     def test_fires_for_canonical_scaffold_filenames(self, filename: str):
         triggers = detect_build_plan_triggers(
             response_content=[_make_tool_use_block("write_file", filename)],
-            api_spec_was_written=True,
-            api_spec_now_written=True,
+            build_gate_was_accepted=True,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=False,
             harness_complete_signaled=False,
         )
         assert any(t.startswith("scaffold write") for t in triggers)
 
     def test_one_scaffold_trigger_per_turn_even_with_multiple_writes(self):
-        # Phase 2's canonical pattern is "all four scaffolds in one turn"
-        # — we don't want four nudges firing at once.
+        # The canonical post-gate pattern is "all independent scaffolds in one turn"
+        # â€” we don't want four nudges firing at once.
         blocks = [
             _make_tool_use_block("write_file", "harness.py", "t1"),
             _make_tool_use_block("write_file", "smoke_test.py", "t2"),
@@ -106,8 +106,8 @@ class TestScaffoldTrigger:
         ]
         triggers = detect_build_plan_triggers(
             response_content=blocks,
-            api_spec_was_written=True,
-            api_spec_now_written=True,
+            build_gate_was_accepted=True,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=False,
             harness_complete_signaled=False,
         )
@@ -119,26 +119,26 @@ class TestScaffoldTrigger:
         # same shape as write_file.
         triggers = detect_build_plan_triggers(
             response_content=[_make_tool_use_block("patch_file", "harness.py")],
-            api_spec_was_written=True,
-            api_spec_now_written=True,
+            build_gate_was_accepted=True,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=False,
             harness_complete_signaled=False,
         )
         assert any(t.startswith("scaffold write") for t in triggers)
 
     def test_non_scaffold_writes_do_not_trigger(self):
-        # Writing api_spec.txt is its own trigger (api_spec transition).
+        # The implementation plan write is its own trigger.
         # _agent_state/build_plan.md is the agent updating the artifact
-        # itself — definitely not a scaffold write.
+        # itself â€” definitely not a scaffold write.
         blocks = [
-            _make_tool_use_block("write_file", "api_spec.txt", "t1"),
+            _make_tool_use_block("write_file", "_agent_state/implementation_plan.json", "t1"),
             _make_tool_use_block("write_file", "_agent_state/build_plan.md", "t2"),
             _make_tool_use_block("read_file", "harness.py", "t3"),
         ]
         triggers = detect_build_plan_triggers(
             response_content=blocks,
-            api_spec_was_written=True,
-            api_spec_now_written=True,
+            build_gate_was_accepted=True,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=False,
             harness_complete_signaled=False,
         )
@@ -156,8 +156,8 @@ class TestStateFlagTriggers:
     def test_smoke_passed_fires_trigger(self):
         triggers = detect_build_plan_triggers(
             response_content=[],
-            api_spec_was_written=True,
-            api_spec_now_written=True,
+            build_gate_was_accepted=True,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=True,
             harness_complete_signaled=False,
         )
@@ -166,8 +166,8 @@ class TestStateFlagTriggers:
     def test_harness_complete_signaled_fires_trigger(self):
         triggers = detect_build_plan_triggers(
             response_content=[],
-            api_spec_was_written=True,
-            api_spec_now_written=True,
+            build_gate_was_accepted=True,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=False,
             harness_complete_signaled=True,
         )
@@ -176,8 +176,8 @@ class TestStateFlagTriggers:
     def test_no_trigger_when_no_flags_changed(self):
         triggers = detect_build_plan_triggers(
             response_content=[_make_text_block("just thinking")],
-            api_spec_was_written=True,
-            api_spec_now_written=True,
+            build_gate_was_accepted=True,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=False,
             harness_complete_signaled=False,
         )
@@ -193,16 +193,16 @@ class TestTriggerOrdering:
 
     def test_multiple_triggers_in_canonical_order(self):
         # The detector should produce triggers in the documented order:
-        # api_spec → scaffold → smoke pass → pre-HARNESS_COMPLETE.
+        # build gate â†’ scaffold â†’ smoke pass â†’ pre-HARNESS_COMPLETE.
         triggers = detect_build_plan_triggers(
             response_content=[_make_tool_use_block("write_file", "harness.py")],
-            api_spec_was_written=False,
-            api_spec_now_written=True,
+            build_gate_was_accepted=False,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=True,
             harness_complete_signaled=True,
         )
         assert triggers == [
-            "api_spec.txt written",
+            "implementation plan accepted",
             "scaffold write: harness.py",
             "smoke test passed",
             "pre-HARNESS_COMPLETE",
@@ -211,9 +211,10 @@ class TestTriggerOrdering:
     def test_empty_response_content_handled(self):
         triggers = detect_build_plan_triggers(
             response_content=None,
-            api_spec_was_written=False,
-            api_spec_now_written=True,
+            build_gate_was_accepted=False,
+            build_gate_now_accepted=True,
             smoke_passed_this_turn=False,
             harness_complete_signaled=False,
         )
-        assert triggers == ["api_spec.txt written"]
+        assert triggers == ["implementation plan accepted"]
+

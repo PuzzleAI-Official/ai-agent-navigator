@@ -1,579 +1,84 @@
-"""Regression guards for Agent 5's restored research agency.
+"""Regression guards for the current Agent 5 research/build prompt contract."""
 
-Pre-checklist era: Agent 5's Phase 1 prompt told Opus to "skip to STEP 2"
-when prefetched docs were dense and "you do NOT need to read_file or
-web_fetch." This made Agent 5 a passive consumer of Agent 4's output
-instead of an active builder that decides what IT needs.
-
-Post-checklist era (this pass):
-  - Five-phase flow A → B → C → D → E (Inventory → Gap analysis →
-    Targeted research → Spec → Build).
-  - Per-test-case trigger rules in Phase B (only research what THIS
-    test case actually needs).
-  - ask_research template (CANDIDATE / ENDPOINT / KNOWN / FIELD NEEDED /
-    WHY) — direction-pointing.
-  - Hard stop test in Phase C ("can I write the harness without TODO,
-    without guessing, without 'might need to'").
-  - Phase D produces an `=== API SPEC (Phase D) ===` comment block at
-    the top of harness.py for debugging visibility.
-  - Density gating language ("skip to STEP 2", "you do NOT need to") is
-    DELETED — the checklist replaces the proxy of "structural richness"
-    with the direct measure "did we answer the builder's questions?"
-
-These tests lock the prompt-shape contract — we don't test Opus's
-behavior, we test that the right instructions reach Opus.
-
-Reference: PLAN_AGENT5_RESEARCH_AGENCY.md.
-"""
 from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from puzzleeval.agents.implement_test_env import (
     BUILDER_SYSTEM_PROMPT,
     _ask_research_template_adherence,
-    _format_checklist_context_for_builder,
     _format_prefetched_docs_block,
     _usefulness_signal,
 )
-from puzzleeval.schemas import (
-    BUILD_READINESS_FIELDS,
-    CONDITIONAL_FIELDS,
-    NON_NEGOTIABLE_FIELDS,
-    BuildReadinessChecklist,
-    EndpointSummary,
-    FieldStatus,
-    ScreenedCandidate,
-    default_unknown_checklist,
-)
 
 
-# ============================================================================
-# Five-phase flow contract
-# ============================================================================
-
-
-class TestFivePhaseFlow:
-    """The Phase 1 research flow's contract. Phase D of the prompt
-    refactor collapsed the previous five sub-phases (A-E) into three
-    canonical steps (Inventory → Gap analysis → Fill+commit) for
-    clarity. The KEY CONTRACT is preserved: per-test-case relevance
-    via Agent 4's BuildReadinessChecklist, ask_research delegation
-    template, falsifiable stop test, and soft budget enforced by
-    code gate B4 in build_loop.py.
-    """
-
-    def test_three_steps_present_in_canonical_order(self):
+class TestResearchPromptContract:
+    def test_phase_1_keeps_research_plan_synthesis_plan_order(self):
         prompt = BUILDER_SYSTEM_PROMPT
-        # The collapsed three-step flow.
-        s1 = prompt.find("Step 1 — Inventory")
-        s2 = prompt.find("Step 2 — Gap analysis")
-        s3 = prompt.find("Step 3 — Fill the gaps")
-        assert s1 > 0, "Step 1 (Inventory) must appear"
-        assert s2 > s1, "Step 2 (Gap analysis) must follow Step 1"
-        assert s3 > s2, "Step 3 (Fill+commit) must follow Step 2"
+        plan = prompt.find("_agent_state/research_plan.json")
+        synthesis = prompt.find("_agent_state/research_synthesis.json")
+        implementation = prompt.find("_agent_state/implementation_plan.json")
+        assert 0 < plan < synthesis < implementation
 
-    def test_inventory_step_references_checklist(self):
+    def test_phase_1_uses_docs_entrypoint_and_not_retired_spec_or_checklist(self):
         prompt = BUILDER_SYSTEM_PROMPT
-        idx = prompt.find("Step 1 — Inventory")
-        section = prompt[idx:idx + 1000]
-        assert "BuildReadinessChecklist" in section or "checklist" in section.lower(), (
-            "Step 1 must point the builder at Agent 4's checklist."
-        )
+        phase_start = prompt.find("## PHASE 1")
+        phase_end = prompt.find("## PHASE 2")
+        phase1 = prompt[phase_start:phase_end]
+        assert "docs_entrypoint.json" in phase1
+        assert "research_handoff.json" in phase1
+        assert "api_spec.txt" not in phase1
+        assert "BuildReadinessChecklist" not in phase1
 
-    def test_gap_analysis_lists_per_test_case_triggers(self):
+    def test_ask_research_template_is_scoped(self):
         prompt = BUILDER_SYSTEM_PROMPT
-        idx_2 = prompt.find("Step 2 — Gap analysis")
-        idx_3 = prompt.find("Step 3 — Fill the gaps")
-        section = prompt[idx_2:idx_3]
-        assert "non-negotiable" in section.lower(), (
-            "Gap analysis must name the four non-negotiables Agent 4 "
-            "should have already confirmed."
-        )
-        triggers = [
-            "retry",
-            "long-running",
-            "async",
-            "streaming",
-            "side_effects",
-            "non-standard content",
-        ]
-        hits = sum(1 for t in triggers if t.lower() in section.lower())
-        assert hits >= 4, (
-            f"Gap analysis should name conditional-field triggers; "
-            f"only {hits}/6 trigger keywords present."
-        )
-
-    def test_fill_step_contains_ask_research_template(self):
-        prompt = BUILDER_SYSTEM_PROMPT
-        idx = prompt.find("Step 3 — Fill the gaps")
-        # Look in a generous window so the template (which sits at the end
-        # of Step 3 just before the spec template) is captured.
-        section = prompt[idx:idx + 2000]
+        idx = prompt.find("CANDIDATE:")
+        section = prompt[idx: idx + 900]
         for field in ("CANDIDATE:", "ENDPOINT:", "KNOWN:", "FIELD NEEDED:", "WHY:"):
-            assert field in section, f"ask_research template missing {field!r}"
+            assert field in section
+        assert "broad provider discovery" in prompt
 
-    def test_phase1_contains_falsifiable_stop_test(self):
+    def test_build_phase_requires_vertical_slice_after_plan(self):
         prompt = BUILDER_SYSTEM_PROMPT
-        # The stop test now lives at the end of Step 3 (when to commit
-        # the spec). Use the whole Phase 1 section for the search.
-        idx = prompt.find("PHASE 1: RESEARCH")
-        idx_end = prompt.find("PHASE 2", idx)
-        section = prompt[idx:idx_end] if idx_end > 0 else prompt[idx:]
-        assert "WITHOUT a TODO" in section
-        assert "WITHOUT guessing" in section
+        phase2 = prompt[prompt.find("## PHASE 2"):]
+        assert "WRITE harness.py" in phase2
+        assert "python smoke_test.py" in phase2
+        assert "WRITE harness.py BEFORE ANY INSPECTION SCRIPTS" in phase2
 
-    def test_research_budget_is_code_enforced(self):
-        """Soft research budget is no longer pinned to specific prompt
-        phrasing — code gate B4 in build_loop.py is the canonical
-        enforcement. Verify the gate exists and the prompt acknowledges it.
-        """
+    def test_readiness_criteria_not_old_checklist(self):
         prompt = BUILDER_SYSTEM_PROMPT
-        # Prompt should mention the gate, not just teach the budget.
-        assert (
-            "research budget" in prompt.lower()
-            or "gate B4" in prompt
-            or "Gate B4" in prompt
-        ), "Phase 1 should reference the code-enforced research budget"
-        # Code-side enforcement.
-        from puzzleeval.agents.agent5 import dispatch_helpers
-        assert hasattr(dispatch_helpers, "turn_used_prespec_research"), (
-            "Gate B4's pre-spec research detection helper must exist."
-        )
-
-    def test_commit_step_writes_api_spec_txt(self):
-        prompt = BUILDER_SYSTEM_PROMPT
-        idx = prompt.find("Step 3 — Fill the gaps")
-        # Capture the rest of Step 3 — including the stop test and the
-        # imperative to commit the spec.
-        idx_end = prompt.find("api_spec.txt template", idx)
-        section = prompt[idx:idx_end] if idx_end > 0 else prompt[idx:idx + 2500]
-        assert "api_spec.txt" in section
-        # Step 3 ends by writing the spec — the imperative is preserved.
-        assert "write" in section.lower()
-
-    def test_phase2_implements_from_spec(self):
-        import re
-        prompt = BUILDER_SYSTEM_PROMPT
-        idx = prompt.find("PHASE 2:")
-        section = prompt[idx:idx + 2500] if idx > 0 else ""
-        assert "harness.py" in section.lower()
-        # The "spec is the source of truth" phrasing was preserved in the
-        # canonical 3-step rewrite; check it generously.
-        assert (
-            re.search(r"single\s+source\s+of\s+truth", section, re.IGNORECASE)
-            or re.search(r"spec\s+is\s+(your|the)", section, re.IGNORECASE)
-        ), "Phase 2 must emphasize the spec is the source of truth"
+        assert "Implementation-plan readiness criteria" in prompt
+        assert "Implementation-plan readiness checklist" not in prompt
+        assert "Agent 4 checklist" not in prompt
 
 
-# ============================================================================
-# Old gate language removed
-# ============================================================================
-
-
-class TestDensityGateLanguageRemoved:
-    """The Phase 1 prompt used to gate Agent 5 behind density tiers
-    ('skip to STEP 2', 'you do NOT need to', 'ALREADY IN YOUR
-    CONTEXT'). All three are deleted."""
-
-    def test_no_skip_to_step_2(self):
-        assert "skip to STEP 2" not in BUILDER_SYSTEM_PROMPT
-        assert "Skip to STEP 2" not in BUILDER_SYSTEM_PROMPT
-
-    def test_no_you_do_NOT_need_to(self):
-        assert "You do NOT need to" not in BUILDER_SYSTEM_PROMPT
-        assert "you do NOT need to" not in BUILDER_SYSTEM_PROMPT
-
-    def test_no_already_in_your_context(self):
-        assert "ALREADY IN YOUR CONTEXT" not in BUILDER_SYSTEM_PROMPT
-        assert "already in your context" not in BUILDER_SYSTEM_PROMPT.lower()
-
-    def test_no_density_tier_branching(self):
-        # The old prompt branched on HIGH/MEDIUM/THIN tiers
-        assert "[HIGH" not in BUILDER_SYSTEM_PROMPT
-        assert "[MEDIUM" not in BUILDER_SYSTEM_PROMPT
-        assert "density-ranked" not in BUILDER_SYSTEM_PROMPT
-
-
-# ============================================================================
-# harness.py Phase D spec-header instruction
-# ============================================================================
-
-
-class TestHarnessSpecHeader:
-    """Phase D requires harness.py to start with a structured comment
-    block summarizing the checklist contract — the debugging artifact."""
-
-    def test_spec_block_header_taught(self):
-        assert "API SPEC (Phase D)" in BUILDER_SYSTEM_PROMPT
-        assert "=== END SPEC ===" in BUILDER_SYSTEM_PROMPT
-
-    def test_spec_block_includes_required_fields(self):
-        prompt = BUILDER_SYSTEM_PROMPT
-        # The template explicitly lists each field the builder must fill
-        spec_idx = prompt.find("API SPEC (Phase D)")
-        end_idx = prompt.find("=== END SPEC ===", spec_idx)
-        block = prompt[spec_idx:end_idx]
-        for required in ("Endpoint:", "Auth:", "Request shape:",
-                         "Response parse:", "Error handling:",
-                         "Async pattern:", "Residual unknowns:"):
-            assert required in block, f"Spec block template missing {required!r}"
-
-
-# ============================================================================
-# ask_research template adherence checker (hybrid per Q3)
-# ============================================================================
-
-
-class TestAskResearchAdherence:
-    """The hybrid logger inspects ask_research questions for the five
-    template fields. Reports adherence; does NOT reject. Per Plan §Q3."""
-
-    def test_fully_adherent_question(self):
-        q = (
-            "CANDIDATE: OpenAI\n"
-            "ENDPOINT: POST /v1/audio/speech\n"
-            "KNOWN: auth + endpoint confirmed\n"
-            "FIELD NEEDED: error_response_schema\n"
-            "WHY: need 429 retry shape"
-        )
-        report = _ask_research_template_adherence(q)
-        assert report["fully_adherent"] is True
-        assert report["adherence_ratio"] == 1.0
-        assert report["fields_missing"] == []
-
-    def test_completely_non_adherent_question(self):
-        report = _ask_research_template_adherence("tell me about ElevenLabs")
-        assert report["fully_adherent"] is False
-        assert report["adherence_ratio"] == 0.0
-        assert len(report["fields_missing"]) == 5
-
-    def test_partial_adherence(self):
-        report = _ask_research_template_adherence(
-            "CANDIDATE: X — what's the WHY for retry?"
-        )
-        assert report["fully_adherent"] is False
-        assert "CANDIDATE" in report["fields_present"]
-        assert "WHY" in report["fields_present"]
-        assert "ENDPOINT" in report["fields_missing"]
-
-    def test_empty_question_handled(self):
-        report = _ask_research_template_adherence("")
-        assert report["fully_adherent"] is False
-        assert report["adherence_ratio"] == 0.0
-
-    def test_case_insensitive_field_detection(self):
-        # Lowercase template fields still count
-        q = "candidate: OpenAI, endpoint: /foo, known: auth, field needed: errors, why: retries"
-        report = _ask_research_template_adherence(q)
-        assert report["fully_adherent"] is True
-
-
-# ============================================================================
-# Checklist context block (the load-bearing handoff to Agent 5)
-# ============================================================================
-
-
-def _make_candidate(checklist=None) -> ScreenedCandidate:
-    return ScreenedCandidate(
-        name="TestCo",
-        provider="TestProvider",
-        description="d",
-        pricing_model="per-token",
-        claimed_capabilities=["foo"],
-        relevance_score=0.9,
-        adoption_difficulty="easy",
-        relevant_subtasks=["foo"],
-        source="https://x.com",
-        verified_api_docs_url="https://docs.x.com",
-        auth_method="bearer_token",
-        api_access_method="free_signup",
-        confirmed_capabilities=["foo"],
-        data_format_notes="JSON",
-        screening_notes="ok",
-        checklist=checklist,
-    )
-
-
-class TestChecklistContextBlock:
-
-    def test_none_checklist_renders_legacy_full_research_mode(self):
-        rendered = _format_checklist_context_for_builder(_make_candidate(None))
-        assert "did not produce a checklist" in rendered
-        assert "full-research mode" in rendered
-
-    def test_sentinel_checklist_renders_with_failure_reason(self):
-        sentinel = default_unknown_checklist(reason="parser timed out")
-        rendered = _format_checklist_context_for_builder(_make_candidate(sentinel))
-        assert "snag producing the checklist" in rendered
-        assert "parser timed out" in rendered
-        assert "full-research mode" in rendered
-
-    def test_verified_pass_renders_full_block(self):
-        c = BuildReadinessChecklist(
-            provider_surface=[
-                EndpointSummary(name="POST /v1/foo", purpose="do foo",
-                                relevance_to_use_case="primary",
-                                selection_note="best fit"),
-                EndpointSummary(name="POST /v1/bar", purpose="do bar",
-                                relevance_to_use_case="alternative",
-                                selection_note="rejected because Y"),
-            ],
-            selected_endpoint="POST /v1/foo",
-            selection_justification="picked foo over bar because Z",
-            endpoint_path=FieldStatus(status="confirmed", value="https://api.x.com/v1/foo", source_url="https://docs.x.com"),
-            auth_method=FieldStatus(status="confirmed", value="Bearer", source_url="https://docs.x.com"),
-            request_body_shape=FieldStatus(status="confirmed", value='{"x":1}', source_url="https://docs.x.com"),
-            response_body_shape=FieldStatus(status="confirmed", value='{"y":2}', source_url="https://docs.x.com"),
-        )
-        rendered = _format_checklist_context_for_builder(_make_candidate(c))
-        assert "BUILD-READINESS CHECKLIST" in rendered
-        assert "Verified Pass: YES" in rendered
-        assert "POST /v1/foo" in rendered
-        assert "POST /v1/bar" in rendered
-        assert "PRIMARY" in rendered
-        assert "ALTERNATIVE" in rendered
-        # Phase B trigger rules are surfaced as a reminder
-        assert "Phase B trigger rules" in rendered
-        # The four non-negotiables are starred
-        for fname in NON_NEGOTIABLE_FIELDS:
-            assert fname in rendered
-
-    def test_inconclusive_checklist_renders_verified_pass_no(self):
-        c = BuildReadinessChecklist(
-            provider_surface=[
-                EndpointSummary(name="POST /v1/foo", purpose="do foo",
-                                relevance_to_use_case="primary"),
-            ],
-            selected_endpoint="POST /v1/foo",
-            selection_justification="primary fit",
-            endpoint_path=FieldStatus(status="inferred", value="?", reasoning="snippet"),
-            auth_method=FieldStatus(status="unknown", reasoning="docs paywalled"),
-        )
-        rendered = _format_checklist_context_for_builder(_make_candidate(c))
-        assert "Verified Pass: NO" in rendered
-        # Reasoning surfaced for unknowns
-        assert "docs paywalled" in rendered
-
-    def test_block_lists_all_ten_field_names(self):
-        c = BuildReadinessChecklist()
-        rendered = _format_checklist_context_for_builder(_make_candidate(c))
-        for fname in BUILD_READINESS_FIELDS:
-            assert fname in rendered, f"Block missing field {fname}"
-
-    def test_block_marks_non_negotiables_distinctly(self):
-        c = BuildReadinessChecklist()
-        rendered = _format_checklist_context_for_builder(_make_candidate(c))
-        # Star marker on the four non-negotiables (per the renderer)
-        assert "★" in rendered
-
-    def test_phase_b_trigger_rules_surfaced(self):
-        c = BuildReadinessChecklist()
-        rendered = _format_checklist_context_for_builder(_make_candidate(c))
-        # All six conditional triggers must be named
-        triggers = [
-            "retry",
-            "long-running",
-            "async",
-            "non-standard content",
-            "side_effects",
-        ]
-        for trigger in triggers:
-            assert trigger in rendered, (
-                f"Phase B trigger reminder missing keyword {trigger!r}"
-            )
-
-
-# ============================================================================
-# Prefetched docs block — ranked list-only (no gates)
-# ============================================================================
-
-
-class TestPrefetchedDocsBlockIsRankingOnly:
-    """The block now ranks files by usefulness signal but doesn't
-    inline content, doesn't tier into HIGH/MEDIUM/THIN, doesn't
-    branch instructions. The checklist is the load-bearing artifact."""
-
-    def test_empty_sandbox_returns_empty(self, tmp_path):
-        assert _format_prefetched_docs_block(tmp_path) == ""
-
-    def test_none_sandbox_returns_empty(self):
+class TestPrefetchedDocsBlock:
+    def test_empty_string_when_sandbox_dir_is_none(self):
         assert _format_prefetched_docs_block(None) == ""
 
-    def test_files_listed_in_signal_descending_order(self, tmp_path):
-        # File 0: nav-heavy (low signal)
+    def test_renders_ranked_prefetched_docs_without_stale_policy(self, tmp_path: Path):
         (tmp_path / "fetched_docs_0.txt").write_text(
-            "# Fetched from: https://example.com/docs/nav\n\n"
-            "Documentation\n\n"
-            + "\n".join(
-                f"[Section {i}](https://example.com/section/{i})"
-                for i in range(50)
-            ),
-            encoding="utf-8",
-        )
-        # File 1: code+endpoints (high signal)
-        (tmp_path / "fetched_docs_1.txt").write_text(
-            "# Fetched from: https://example.com/docs/api-reference\n\n"
-            "## Reference\n\n"
-            "POST /v1/foo\n"
-            "Authorization: Bearer\n"
-            "```python\nclient.foo()\n```\n"
-            "POST /v1/bar\n"
-            "```python\nclient.bar()\n```\n",
+            "# Fetched from: https://docs.example.test\n\nPOST /v1/demo\nAuthorization: Bearer",
             encoding="utf-8",
         )
         rendered = _format_prefetched_docs_block(tmp_path)
-        # Both files appear
         assert "fetched_docs_0.txt" in rendered
-        assert "fetched_docs_1.txt" in rendered
-        # File 1 (higher signal) appears BEFORE File 0
-        idx_1 = rendered.find("fetched_docs_1.txt")
-        idx_0 = rendered.find("fetched_docs_0.txt")
-        assert idx_1 < idx_0, (
-            "Higher-signal file should be listed first in the inventory."
+        assert "docs-entrypoint artifact is the authorization source" in rendered
+        assert "checklist" not in rendered.lower()
+
+    def test_usefulness_signal_is_ranking_hint(self):
+        rich = "```python\nx=1\n```\nPOST /v1/demo\nAuthorization: Bearer"
+        plain = "Welcome to our docs"
+        assert _usefulness_signal(rich) > _usefulness_signal(plain)
+
+
+class TestAskResearchTemplateTelemetry:
+    def test_adherence_counts_named_fields(self):
+        question = (
+            "CANDIDATE: Example\nENDPOINT: POST /v1/demo\nKNOWN: auth exists\n"
+            "FIELD NEEDED: response schema\nWHY: parser depends on it"
         )
-
-    def test_no_density_tier_strings_in_output(self, tmp_path):
-        (tmp_path / "fetched_docs_0.txt").write_text(
-            "# Fetched from: https://x.com\n\nAnything", encoding="utf-8",
-        )
-        rendered = _format_prefetched_docs_block(tmp_path)
-        # No tier labels in the new output
-        for label in ("[HIGH", "[MEDIUM", "[THIN", "HIGH ", "MEDIUM ", "THIN "):
-            assert label not in rendered, (
-                f"Density tier label {label!r} should not appear in the new "
-                f"ranking-only inventory."
-            )
-
-    def test_no_inlined_file_content(self, tmp_path):
-        unique_marker = "UNIQUE_MARKER_THAT_SHOULD_NOT_BE_INLINED_12345"
-        (tmp_path / "fetched_docs_0.txt").write_text(
-            f"# Fetched from: https://x.com\n\nPOST /v1/foo\n\n{unique_marker}\n"
-            "```python\nfoo()\n```",
-            encoding="utf-8",
-        )
-        rendered = _format_prefetched_docs_block(tmp_path)
-        assert unique_marker not in rendered, (
-            "The new block lists files but does NOT inline content. "
-            "(Inlining was the density era's solution; the checklist "
-            "replaces it via per-field source URLs.)"
-        )
-
-    def test_no_skip_to_step_language_in_block(self, tmp_path):
-        # All-low-signal page
-        (tmp_path / "fetched_docs_0.txt").write_text(
-            "# Fetched from: https://x.com\n\nDocumentation overview",
-            encoding="utf-8",
-        )
-        rendered = _format_prefetched_docs_block(tmp_path)
-        assert "skip to STEP 2" not in rendered
-        assert "Skip to STEP 2" not in rendered
-
-    def test_block_explains_when_to_read_files(self, tmp_path):
-        (tmp_path / "fetched_docs_0.txt").write_text(
-            "# Fetched from: https://x.com\n\nPOST /v1/foo\n",
-            encoding="utf-8",
-        )
-        rendered = _format_prefetched_docs_block(tmp_path)
-        # Block tells builder when to read_file (Phase A or Phase C)
-        assert "Phase A" in rendered or "Phase C" in rendered
-        assert "checklist" in rendered.lower(), (
-            "Block must tell builder the checklist is the load-bearing "
-            "artifact and these files are background material."
-        )
-
-
-# ============================================================================
-# Usefulness signal (the soft ordering proxy)
-# ============================================================================
-
-
-class TestUsefulnessSignal:
-
-    def test_empty_content_scores_zero(self):
-        assert _usefulness_signal("") == 0
-        assert _usefulness_signal(None) == 0  # type: ignore[arg-type]
-
-    def test_api_doc_outscores_nav_page(self):
-        nav = "\n".join(f"[Sec {i}](https://x/{i})" for i in range(60))
-        api = (
-            "POST /v1/foo\n"
-            "POST /v1/bar\n"
-            "```python\nclient.foo()\n```\n"
-            "Authorization: Bearer xxx\n"
-        )
-        assert _usefulness_signal(api) > _usefulness_signal(nav)
-
-    def test_websocket_docs_score_positive(self):
-        ws = "wss://example.com/v1/realtime\nWebSocket protocol\n```\nawait ws.send(...)\n```"
-        assert _usefulness_signal(ws) > 0
-
-
-# ============================================================================
-# Density helpers truly removed from web_doc_cache
-# ============================================================================
-
-
-class TestDensityHelpersDeleted:
-    """The pass deletes density scoring from puzzleeval.web_doc_cache —
-    no remaining consumers. Lock the deletion."""
-
-    def test_doc_density_score_deleted(self):
-        from puzzleeval import web_doc_cache
-        assert not hasattr(web_doc_cache, "doc_density_score")
-
-    def test_classify_doc_density_deleted(self):
-        from puzzleeval import web_doc_cache
-        assert not hasattr(web_doc_cache, "classify_doc_density")
-
-    def test_density_constants_deleted(self):
-        from puzzleeval import web_doc_cache
-        assert not hasattr(web_doc_cache, "DENSITY_HIGH")
-        assert not hasattr(web_doc_cache, "DENSITY_MEDIUM")
-
-    def test_handoff_primitives_remain(self):
-        from puzzleeval.web_doc_cache import (
-            candidate_slug,
-            candidate_sandbox_dir,
-            count_existing_fetched_docs,
-            save_web_fetches_to_sandbox,
-        )
-        # The handoff machinery is orthogonal to density; it stays.
-        assert callable(candidate_slug)
-        assert callable(candidate_sandbox_dir)
-        assert callable(count_existing_fetched_docs)
-        assert callable(save_web_fetches_to_sandbox)
-
-
-# ============================================================================
-# Phase D completion checklist still references api_spec.txt sections
-# ============================================================================
-
-
-class TestPhaseDCompletionChecklistIntact:
-    """The five-phase rewrite preserved the existing api_spec.txt
-    completion checklist as Phase D's structural gate. Verify the
-    bridge between behavioral stop test (Phase C) and structural gate
-    (Phase D) is wired."""
-
-    def test_phase_d_label_replaces_phase_1_label(self):
-        # The completion checklist used to be "Phase 1 completion
-        # checklist". Renamed to "Phase D completion checklist".
-        assert "Phase D completion checklist" in BUILDER_SYSTEM_PROMPT
-
-    def test_completion_checklist_references_phase_c_stop_test(self):
-        prompt = BUILDER_SYSTEM_PROMPT
-        idx = prompt.find("Phase D completion checklist")
-        section = prompt[idx:idx + 1500]
-        # Bridge between behavioral (Phase C) and structural (Phase D)
-        assert "Phase C" in section
-        assert "behavioral stop test" in section.lower() or "stop test" in section.lower()
-
-    def test_endpoint_fit_can_lift_from_checklist(self):
-        prompt = BUILDER_SYSTEM_PROMPT
-        idx = prompt.find("Phase D completion checklist")
-        section = prompt[idx:idx + 3000]
-        assert "selected_endpoint" in section
-        assert "selection_justification" in section
+        result = _ask_research_template_adherence(question)
+        assert result["fully_adherent"] is True
+        assert len(result["fields_present"]) >= 5
+        assert result["fields_missing"] == []

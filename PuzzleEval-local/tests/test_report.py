@@ -7,6 +7,9 @@ useful advisories for empty / mis-shapen runs.
 
 from __future__ import annotations
 
+import importlib
+import json
+
 import pytest
 
 from puzzleeval.report import (
@@ -46,6 +49,16 @@ def _make_agent2(candidate_data):
 
 def _make_agent5(runs):
     return {"candidate_runs": runs, "total_build_cost_usd": 0.10, "total_test_cost_usd": 0.20}
+
+
+def _passed_result(test_case_id="t1"):
+    return {
+        "test_case_id": test_case_id,
+        "scenario": "happy path",
+        "success": True,
+        "passed": True,
+        "weighted_score": 1.0,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -108,9 +121,9 @@ def test_ranking_by_overall_score_desc():
         {"name": "C", "covers_step_ids": ["step_1"]},
     ])
     agent5 = _make_agent5([
-        {"candidate_name": "A", "overall_score": 0.6, "test_results": []},
-        {"candidate_name": "B", "overall_score": 0.9, "test_results": []},
-        {"candidate_name": "C", "overall_score": 0.75, "test_results": []},
+        {"candidate_name": "A", "overall_score": 0.6, "test_results": [_passed_result("a1")]},
+        {"candidate_name": "B", "overall_score": 0.9, "test_results": [_passed_result("b1")]},
+        {"candidate_name": "C", "overall_score": 0.75, "test_results": [_passed_result("c1")]},
     ])
     report = assemble_report(
         run_id="r1", trace_id="t1",
@@ -130,8 +143,8 @@ def test_winners_by_scope_picks_best_covering_candidate():
         {"name": "B", "covers_step_ids": ["step_1", "step_2"]},
     ])
     agent5 = _make_agent5([
-        {"candidate_name": "A", "overall_score": 0.9, "test_results": []},
-        {"candidate_name": "B", "overall_score": 0.7, "test_results": []},
+        {"candidate_name": "A", "overall_score": 0.9, "test_results": [_passed_result("a1")]},
+        {"candidate_name": "B", "overall_score": 0.7, "test_results": [_passed_result("b1")]},
     ])
     report = assemble_report(
         run_id="r1", trace_id="t1",
@@ -264,6 +277,204 @@ def test_no_agent5_result_emits_advisory():
     assert report.overall_winner is None
 
 
+def test_all_failed_builds_have_no_winner():
+    uo = _make_uo(blueprint_steps=["step_1"])
+    agent5 = {
+        "candidate_runs": [],
+        "failed_harnesses": [
+            {
+                "candidate_name": "A",
+                "provider": "A Inc",
+                "failure_reason": "completion gate failed",
+                "failure_category": "build_timeout",
+                "turns_attempted": 12,
+            },
+            {
+                "candidate_name": "B",
+                "provider": "B Inc",
+                "failure_reason": "external provider blocked",
+                "failure_category": "auth_blocked",
+                "turns_attempted": 5,
+            },
+        ],
+    }
+    report = assemble_report(
+        run_id="r1", trace_id="t1",
+        agent1_result=uo,
+        agent2_result=_make_agent2([
+            {"name": "A", "covers_step_ids": ["step_1"]},
+            {"name": "B", "covers_step_ids": ["step_1"]},
+        ]),
+        agent4_result=None,
+        agent5_result=agent5,
+    )
+    assert report.overall_winner is None
+    assert all(c.build_succeeded is False for c in report.candidate_reports)
+    assert any("No harnesses successfully ran" in a for a in report.advisories)
+
+
+def test_abandoned_failed_harness_is_distinguished_in_report():
+    uo = _make_uo(blueprint_steps=["step_1"])
+    agent5 = {
+        "candidate_runs": [],
+        "failed_harnesses": [
+            {
+                "candidate_name": "BlockedAPI",
+                "provider": "Blocked Inc",
+                "failure_reason": "Abandoned: provider_blocked. Billing gate blocks access.",
+                "failure_category": "provider_blocked",
+                "completion_gate_status": "abandoned",
+                "turns_attempted": 4,
+            },
+        ],
+    }
+
+    report = assemble_report(
+        run_id="r1",
+        trace_id="t1",
+        agent1_result=uo,
+        agent2_result=_make_agent2([
+            {"name": "BlockedAPI", "covers_step_ids": ["step_1"]},
+        ]),
+        agent4_result=None,
+        agent5_result=agent5,
+    )
+
+    candidate = report.candidate_reports[0]
+    assert candidate.build_succeeded is False
+    assert candidate.abandoned is True
+    assert candidate.abandon_reason == "provider_blocked"
+    assert any("abandoned=provider_blocked" in item for item in candidate.critical_failures)
+    assert any("BlockedAPI: abandoned" in item for item in report.advisories)
+
+
+def test_efficiency_summary_rolls_up_agent5_conversation_summaries(tmp_path):
+    harness_dir = tmp_path / "svc"
+    state_dir = harness_dir / "_agent_state"
+    state_dir.mkdir(parents=True)
+    (harness_dir / "conversation_summary.json").write_text(json.dumps({
+        "candidate_name": "A",
+        "total_turns": 4,
+        "aggregate": {
+            "cache_read_tokens": 80,
+            "total_billed_input": 200,
+            "cache_hit_pct": 40.0,
+        },
+        "cache_analysis": {
+            "turns_with_cache_write": 1,
+            "turns_with_cache_read_only": 2,
+        },
+        "build_phases": {
+            "research": {"turns": 1, "cost_usd": 0.1, "latency_ms": 1000},
+            "build": {"turns": 2, "cost_usd": 0.2, "latency_ms": 2000},
+            "validate": {"turns": 1, "cost_usd": 0.05, "latency_ms": 500},
+        },
+        "efficiency_analysis": {
+            "research": {
+                "turns": 1,
+                "web_fetch_results": 2,
+                "empty_web_fetch_results": 1,
+                "web_fetch_errors": 1,
+                "web_search_results": 1,
+                "advisor_results": 0,
+                "empty_web_fetch_by_url": {"https://docs.example/empty": 1},
+                "web_fetch_error_codes": {"403": 1},
+            },
+            "waste_signals": {
+                "artifact_only_turns": 1,
+                "text_only_turns": 0,
+                "diagnostic_script_turns": 1,
+            },
+            "scaffold_write_turns": 1,
+            "single_file_scaffold_turns": 0,
+            "parallel_tool_turns": 2,
+            "total_tool_turns": 3,
+        },
+        "failure_packets": {
+            "count": 2,
+            "by_category": {"code_bug": 1, "provider_blocked": 1},
+        },
+    }), encoding="utf-8")
+    (state_dir / "runtime_state.json").write_text(json.dumps({
+        "external_provider_status": "healthy",
+    }), encoding="utf-8")
+    (state_dir / "debug_research_ledger.json").write_text(json.dumps({
+        "attempts": [{"packet_path": "_agent_state/failure_packets/one.json"}],
+    }), encoding="utf-8")
+    agent5 = {
+        "harnesses": [
+            {
+                "candidate_name": "A",
+                "provider": "A Inc",
+                "harness_dir": str(harness_dir),
+                "build_turns": 4,
+                "build_cost_usd": 0.35,
+            },
+        ],
+        "failed_harnesses": [
+            {
+                "candidate_name": "B",
+                "provider": "B Inc",
+                "failure_reason": "Abandoned: provider_blocked. Access blocked.",
+                "failure_category": "provider_blocked",
+                "completion_gate_status": "abandoned",
+                "turns_attempted": 2,
+                "build_cost_usd": 0.15,
+            },
+        ],
+        "candidate_runs": [],
+        "total_build_cost_usd": 0.5,
+        "total_test_cost_usd": 0.1,
+        "web_fetch_blocks": 3,
+    }
+
+    report = assemble_report(
+        run_id="r1",
+        trace_id="t1",
+        agent1_result=_make_uo(),
+        agent2_result=_make_agent2([]),
+        agent4_result=None,
+        agent5_result=agent5,
+        total_cost_usd=0.6,
+    )
+
+    summary = report.efficiency_summary
+    assert summary is not None
+    assert summary.migration_flags["PUZZLEEVAL_EFFICIENCY_SUMMARY_ENABLED"] is True
+    assert summary.turns_by_phase == {"research": 1, "build": 2, "validate": 1, "unknown": 2}
+    assert summary.cost_by_phase_usd["build"] == 0.2
+    assert summary.research["web_fetch_results"] == 2
+    assert summary.research["debug_research_attempts"] == 1
+    assert summary.research["cache_hit_pct"] == 40.0
+    assert summary.blocked_fetches["web_fetch_blocks"] == 3
+    assert summary.blocked_fetches["empty_web_fetch_by_url"]["https://docs.example/empty"] == 1
+    assert summary.artifact_overhead["artifact_only_turns"] == 1
+    assert summary.failure_packets["by_category"]["provider_blocked"] == 1
+    assert summary.provider_health["status_counts"]["healthy"] == 1
+    assert summary.abandoned_candidates["by_reason"]["provider_blocked"] == 1
+
+
+def test_efficiency_summary_flag_zero_suppresses_rollup(monkeypatch):
+    from puzzleeval import config
+
+    monkeypatch.setenv("PUZZLEEVAL_EFFICIENCY_SUMMARY_ENABLED", "0")
+    importlib.reload(config)
+    try:
+        report = assemble_report(
+            run_id="r1",
+            trace_id="t1",
+            agent1_result=_make_uo(),
+            agent2_result=_make_agent2([]),
+            agent4_result=None,
+            agent5_result=_make_agent5([]),
+        )
+        assert report.efficiency_summary is None
+        assert report.total_cost_usd == 0.0
+    finally:
+        monkeypatch.delenv("PUZZLEEVAL_EFFICIENCY_SUMMARY_ENABLED", raising=False)
+        importlib.reload(config)
+
+
 def test_empty_agent2_returns_empty_report_no_crash():
     uo = _make_uo(blueprint_steps=["step_1"])
     report = assemble_report(
@@ -342,7 +553,7 @@ def test_report_to_dict_is_json_serializable():
     import json
     uo = _make_uo(blueprint_steps=["step_1"])
     agent5 = _make_agent5([{
-        "candidate_name": "A", "overall_score": 0.9, "test_results": [],
+        "candidate_name": "A", "overall_score": 0.9, "test_results": [_passed_result("a1")],
     }])
     report = assemble_report(
         run_id="r1", trace_id="t1",

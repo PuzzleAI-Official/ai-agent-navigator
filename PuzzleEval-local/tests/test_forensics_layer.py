@@ -85,6 +85,12 @@ class TestShimIsValidPython:
         assert "log_thread_start" in names
         assert "log_thread_error" in names
 
+    def test_websockets_hook_binds_original_send_per_class(self):
+        from puzzleeval.agents.agent5.sandbox import FORENSICS_SHIM_CONTENT
+
+        assert "def _make_traced_send(orig_send):" in FORENSICS_SHIM_CONTENT
+        assert "cls.send = _make_traced_send(orig_send)" in FORENSICS_SHIM_CONTENT
+
 
 # ---------------------------------------------------------------------------
 # Shim run-time behavior — exercised in a real subprocess

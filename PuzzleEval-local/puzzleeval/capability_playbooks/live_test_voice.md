@@ -1,15 +1,12 @@
 ---
 id: live_test_voice
-version: 1
-title: Voice Live Test Session Contract
+version: 2
+title: Voice Live-Test Outcome Contract
 category: modality
 description: |
-  Teaches the harness builder how to write live_test.py for voice/multi-turn
-  conversation harnesses. Live test must drive 2+ turns through the EXACT
-  production payload shape (audio_url, turn_index, session_state,
-  input_context). Skipping this causes silent production failures that
-  smoke tests don't catch. Required when test cases have voice_conversation,
-  voice_turn, or conversation modalities.
+  Outcome contract for voice and multi-turn live tests. It defines the evidence
+  live_test.py must produce to prove production equivalence and task equivalence
+  without prescribing a runner implementation.
 selectors:
   trigger_types:
     - voice_conversation
@@ -24,132 +21,50 @@ related_contracts:
   - voice
   - streaming_response
 revisit_when:
-  - "Production payload shape changes (e.g., new fields beyond audio_url + turn_index + session_state)"
+  - "Production payload shape changes."
+  - "Runtime primitives change beyond single_call and persistent_worker."
 ---
 
-## Voice / multi-turn live-test requirements (REQUIRED — Phase 3)
+## Voice Live-Test Outcome Contract
 
-Your harness handles real-time voice or multi-turn conversation. The
-plugin's `drive_conversation` will call `harness.run()` MULTIPLE TIMES
-per test with this payload shape:
+`live_test.py` must prove the built harness works under the same observable
+conditions production evaluation will use. It should not be a separate toy path.
 
-    {
-        "audio_url": "<URL of caller's TTS-synthesized audio>",
-        "turn_index": int,            # 0, 1, 2, ...
-        "session_state": <mutable dict>,  # threading state across turns
-        "input_context": {"instructions": "<system prompt>"}
-    }
+Production-equivalence evidence:
 
-Your live_test.py MUST exercise THIS exact production flow before
-HARNESS_COMPLETE. A live test that skips the audio path (e.g.,
-`audio_url=None`) only verifies the trivial "agent greets without input"
-case. Production tests with real caller audio will fail silently with
-ZERO agent response — and you won't catch it.
+- The live test uses the same input concepts production uses for voice turns:
+  caller audio, turn index, safe input context, and conversation history.
+- The live test uses the runtime primitive selected from
+  `implementation_plan.json`: `single_call` for provider-held state or
+  `persistent_worker` for harness-process-held state.
+- If persistent workers are disabled, the live test records that continuity is
+  degraded instead of claiming full equivalence.
+- The live test proves cleanup or release of any worker/session resources it
+  creates.
 
-### Required live_test.py shape (voice/conversation):
+Task-equivalence evidence:
 
-The assertion helper below handles BOTH return shapes from the voice
-playbook — Shape A (inline `audio_bytes`) and Shape B (on-disk
-`audio_path`). Use it verbatim regardless of which shape your harness
-produces; assertions on `audio_bytes` only would falsely fail Shape B
-harnesses.
+- Caller audio contains intelligible task speech, not silence or transport-only
+  audio.
+- The task content matches the objective, test cases, and business fixture when
+  present.
+- At least two turns are exercised for multi-turn voice or conversation
+  objectives.
+- Each exercised turn returns `success=True` and observable agent audio using
+  the voice outcome contract.
+- Later turns prove continuity through transcript, forensics, or provider/server
+  identity evidence. A repeated first-turn greeting without continuity evidence
+  is a warning.
 
-```python
-"""Live test: drive a 2-turn conversation through the production payload shape."""
-import os, json, base64, harness
+HARNESS_COMPLETE evidence:
 
-
-def _agent_audio_size(result):
-    """Return number of bytes of agent audio in the result, regardless of shape.
-
-    Shape A (inline): result["raw_response"]["audio_bytes"] (bytes OR base64 str)
-    Shape B (on-disk): result["raw_response"]["audio_path"] (filesystem path)
-    """
-    raw = (result or {}).get("raw_response", {}) or {}
-    inline = raw.get("audio_bytes")
-    if isinstance(inline, (bytes, bytearray)):
-        return len(inline)
-    if isinstance(inline, str) and inline:
-        try:
-            return len(base64.b64decode(inline, validate=False))
-        except Exception:
-            return len(inline)  # treat as already-raw bytes-as-str
-    path = raw.get("audio_path")
-    if isinstance(path, str) and path and os.path.exists(path):
-        return os.path.getsize(path)
-    return 0
-
-
-# 1) Synthesize real caller audio (use any available TTS service)
-def synth_caller_audio(text):
-    # ... return raw audio bytes (mp3 / wav / pcm16)
-    ...
-
-# 2) Serve audio at a fetchable URL (local HTTP server OR upload to a temp store)
-turn0_audio_url = serve_audio(synth_caller_audio("Hi, I have a problem with X"))
-turn1_audio_url = serve_audio(synth_caller_audio("My name is Test User, phone 555-1234"))
-
-# 3) Drive 2 turns with the EXACT production payload shape
-session_state = {}
-instructions = "You are a helpful agent. Greet the caller, gather their name + number."
-
-# Turn 0 — fresh session (turn_index=0)
-result_t0 = harness.run({
-    "audio_url": turn0_audio_url,
-    "turn_index": 0,
-    "session_state": session_state,
-    "input_context": {"instructions": instructions},
-})
-
-# Turn 1 — must reuse session_state (multi-turn continuity)
-result_t1 = harness.run({
-    "audio_url": turn1_audio_url,
-    "turn_index": 1,
-    "session_state": session_state,  # same dict — MUST persist agent state
-    "input_context": {"instructions": instructions},
-})
-
-# 4) ASSERTIONS (live test PASSES = ALL true):
-assert result_t0["success"] is True, f"Turn 0 failed: {result_t0.get('error')}"
-assert result_t1["success"] is True, f"Turn 1 failed: {result_t1.get('error')}"
-
-# Audio in BOTH turns — works for Shape A (audio_bytes) AND Shape B (audio_path)
-audio_t0_bytes = _agent_audio_size(result_t0)
-audio_t1_bytes = _agent_audio_size(result_t1)
-assert audio_t0_bytes > 1000, "Turn 0 produced no agent audio"
-assert audio_t1_bytes > 1000, "Turn 1 produced no agent audio"
-
-# Continuity check — turn 1's transcript should NOT restart with greeting
-# (if agent says 'Thanks for calling' on turn 1, it's treating each turn
-#  as a new conversation — session_state isn't carrying agent context)
-# (Soft check — log if greeting repeats; some providers legitimately
-# re-greet, but flag it for review)
-
-print(json.dumps({"turn0_audio_bytes": audio_t0_bytes,
-                   "turn1_audio_bytes": audio_t1_bytes,
-                   "turn0_transcript": result_t0.get("output", "")[:200],
-                   "turn1_transcript": result_t1.get("output", "")[:200],
-                   "success": True}, indent=2))
-```
-
-### Why this matters
-
-The production flow is multi-turn audio. A live test that doesn't send
-audio is meaningless for proving the harness works. Real-run trace
-a4860e94 OpenAI: live test passed (audio_url=None path), real tests
-got 0/5 — agent silent on every turn because the audio path was broken
-but never tested.
-
-### What HARNESS_COMPLETE requires for voice/conversation:
-
-[Y] smoke_test.py passes (structural validation — same as before)
-[Y] live_test.py drives 2 turns with REAL caller audio via the
-    production payload shape `{audio_url, turn_index, session_state,
-    input_context}`
-[Y] BOTH turns return success=True
-[Y] BOTH turns produce non-empty agent audio (> 1000 bytes)
-[Y] session_state carries agent provider state across turns (verified
-    by turn 1 not re-initializing the WebSocket / not re-creating
-    the agent_id / not losing conversation context)
-
-Skipping any of these → harness will silently fail in production tests.
+- `smoke_test.py` proves basic structure.
+- `live_test.py` proves production equivalence and task equivalence.
+- `live_test.py` should write `_agent_state/live_test_evidence.json` when
+  practical. Include per-turn input payload shape, caller input provenance,
+  success/error, transcript/output, audio artifact path, session/continuity
+  evidence, and the task objective/assertion for that turn.
+- The report can point to per-turn audio or merged conversation audio.
+- Any provider block, missing credential, quota failure, or unsupported runtime
+  degradation is explicit in the evidence rather than hidden behind a passing
+  toy live test.

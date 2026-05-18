@@ -124,6 +124,26 @@ def _make_screened_candidate(
     )
 
 
+def _stage_build_ready_docs(trace_id: str, candidate: ScreenedCandidate) -> None:
+    """Stage the fetch-verified docs evidence Agent 5 now requires."""
+
+    from puzzleeval.web_doc_cache import candidate_sandbox_dir
+
+    sandbox = candidate_sandbox_dir(trace_id, candidate.name, Path("runs"))
+    sandbox.mkdir(parents=True, exist_ok=True)
+    (sandbox / "fetched_docs_0.txt").write_text(
+        "# Fetched from: https://cloud.google.com/document-ai/docs/reference/rest\n"
+        "# Evidence status: fetched_current_api_docs\n"
+        "# Saved for Agent 5 build context\n\n"
+        "Google Document AI API reference. Authentication uses API key. "
+        "Endpoint POST /v1/documents:process request response JSON curl SDK.",
+        encoding="utf-8",
+    )
+    from puzzleeval.docs_entrypoint import write_docs_entrypoint
+
+    write_docs_entrypoint(candidate, sandbox)
+
+
 def _make_test_cases() -> Agent3Result:
     """Create a minimal Agent 3 result for testing."""
     return Agent3Result(
@@ -721,12 +741,15 @@ class TestIntegration:
         # Builder uses client.beta.messages.create (no separate research phase)
         mock_client.beta.messages.create.side_effect = [turn1_response, turn2_response]
 
-        # Run with a single candidate for simplicity
+        # Run with a single fetch-verified candidate for simplicity.
+        trace_id = "test-trace-integration"
+        candidate = _make_screened_candidate("TestService")
+        _stage_build_ready_docs(trace_id, candidate)
         input_data = Agent5Input(
-            validated_candidates=[_make_screened_candidate("TestService")],
+            validated_candidates=[candidate],
             user_understanding=_make_user_understanding(),
             test_cases=_make_test_cases(),
-            trace_id="test-trace-integration",
+            trace_id=trace_id,
         )
 
         result = run_implement_test_env_agent(input_data)
@@ -755,11 +778,14 @@ class TestIntegration:
         mock_client.messages.create.return_value = fail_response
         mock_client.beta.messages.create.return_value = fail_response
 
+        trace_id = "test-trace-fail"
+        candidate = _make_screened_candidate("BadService")
+        _stage_build_ready_docs(trace_id, candidate)
         input_data = Agent5Input(
-            validated_candidates=[_make_screened_candidate("BadService")],
+            validated_candidates=[candidate],
             user_understanding=_make_user_understanding(),
             test_cases=_make_test_cases(),
-            trace_id="test-trace-fail",
+            trace_id=trace_id,
         )
 
         result = run_implement_test_env_agent(input_data)
@@ -792,11 +818,14 @@ class TestIntegration:
         mock_client.messages.create.side_effect = rate_limit_error
         mock_client.beta.messages.create.side_effect = rate_limit_error
 
+        trace_id = "test-trace-ratelimit"
+        candidate = _make_screened_candidate("RateLimitedService")
+        _stage_build_ready_docs(trace_id, candidate)
         input_data = Agent5Input(
-            validated_candidates=[_make_screened_candidate("RateLimitedService")],
+            validated_candidates=[candidate],
             user_understanding=_make_user_understanding(),
             test_cases=_make_test_cases(),
-            trace_id="test-trace-ratelimit",
+            trace_id=trace_id,
         )
 
         result = run_implement_test_env_agent(input_data)
@@ -821,11 +850,14 @@ class TestIntegration:
         mock_client.messages.create.return_value = never_done
         mock_client.beta.messages.create.return_value = never_done
 
+        trace_id = "test-trace-maxturns"
+        candidate = _make_screened_candidate("SlowService")
+        _stage_build_ready_docs(trace_id, candidate)
         input_data = Agent5Input(
-            validated_candidates=[_make_screened_candidate("SlowService")],
+            validated_candidates=[candidate],
             user_understanding=_make_user_understanding(),
             test_cases=_make_test_cases(),
-            trace_id="test-trace-maxturns",
+            trace_id=trace_id,
         )
 
         # Use a low max_turns for testing

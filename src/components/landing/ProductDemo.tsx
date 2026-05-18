@@ -39,7 +39,7 @@ const TestSimulation = () => {
       setActiveTest((prev) => (prev + 1) % tests.length);
     }, 2000);
     return () => clearInterval(interval);
-  }, []);
+  }, [tests.length]);
 
   return (
     <div className="space-y-0">

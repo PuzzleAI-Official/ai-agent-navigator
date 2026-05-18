@@ -554,8 +554,8 @@ Agent5Input(
 │      merges credentials INTO os.environ for the subprocess       │
 │                                                                   │
 │    Used in 3 phases:                                             │
-│    a) Phase 2 build: run_code tool executes harness code         │
-│    b) Phase 3 live validation: run_code runs live_test.py        │
+│    a) Build/debug: run_code tool executes harness code           │
+│    b) Live/prod-shape validation: run_code runs live_test.py     │
 │    c) Post-loop execution: _execute_single_test runs harness     │
 │                                                                   │
 │    All 3 use the same _build_sandbox_env pattern.                │
@@ -639,37 +639,38 @@ Agent5Input(
 
 ## 11. CWD Management
 
-Agent 5 creates harness sandbox directories using a RELATIVE path:
+Agent 5 creates harness sandbox directories from `Agent5Input.runs_root` when
+the API runner provides one, falling back to the CLI-compatible relative
+`./runs` path only when the field is omitted:
 
 ```python
 # inside implement_test_env.py (PuzzleEval package)
-harness_base = Path("runs") / input_data.trace_id / "harnesses"
+harness_base = (
+    (Path(input_data.runs_root) if input_data.runs_root else Path("runs"))
+    / input_data.trace_id
+    / "harnesses"
+).resolve()
 harness_base.mkdir(parents=True, exist_ok=True)
 ```
 
-This means the location depends on the current working directory when `run_implement_test_env_agent()` is called.
-
-**Problem:** FastAPI server's CWD could be anywhere (wherever uvicorn was started). If CWD is wrong, harnesses get created in the wrong place.
+The API runner passes the absolute `puzzleeval-api/runs` directory into Agent 4,
+Agent 5, and the background venv pre-create task so docs handoff files, venvs,
+harness code, audio artifacts, and reports all land in the same run tree.
 
 **Solution** (in `_run_real_agent5()`):
 
 ```python
 API_ROOT = Path(__file__).resolve().parent.parent  # puzzleeval-api/
 
-original_cwd = os.getcwd()
-def _run_agent5_with_cwd():
-    os.chdir(str(API_ROOT))
-    try:
-        return run_implement_test_env_agent(agent5_input, progress_callback=...)
-    finally:
-        os.chdir(original_cwd)
-
-result = await asyncio.to_thread(_run_agent5_with_cwd)
+agent5_input = Agent5Input(..., runs_root=str(API_ROOT / "runs"))
+result = await asyncio.to_thread(
+    run_implement_test_env_agent,
+    agent5_input,
+    progress_callback=...,
+)
 ```
 
-This forces CWD to `puzzleeval-api/` before Agent 5 runs, so harnesses end up in `puzzleeval-api/runs/{trace_id}/harnesses/`. The original CWD is restored in `finally`.
-
-**Thread safety caveat:** `os.chdir()` is process-wide. If multiple pipelines run concurrently (future cloud deployment), they'd fight over CWD. For single-user local mode this is fine. For production, Agent 5 would need to accept an absolute `runs_dir` parameter instead.
+This avoids process-wide `os.chdir()`, which is unsafe when multiple runs overlap.
 
 ---
 
@@ -729,8 +730,8 @@ puzzleeval-api/runs/{trace_id}/
         ├── smoke_test.py
         ├── .venv/                    # Per-harness Python venv
         ├── conversation_log.json     # Full Claude conversation for this build
-        ├── api_spec.txt              # Extracted API documentation
-        └── fetched_docs_*.txt        # Web-fetched docs
+        ├── _agent_state/             # objective, research plan/synthesis, implementation plan, runtime/failure state
+        └── fetched_docs_*.txt        # Web-fetched docs / cached snippets
 ```
 
 **These files are gold for debugging.** If a real run fails or produces bad results:
@@ -831,10 +832,9 @@ Should complete in ~60-90 seconds with 100+ SSE events and all 7 JSON artifacts 
 1. **Replace RunManager** in-memory dict with Redis. RunState becomes a hash.
 2. **Replace EventBus** queue.Queue with Redis pub/sub so SSE works across multiple FastAPI workers.
 3. **Replace uploads/ and runs/** local dirs with S3/GCS + presigned URLs.
-4. **Agent 5 CWD fix:** Add `runs_dir: str | None` to `Agent5Input` so we can pass absolute paths and remove `os.chdir()`.
-5. **Agent 5 job queue:** Move Agent 5 execution to Celery or SQS workers so long builds don't hold FastAPI request handlers.
-6. **Database:** PostgreSQL for run history, user accounts, billing.
-7. **Auth:** OAuth (Google, GitHub) or email/password via Supabase.
+4. **Agent 5 job queue:** Move Agent 5 execution to Celery or SQS workers so long builds don't hold FastAPI request handlers.
+5. **Database:** PostgreSQL for run history, user accounts, billing.
+6. **Auth:** OAuth (Google, GitHub) or email/password via Supabase.
 
 ### For Fault Tolerance
 
@@ -1052,7 +1052,7 @@ Every configurable knob. Defaults shown.
 - `PUZZLEEVAL_TUNNEL_URL=` (optional public URL for offsite candidates)
 - `PUZZLEEVAL_SMTP_PORT=2525` / `PUZZLEEVAL_SMTP_BIND=127.0.0.1` / `PUZZLEEVAL_SMTP_MAX_LINE_BYTES=8192` / `PUZZLEEVAL_SMTP_MAX_DATA_BYTES=26214400`
 - `PUZZLEEVAL_SLACK_MOCK_PORT=8766` / `PUZZLEEVAL_SMS_MOCK_PORT=8767` / `PUZZLEEVAL_OUTBOUND_BIND=127.0.0.1` / `PUZZLEEVAL_OUTBOUND_HTTP_MAX_BODY=1048576`
-- `PUZZLEEVAL_VOICE_PORT=8768` / `PUZZLEEVAL_VOICE_BIND=127.0.0.1` / `PUZZLEEVAL_VOICE_MAX_AUDIO=26214400`
+- `PUZZLEEVAL_VOICE_PORT=` (unset = isolated loopback port; set only for operator-managed tunnels) / `PUZZLEEVAL_VOICE_BIND=127.0.0.1` / `PUZZLEEVAL_VOICE_MAX_AUDIO=26214400`
 - `PUZZLEEVAL_TTS_PROVIDER=` (auto / openai_tts / elevenlabs) / `PUZZLEEVAL_ELEVENLABS_VOICE_ID=21m00Tcm4TlvDq8ikWAM`
 
 **Plugin registry strictness:** `PUZZLEEVAL_STRICT_PLUGIN_REGISTRY=0` (set `1` to raise on duplicate names)

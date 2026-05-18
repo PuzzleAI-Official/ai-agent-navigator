@@ -7,7 +7,7 @@
 // Each listed scope is rendered as a small chip with:
 //   - the scope's role name (from the blueprint) for human readability
 //   - a status dot: amber for "claimed" (Agent 2's guess from search snippets),
-//     emerald for "verified" (confirmed from docs during the deep-verify pass).
+//     emerald for "verified" (confirmed from docs during selected-candidate verification).
 //
 // The compact variant (used inside the early-discovery row) drops the
 // leading "covers" label and the role names — just shows a "K/N ✓" count
@@ -47,7 +47,7 @@ export function CoverageBadge({ candidate, workflowSteps, compact }: Props) {
 
   // Aggregate confidence across all covered scopes. If any scope is still
   // "claimed", the badge as a whole is "claimed"-tinted (amber). When
-  // every scope is "verified" (Phase 6.5 complete), the badge is emerald.
+  // every scope is "verified" (verification complete), the badge is emerald.
   const anyClaimed = Object.values(candidate.coverage_confidence).some(
     (conf) => conf === "claimed"
   );

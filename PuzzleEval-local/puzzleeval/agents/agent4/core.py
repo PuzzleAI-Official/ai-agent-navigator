@@ -62,7 +62,10 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-import anthropic
+try:
+    import anthropic
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    from puzzleeval.anthropic_client import anthropic  # type: ignore
 
 from functools import lru_cache
 from importlib import resources
@@ -145,12 +148,13 @@ STRUCTURE_SYSTEM_PROMPT = _load_structure_system_prompt()
 # Tool Configuration — Per-Candidate (search-first, fetch-when-needed)
 # ============================================================================
 # COST OPTIMIZATION: Search results (~5-7K tokens) are much cheaper than
-# web_fetch (~10-140K tokens per page). For well-known services (Google,
-# AWS, etc.), search snippets clearly show API docs exist — no need to
-# fetch the full 140K-token API reference just to answer "does it exist?"
+# web_fetch (~10-140K tokens per page), so search routes Agent 4 toward
+# the most promising official docs URL. Search snippets are never build
+# eligibility by themselves: the chosen page must still be fetched and show
+# build-useful API documentation before the candidate can pass to Agent 5.
 #
 #   web_search=3: Standard query + capability-specific + site-scoped
-#   web_fetch=3:  Docs page + homepage + follow promising link
+#   web_fetch=3:  Confirm docs page + homepage + follow promising link
 #
 # Each call is isolated — one candidate's context doesn't affect another.
 # ============================================================================
@@ -179,11 +183,10 @@ WEB_SEARCH_TOOL = {
 # content each time, so there's no repeated context to cache.
 
 # Max tokens per call type.
-# Verification produces TWO outputs per candidate: (1) findings text
-# (~500-1000 tokens — PASS/REJECT, evidence, auth_method, etc.) and
-# (2) the BUILD_READINESS_CHECKLIST JSON block (~600-900 tokens — ten
-# fields plus provider_surface). Adaptive thinking blocks add another
-# ~1000-3000 tokens of reasoning between tool calls.
+# Verification produces findings text per candidate: PASS/REJECT evidence,
+# auth/access metadata, canonical docs URL, pricing, and data-format notes.
+# Adaptive thinking blocks add another ~1000-3000 tokens of reasoning between
+# tool calls.
 #
 # Token budget history:
 #   - 4096: original — JSON block reliably truncated (trace 73a9d605
@@ -192,9 +195,7 @@ WEB_SEARCH_TOOL = {
 #     (real-run trace 4427591c, 2026-04-25: OpenAI Realtime SIP had
 #     so much rich data — 9 capabilities, 5 user_selectable_params,
 #     full interaction_model, detailed pricing/rate_limits — that the
-#     findings + structured fields consumed the budget, leaving the
-#     fenced JSON block truncated. Sentinel checklist returned →
-#     no pre-render fast path → Agent 5 had to do full Sonnet research)
+#     findings + structured fields consumed the budget)
 #   - 16384 (NEW-AM): bumped to address the rich-docs failure mode.
 #     Adds <$0.05 per candidate when budget actually used (Sonnet
 #     output rate $15/MTok × 4K extra tokens = $0.06 worst case),
@@ -209,7 +210,8 @@ STRUCTURE_MAX_TOKENS = 16384
 # ---------------------------------------------------------------------------
 # pause_turn Safety Valve
 # ---------------------------------------------------------------------------
-# Per-candidate calls can use up to 3 searches + 3 fetches (6 tool uses),
+# Per-candidate Agent 4 verification can use up to three web searches and
+# three web fetches,
 # so the server-side loop may need more time. Allow 2 continuations.
 # ---------------------------------------------------------------------------
 MAX_CONTINUATIONS = 2
@@ -239,162 +241,6 @@ MAX_PARALLEL_VERIFICATIONS = int(
 # the candidate's details from Agent 2 and the user's sub-tasks for
 # capability matching.
 # ============================================================================
-
-# ============================================================================
-# [CORE] Build-readiness checklist extraction
-# ============================================================================
-# The verification prompt asks Claude to emit two blocks per candidate:
-#   1. Findings text (PASS/REJECT + EVIDENCE / AUTH_METHOD / etc.)
-#   2. A fenced ```json BUILD_READINESS_CHECKLIST block holding the
-#      structured handoff to Agent 5.
-#
-# We pull the checklist deterministically from the FINDINGS text (per-
-# candidate) rather than relying on the structuring LLM to copy it
-# field-for-field. The structuring LLM is great at filling enums and
-# rephrasing prose, but it occasionally drops nested JSON when the
-# total output approaches the grammar-budget cap. Parsing the JSON
-# block here gives us a guaranteed checklist on every Verified Pass.
-#
-# Per AD-007: contract enforcement lives in deterministic code, not
-# prompts. Both layers exist (prompt teaches the format; parser
-# enforces it), defense in depth.
-# ============================================================================
-
-import json as _json
-import re as _re_screening
-
-# Matches the fenced JSON block. We allow either a language hint
-# ("json") or just the label, and we accept variations in spacing /
-# casing of the label (Claude sometimes title-cases or uses spaces).
-_CHECKLIST_FENCE_PATTERN = _re_screening.compile(
-    r"```(?:json\s*)?BUILD_READINESS_CHECKLIST\s*\n(.*?)\n```",
-    _re_screening.DOTALL | _re_screening.IGNORECASE,
-)
-
-
-def _extract_checklist_from_findings(
-    findings_text: str,
-    candidate_name: str,
-) -> "BuildReadinessChecklist":
-    """Parse the BUILD_READINESS_CHECKLIST JSON block out of one
-    candidate's findings text and return a validated checklist.
-
-    Falls back to `default_unknown_checklist` (system_failure sentinel)
-    on any of: no fence found, malformed JSON, Pydantic validation
-    failure. The fallback is intentional — per the three-state rejection
-    model, system failures NEVER reject the candidate; instead Agent 5
-    receives the sentinel and falls back to full-research mode.
-
-    The reason string captures WHY the sentinel was emitted so Agent 5
-    can see it and adjust expectations.
-    """
-    from puzzleeval.schemas import (
-        BuildReadinessChecklist,
-        default_unknown_checklist,
-    )
-
-    match = _CHECKLIST_FENCE_PATTERN.search(findings_text or "")
-    if not match:
-        return default_unknown_checklist(
-            reason=(
-                f"agent 4 produced no BUILD_READINESS_CHECKLIST block "
-                f"for {candidate_name}"
-            ),
-        )
-
-    raw_json = match.group(1).strip()
-    try:
-        parsed = _json.loads(raw_json)
-    except _json.JSONDecodeError as exc:
-        return default_unknown_checklist(
-            reason=(
-                f"BUILD_READINESS_CHECKLIST JSON for {candidate_name} "
-                f"failed to parse: {exc}"
-            ),
-        )
-
-    # Ensure populated_by defaults to "agent_4" when the LLM omitted it
-    # (common — the JSON template doesn't include the meta field).
-    parsed.setdefault("populated_by", "agent_4")
-
-    try:
-        checklist = BuildReadinessChecklist.model_validate(parsed)
-    except Exception as exc:  # noqa: BLE001 — pydantic ValidationError catch-all
-        return default_unknown_checklist(
-            reason=(
-                f"BUILD_READINESS_CHECKLIST for {candidate_name} failed "
-                f"schema validation: {type(exc).__name__}: {str(exc)[:200]}"
-            ),
-        )
-
-    # Stamp last_updated_at to "now" if the LLM didn't supply one.
-    if not checklist.last_updated_at:
-        from datetime import datetime, timezone
-        checklist.last_updated_at = datetime.now(timezone.utc).isoformat()
-
-    return checklist
-
-
-def _attach_checklists_to_result(
-    result: "Agent4Result",
-    findings_by_name: dict[str, str],
-    logger,
-    trace_id: str,
-) -> None:
-    """Patch each ScreenedCandidate with its extracted checklist.
-
-    Mutates `result.validated_candidates` in place. For candidates whose
-    findings text is missing or has no parseable checklist block, the
-    sentinel from `default_unknown_checklist` is attached so the field
-    is never None on a validated candidate (downstream Agent 5 contract:
-    if checklist is None, treat as full-research; if checklist is a
-    sentinel, also treat as full-research but with a richer reason
-    string for diagnostics).
-
-    Logs one INFO line per candidate summarizing the outcome
-    (confirmed-count / total) plus a WARNING when the sentinel had to
-    be used.
-    """
-    from puzzleeval.schemas import BUILD_READINESS_FIELDS
-
-    for cand in result.validated_candidates:
-        findings = findings_by_name.get(cand.name, "")
-        checklist = _extract_checklist_from_findings(findings, cand.name)
-        cand.checklist = checklist
-
-        confirmed = sum(
-            1 for n in BUILD_READINESS_FIELDS
-            if getattr(checklist, n).status == "confirmed"
-        )
-        if checklist.populated_by == "system_failure":
-            logger.warning(
-                f"Sentinel checklist attached for {cand.name}: "
-                f"{checklist.endpoint_path.reasoning}",
-                extra={
-                    "operation": "screening_checklist_sentinel",
-                    "trace_id": trace_id,
-                    "candidate_name": cand.name,
-                    "reason": checklist.endpoint_path.reasoning,
-                    "verified_pass": False,
-                },
-            )
-        else:
-            logger.info(
-                f"Checklist attached for {cand.name}: "
-                f"{confirmed}/{len(BUILD_READINESS_FIELDS)} fields confirmed, "
-                f"verified_pass={checklist.is_verified_pass()}",
-                extra={
-                    "operation": "screening_checklist_attached",
-                    "trace_id": trace_id,
-                    "candidate_name": cand.name,
-                    "confirmed_count": confirmed,
-                    "total_fields": len(BUILD_READINESS_FIELDS),
-                    "verified_pass": checklist.is_verified_pass(),
-                    "has_provider_surface": checklist.has_provider_surface(),
-                    "selected_endpoint": checklist.selected_endpoint,
-                },
-            )
-
 
 def _build_candidate_message(
     candidate: Candidate,
@@ -605,7 +451,9 @@ def _verify_single_candidate(
                 save_web_fetches_to_sandbox,
             )
             _handoff_dir = candidate_sandbox_dir(
-                input_data.trace_id, candidate.name
+                input_data.trace_id,
+                candidate.name,
+                runs_root=getattr(input_data, "runs_root", None),
             )
             _existing = sum(
                 1 for p in _handoff_dir.iterdir()
@@ -770,11 +618,11 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
     Then one final structuring call formats all findings into Agent4Result.
     """
     # ★ CORE LINE 1: Create the API client
-    # Server-tool timeout — Agent 4's deep-verify loop runs up to 15
+    # Server-tool timeout - Agent 4's docs/access verification loop can run up to 15
     # turns per candidate, each burning server-side web_fetch (6 max)
     # and web_search (5 max). Legitimate completion can take 2-4 min
     # per candidate on providers with fragmented docs. Default 120 s
-    # collapsed real runs mid-verify.
+    # collapsed real runs mid-verification.
     from puzzleeval.anthropic_client import build_client, SERVER_TOOL_TIMEOUT_S
     client = build_client(
         api_key=ANTHROPIC_API_KEY,
@@ -805,7 +653,7 @@ def run_screening_agent(input_data: Agent4Input) -> Agent4Result:
     # Agent 5 does its own research from scratch against these verified
     # docs — which is the separation of concerns the user asked for:
     # Agent 4 verifies, Agent 5 researches + builds. The earlier attempt
-    # to fit both jobs into Agent 4's deep-verify produced rich atlases
+    # to fit both jobs into Agent 4's verification pass produced rich atlases
     # that Agent 5 couldn't consume efficiently (wrong shape, too much
     # context, missed the specific build-oriented details the builder
     # needed). See the removed ``deep_verify_runner.py`` / ``provider_atlas.py``
@@ -914,9 +762,7 @@ Structure these findings into the required JSON format. Every candidate must app
     # ★ CORE: Call Claude with structured output to format findings
     # Wrapped in parse_with_fallback for the same grammar-budget reason as
     # Agents 1 / 2 — Agent4Result includes ScreenedCandidate[] with deep
-    # enrichment fields (now also BuildReadinessChecklist with 10 nested
-    # FieldStatus + EndpointSummary[]) and reliably exceeds Anthropic's
-    # compiled-grammar size cap.
+    # enrichment fields and can exceed Anthropic's compiled-grammar size cap.
     #
     # ``prefer_non_strict=True``: skips the doomed strict attempt that
     # always 400s on this schema. Saves ~30-60s + one wasted API call
@@ -1020,53 +866,78 @@ Structure these findings into the required JSON format. Every candidate must app
     # Helps operators spot providers whose docs are consistently WAF/Cloudflare gated.
     result.web_fetch_blocks = total_web_fetch_blocks
 
-    # ─────────────────────────────────────────────────────────────────
-    # CHECKLIST POST-PROCESS (deterministic, AD-007 defense-in-depth)
-    # ─────────────────────────────────────────────────────────────────
-    # The structuring LLM is asked to copy each candidate's
-    # BUILD_READINESS_CHECKLIST JSON block from findings into
-    # ScreenedCandidate.checklist. To make the contract robust against
-    # transcription drift (the structuring step occasionally drops
-    # nested JSON when output approaches the grammar-budget cap), we
-    # OVERWRITE the checklist deterministically from the per-candidate
-    # findings text. Single source of truth: each candidate's findings
-    # block produced by _verify_single_candidate.
-    #
-    # When the JSON block is missing or malformed for a given
-    # candidate, _extract_checklist_from_findings returns the sentinel
-    # (default_unknown_checklist with populated_by="system_failure").
-    # The candidate is NEVER rejected for this — Agent 5 handles the
-    # sentinel by falling back to full-research mode (per the
-    # three-state rejection model).
-    findings_by_name = {
-        candidates[i].name: findings_by_index[i]
-        for i in range(len(candidates))
-    }
-    _attach_checklists_to_result(
-        result, findings_by_name, logger, input_data.trace_id,
-    )
+    # Persist docs-entrypoint artifacts. These are the build-authorization
+    # handoffs Agent 5 and the orchestrator should read first.
+    try:
+        from puzzleeval.docs_entrypoint import write_docs_entrypoint
+        from puzzleeval.web_doc_cache import candidate_sandbox_dir
 
-    # ─────────────────────────────────────────────────────────────────
-    # CHECKLIST OBSERVABILITY METRICS
-    # ─────────────────────────────────────────────────────────────────
-    # Aggregate counters surface "did Agent 4 deliver real checklists
-    # this run, or did it sentinel-out?" without grepping per-candidate
-    # logs. These flow up via pipeline metadata for run-level rollup.
-    verified_pass_count = sum(
-        1 for c in result.validated_candidates
-        if c.checklist is not None and c.checklist.is_verified_pass()
-    )
-    inconclusive_count = sum(
-        1 for c in result.validated_candidates
-        if c.checklist is not None
-        and not c.checklist.is_verified_pass()
-        and c.checklist.populated_by != "system_failure"
-    )
-    sentinel_count = sum(
-        1 for c in result.validated_candidates
-        if c.checklist is not None
-        and c.checklist.populated_by == "system_failure"
-    )
+        for cand in result.validated_candidates:
+            docs_dir = candidate_sandbox_dir(
+                input_data.trace_id,
+                cand.name,
+                runs_root=getattr(input_data, "runs_root", None),
+            )
+            payload = write_docs_entrypoint(cand, docs_dir)
+            logger.info(
+                "Agent 4 docs entrypoint written for %s",
+                cand.name,
+                extra={
+                    "operation": "agent4_docs_entrypoint_written",
+                    "trace_id": input_data.trace_id,
+                    "candidate_name": cand.name,
+                    "docs_entrypoint_dir": str(docs_dir),
+                    "docs_verdict": payload.get("docs_verdict"),
+                    "primary_docs_entrypoint": payload.get("primary_docs_entrypoint"),
+                    "confidence": payload.get("confidence"),
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 - docs entrypoint must not break screening
+        logger.warning(
+            "Agent 4 docs entrypoint write failed",
+            extra={
+                "operation": "agent4_docs_entrypoint_failed",
+                "trace_id": input_data.trace_id,
+                "error_type": type(exc).__name__,
+                "error_msg": str(exc)[:300],
+            },
+        )
+
+    # Persist a compact Agent 4 -> Agent 5 research handoff.
+    try:
+        from puzzleeval.research_handoff import write_research_handoff
+        from puzzleeval.web_doc_cache import candidate_sandbox_dir
+
+        for cand in result.validated_candidates:
+            handoff_dir = candidate_sandbox_dir(
+                input_data.trace_id,
+                cand.name,
+                runs_root=getattr(input_data, "runs_root", None),
+            )
+            payload = write_research_handoff(cand, handoff_dir)
+            logger.info(
+                "Agent 4 research handoff written for %s",
+                cand.name,
+                extra={
+                    "operation": "agent4_research_handoff_written",
+                    "trace_id": input_data.trace_id,
+                    "candidate_name": cand.name,
+                    "handoff_dir": str(handoff_dir),
+                    "canonical_docs_url_count": len(payload.get("canonical_docs_urls") or []),
+                    "prefetched_doc_count": len(payload.get("prefetched_doc_files") or []),
+                    "unresolved_question_count": len(payload.get("unresolved_questions") or []),
+                },
+            )
+    except Exception as exc:  # noqa: BLE001 - handoff must not break screening
+        logger.warning(
+            "Agent 4 research handoff write failed",
+            extra={
+                "operation": "agent4_research_handoff_failed",
+                "trace_id": input_data.trace_id,
+                "error_type": type(exc).__name__,
+                "error_msg": str(exc)[:300],
+            },
+        )
 
     logger.info("Agent 4 completed", extra={
         "operation": "agent_complete",
@@ -1074,9 +945,6 @@ Structure these findings into the required JSON format. Every candidate must app
         "validated_count": len(result.validated_candidates),
         "rejected_count": len(result.rejected_candidates),
         "web_fetch_blocks": total_web_fetch_blocks,
-        "checklist_verified_pass_count": verified_pass_count,
-        "checklist_inconclusive_count": inconclusive_count,
-        "checklist_sentinel_count": sentinel_count,
     })
 
     return result

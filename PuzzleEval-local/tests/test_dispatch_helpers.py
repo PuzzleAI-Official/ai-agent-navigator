@@ -13,15 +13,11 @@ import pytest
 
 from puzzleeval.agents.agent5.dispatch_helpers import (
     ERROR_SIGNATURES,
-    PHASE_1_VIOLATION_FILES,
-    TRANSITION_FILES_WRITE,
     build_reassessment_message,
     classify_tool_result_error,
     detect_harness_signal,
-    detect_phase_transition,
     detect_smoke_pass,
     detect_tool_result_error,
-    is_phase_1_code_violation,
     should_inject_reassessment,
 )
 
@@ -78,83 +74,6 @@ class TestDetectHarnessSignal:
         # is the right semantics. Confirm it isn't matching too loosely.
         assert detect_harness_signal("the harness is incomplete") is None
         assert detect_harness_signal("the harness has not failed") is None
-
-
-# ---------------------------------------------------------------------------
-# detect_phase_transition
-# ---------------------------------------------------------------------------
-
-
-class TestDetectPhaseTransition:
-    def test_write_api_spec_triggers(self):
-        block = _block("tool_use", "write_file", filename="api_spec.txt")
-        triggered, label = detect_phase_transition(block, api_spec_written=False)
-        assert triggered
-        assert label == "write_file:api_spec.txt"
-
-    def test_patch_api_spec_triggers(self):
-        block = _block("tool_use", "patch_file", filename="api_spec.txt")
-        triggered, label = detect_phase_transition(block, api_spec_written=False)
-        assert triggered
-        assert label == "patch_file:api_spec.txt"
-
-    def test_write_harness_triggers(self):
-        block = _block("tool_use", "write_file", filename="harness.py")
-        triggered, label = detect_phase_transition(block, api_spec_written=False)
-        assert triggered
-        assert label == "write_file:harness.py"
-
-    def test_write_requirements_triggers(self):
-        block = _block("tool_use", "write_file", filename="requirements.txt")
-        triggered, label = detect_phase_transition(block, api_spec_written=False)
-        assert triggered
-        assert label == "write_file:requirements.txt"
-
-    def test_unrelated_write_does_not_trigger(self):
-        block = _block("tool_use", "write_file", filename="foo.py")
-        triggered, _ = detect_phase_transition(block, api_spec_written=False)
-        assert not triggered
-
-    def test_already_written_no_op(self):
-        # If api_spec_written is True, even an api_spec.txt write is
-        # a no-op for transition purposes.
-        block = _block("tool_use", "write_file", filename="api_spec.txt")
-        triggered, _ = detect_phase_transition(block, api_spec_written=True)
-        assert not triggered
-
-    def test_non_tool_use_block_no_op(self):
-        block = _block("text")
-        triggered, _ = detect_phase_transition(block, api_spec_written=False)
-        assert not triggered
-
-    def test_patch_other_file_does_not_trigger(self):
-        # patch_file ONLY triggers for api_spec.txt
-        block = _block("tool_use", "patch_file", filename="harness.py")
-        triggered, _ = detect_phase_transition(block, api_spec_written=False)
-        assert not triggered
-
-    def test_block_without_input_no_op(self):
-        block = SimpleNamespace(type="tool_use", name="write_file", input={})
-        triggered, _ = detect_phase_transition(block, api_spec_written=False)
-        assert not triggered
-
-
-class TestIsPhase1CodeViolation:
-    def test_harness_py_is_violation(self):
-        assert is_phase_1_code_violation("write_file:harness.py")
-
-    def test_requirements_txt_is_violation(self):
-        assert is_phase_1_code_violation("write_file:requirements.txt")
-
-    def test_api_spec_is_not_violation(self):
-        assert not is_phase_1_code_violation("write_file:api_spec.txt")
-
-    def test_patch_file_is_never_violation(self):
-        # patch_file('api_spec.txt') is the canonical augment path
-        assert not is_phase_1_code_violation("patch_file:api_spec.txt")
-
-    def test_empty_label_is_not_violation(self):
-        assert not is_phase_1_code_violation("")
 
 
 # ---------------------------------------------------------------------------
@@ -389,22 +308,16 @@ class TestEnrichResearchQuestion:
     composition rules so the helper extraction can't silently drop
     fields the sub-agent depends on."""
 
-    def _spec_path_with(self, tmp_path, content):
-        p = tmp_path / "api_spec.txt"
-        p.write_text(content, encoding="utf-8")
-        return p
-
     def test_basic_question_has_service_block(self, tmp_path):
         from puzzleeval.agents.agent5.dispatch_helpers import (
             enrich_research_question,
         )
-        spec = tmp_path / "missing.txt"  # doesn't exist
         out = enrich_research_question(
             question="What auth?",
             candidate_name="Mindee",
             candidate_provider="Mindee SAS",
             candidate_docs_url="https://docs.mindee.com/",
-            spec_path=spec,
+            sandbox_dir=tmp_path,
             prior_results_text="",
             harness_code=None,
         )
@@ -413,38 +326,44 @@ class TestEnrichResearchQuestion:
         assert "https://docs.mindee.com/" in out
         assert "QUESTION: What auth?" in out
 
-    def test_spec_present_includes_known_block(self, tmp_path):
+    def test_research_synthesis_present_includes_known_block(self, tmp_path):
         from puzzleeval.agents.agent5.dispatch_helpers import (
             enrich_research_question,
         )
-        spec = self._spec_path_with(
-            tmp_path, "ENDPOINTS:\n  POST /v1/predict\n",
+        state_dir = tmp_path / "_agent_state"
+        state_dir.mkdir()
+        (state_dir / "research_synthesis.json").write_text(
+            '{"chosen_api_surface": {"endpoint_url": "https://api.example.test/v1/predict"}}',
+            encoding="utf-8",
         )
         out = enrich_research_question(
             question="What auth?",
             candidate_name="Mindee", candidate_provider="X",
-            candidate_docs_url="x", spec_path=spec,
+            candidate_docs_url="x", sandbox_dir=tmp_path,
             prior_results_text="", harness_code=None,
         )
         assert "WHAT WE ALREADY KNOW" in out
-        assert "POST /v1/predict" in out
+        assert "research_synthesis.json" in out
+        assert "https://api.example.test/v1/predict" in out
         assert "DO NOT re-research" in out
 
-    def test_spec_doc_map_section_included_when_beyond_2k(self, tmp_path):
+    def test_research_findings_are_included(self, tmp_path):
         from puzzleeval.agents.agent5.dispatch_helpers import (
             enrich_research_question,
         )
-        # Spec where DOC_MAP appears AFTER the 2K boundary so the
-        # second-pass section grab is what surfaces it.
-        body = "ENDPOINTS:\n  POST /v1/x\n" + "x" * 2200 + "\nDOC_MAP:\n  https://docs.example.com/auth\n"
-        spec = self._spec_path_with(tmp_path, body)
+        findings = tmp_path / "_agent_state" / "research_findings"
+        findings.mkdir(parents=True)
+        (findings / "auth.json").write_text(
+            '{"task_id": "auth", "answer": "Use bearer auth"}',
+            encoding="utf-8",
+        )
         out = enrich_research_question(
             question="x", candidate_name="X", candidate_provider="X",
-            candidate_docs_url="x", spec_path=spec,
+            candidate_docs_url="x", sandbox_dir=tmp_path,
             prior_results_text="", harness_code=None,
         )
-        assert "DOC_MAP:" in out
-        assert "https://docs.example.com/auth" in out
+        assert "research_findings" in out
+        assert "Use bearer auth" in out
 
     def test_prior_results_included_when_present(self, tmp_path):
         from puzzleeval.agents.agent5.dispatch_helpers import (
@@ -452,7 +371,7 @@ class TestEnrichResearchQuestion:
         )
         out = enrich_research_question(
             question="q", candidate_name="X", candidate_provider="X",
-            candidate_docs_url="x", spec_path=tmp_path / "missing.txt",
+            candidate_docs_url="x", sandbox_dir=tmp_path,
             prior_results_text="Traceback: ConnectionError on POST",
             harness_code=None,
         )
@@ -465,7 +384,7 @@ class TestEnrichResearchQuestion:
         )
         out = enrich_research_question(
             question="q", candidate_name="X", candidate_provider="X",
-            candidate_docs_url="x", spec_path=tmp_path / "missing.txt",
+            candidate_docs_url="x", sandbox_dir=tmp_path,
             prior_results_text="",
             harness_code=None,
         )
@@ -478,7 +397,7 @@ class TestEnrichResearchQuestion:
         code = "\n".join(f"line {i}" for i in range(60))
         out = enrich_research_question(
             question="q", candidate_name="X", candidate_provider="X",
-            candidate_docs_url="x", spec_path=tmp_path / "missing.txt",
+            candidate_docs_url="x", sandbox_dir=tmp_path,
             prior_results_text="", harness_code=code,
         )
         assert "CURRENT HARNESS CODE" in out
@@ -493,24 +412,7 @@ class TestEnrichResearchQuestion:
         )
         out = enrich_research_question(
             question="q", candidate_name="X", candidate_provider="X",
-            candidate_docs_url="x", spec_path=tmp_path / "missing.txt",
+            candidate_docs_url="x", sandbox_dir=tmp_path,
             prior_results_text="", harness_code=None,
         )
         assert "CURRENT HARNESS CODE" not in out
-
-
-class TestPhase1ViolationConstants:
-    """Constants need explicit guard tests so accidental edits surface."""
-
-    def test_transition_files_includes_three(self):
-        assert TRANSITION_FILES_WRITE == frozenset(
-            {"api_spec.txt", "harness.py", "requirements.txt"}
-        )
-
-    def test_phase_1_violations_excludes_api_spec(self):
-        # Writing api_spec.txt is the CORRECT Phase 1 behavior — never
-        # a violation. Only code files (harness.py, requirements.txt)
-        # are violations when written by Sonnet during Phase 1.
-        assert "api_spec.txt" not in PHASE_1_VIOLATION_FILES
-        assert "harness.py" in PHASE_1_VIOLATION_FILES
-        assert "requirements.txt" in PHASE_1_VIOLATION_FILES

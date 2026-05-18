@@ -154,6 +154,29 @@ def build_initial_turn_log(
             "cache_read": getattr(iteration, "cache_read_input_tokens", 0),
             "cache_create": getattr(iteration, "cache_creation_input_tokens", 0),
         })
+    iteration_summary: dict[str, Any] = {
+        "count": len(iterations_log),
+        "advisor_count": sum(1 for it in iterations_log if it.get("type") == "advisor_message"),
+        "message_count": sum(1 for it in iterations_log if it.get("type") == "message"),
+        "models": sorted({str(it.get("model") or "") for it in iterations_log if it.get("model")}),
+        "input_tokens": sum(int(it.get("input_tokens", 0) or 0) for it in iterations_log),
+        "output_tokens": sum(int(it.get("output_tokens", 0) or 0) for it in iterations_log),
+        "cache_read_tokens": sum(int(it.get("cache_read", 0) or 0) for it in iterations_log),
+        "cache_create_tokens": sum(int(it.get("cache_create", 0) or 0) for it in iterations_log),
+    }
+
+    server_tool_use = getattr(response.usage, "server_tool_use", None)
+    server_tool_usage = {}
+    if server_tool_use is not None:
+        for name in (
+            "web_search_requests",
+            "web_fetch_requests",
+            "web_searches",
+            "web_fetches",
+        ):
+            value = getattr(server_tool_use, name, 0) or 0
+            if value:
+                server_tool_usage[name] = value
 
     try:
         cache_read = int(getattr(response.usage, "cache_read_input_tokens", 0) or 0)
@@ -180,6 +203,8 @@ def build_initial_turn_log(
         "tool_calls": [],
         "tool_results": [],
         "iterations": iterations_log,
+        "iteration_summary": iteration_summary,
+        "server_tool_usage": server_tool_usage,
     }
 
 
@@ -202,7 +227,12 @@ def _summarize_tool_call(tool_call: dict) -> dict:
         elif tool_name == "web_search":
             summary = tc_input.get("query", "")[:200]
         elif tool_name in ("write_file", "patch_file", "read_file"):
-            summary = str(tc_input.get("path", tc_input.get("file_path", "")))[:200]
+            summary = str(
+                tc_input.get("filename")
+                or tc_input.get("path")
+                or tc_input.get("file_path")
+                or ""
+            )[:200]
         elif tool_name == "run_code":
             cmd = tc_input.get("command") or tc_input.get("code") or ""
             summary = str(cmd)[:200]
@@ -217,13 +247,48 @@ def _summarize_tool_call(tool_call: dict) -> dict:
     return {"tool": tool_name, "summary": summary}
 
 
+def _summarize_tool_result(tool_result: dict) -> dict:
+    tool_name = tool_result.get("tool", "?")
+    if tool_name == "web_fetch":
+        chars = int(tool_result.get("chars_returned", 0) or 0)
+        url = str(tool_result.get("url", "") or "")
+        status = str(tool_result.get("status", "") or "")
+        error_code = str(tool_result.get("error_code", "") or "")
+        if status == "error":
+            prefix = f"error {error_code}".strip()
+        elif chars == 0:
+            prefix = "empty"
+        else:
+            prefix = f"{chars} chars"
+        return {"tool": tool_name, "summary": f"{prefix} {url}".strip()}
+    if tool_name == "web_search":
+        count = int(tool_result.get("result_count", 0) or 0)
+        query = str(tool_result.get("query", "") or "")
+        top = tool_result.get("top_results") or []
+        first = ""
+        if top and isinstance(top[0], dict):
+            first = str(top[0].get("title") or top[0].get("url") or "")[:120]
+        parts = [f"{count} results"]
+        if query:
+            parts.append(f"query: {query[:120]}")
+        if first:
+            parts.append(f"top: {first}")
+        return {"tool": tool_name, "summary": "; ".join(parts)}
+    if tool_name == "advisor":
+        result = str(tool_result.get("result", "") or "")
+        return {"tool": tool_name, "summary": "empty result" if not result else result[:200]}
+    if tool_result.get("is_error"):
+        return {"tool": tool_name, "summary": str(tool_result.get("result", ""))[:200]}
+    return {"tool": tool_name, "summary": str(tool_result.get("result", ""))[:200]}
+
+
 def emit_build_turn_progress(
     progress_callback,
     *,
     candidate_name: str,
     turn: int,
     max_turns: int,
-    api_spec_written: bool,
+    build_gate_accepted: bool,
     smoke_ever_passed: bool,
     current_model: str,
     call_cost: float,
@@ -237,7 +302,7 @@ def emit_build_turn_progress(
     """Emit a 'build_turn' SSE-style event with rich per-turn detail.
 
     Computes the build phase ("researching"/"building"/"validating")
-    from boundary-state flags (api_spec_written, smoke_ever_passed) and
+    from boundary-state flags (build_gate_accepted, smoke_ever_passed) and
     summarizes tool calls (URLs, queries, filenames). This is the
     operator-facing diagnostic surface — what's the build doing right now,
     in plain language, with enough context to spot stalls.
@@ -247,12 +312,15 @@ def emit_build_turn_progress(
     if progress_callback is None:
         return
 
-    phase = "researching" if not api_spec_written else "building"
+    phase = "researching" if not build_gate_accepted else "building"
     if smoke_ever_passed:
         phase = "validating"
 
     tool_calls_detail = [
         _summarize_tool_call(tc) for tc in (turn_log.get("tool_calls") or [])
+    ]
+    tool_results_detail = [
+        _summarize_tool_result(tr) for tr in (turn_log.get("tool_results") or [])
     ]
 
     text_preview = (turn_log.get("text") or "").strip()[:300]
@@ -270,8 +338,11 @@ def emit_build_turn_progress(
         "cache_create_tokens": cache_create,
         "tools_used": [b.name for b in response.content if b.type == "tool_use"],
         "tool_calls_detail": tool_calls_detail,
+        "tool_results_detail": tool_results_detail,
         "text_preview": text_preview,
         "stop_reason": response.stop_reason,
+        "iteration_summary": turn_log.get("iteration_summary", {}),
+        "server_tool_usage": turn_log.get("server_tool_usage", {}),
     })
 
 

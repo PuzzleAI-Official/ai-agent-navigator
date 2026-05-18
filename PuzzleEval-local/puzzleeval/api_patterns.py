@@ -122,7 +122,12 @@ Signature: response includes `next_cursor` / `next_page_token` / `Link: <url>; r
 For test harnesses you usually want only the FIRST page — don't paginate in tests unless the test specifically checks pagination behavior.
 
 ## DECISION RULE
-Look at the candidate's atlas (or saved api_spec.txt). Match the auth + delivery pattern to one of the 10 above. Copy the skeleton. Substitute URL / fields. THAT'S YOUR FIRST DRAFT. Don't write a custom solution when a pattern matches.
+Look at `_agent_state/docs_entrypoint.json`, `_agent_state/research_synthesis.json`,
+`_agent_state/implementation_plan.json`, and the cited official docs/fetches.
+Match the auth + delivery pattern to one of the 10 above. Copy the skeleton
+when the accepted plan's evidence supports it, then substitute the candidate's
+specific URL / fields. Do not let the generic skeleton override cited provider
+facts.
 """
 
 
@@ -171,11 +176,17 @@ DO NOT signal HARNESS_FAILED before completing at least one full pivot.
 # ---------------------------------------------------------------------------
 
 LIVE_TEST_BATTERY_PROMPT = """
-## LIVE TEST BATTERY (REQUIRED BEFORE HARNESS_COMPLETE)
+## CREDENTIALED LIVE TEST BATTERY
 
-Smoke test (structural + one happy-path call) is NOT enough to declare
-HARNESS_COMPLETE. You must run the live battery first — the same
-adversarial probes the test runner will run against the harness later.
+When valid provider credentials are available, an offline smoke check or one
+happy-path call is NOT enough to declare HARNESS_COMPLETE. Exercise the final
+harness with representative real inputs first; the post-loop adversarial
+battery is additional hardening, not the primary completion proof.
+
+When credentials are not available, do not fabricate live-test success. Record
+truthful no-credential evidence and residual risk in the reflection and let the
+completion gate decide, or write `_agent_state/abandon_candidate.json` when the
+provider cannot be tested safely.
 
 For every test_file_path you have available (or every input_data variant
 the candidate accepts), call your harness:
@@ -186,7 +197,8 @@ the candidate accepts), call your harness:
      success=False with a clear error. MUST NOT crash.
   3. **boundary:** input near the documented size/length ceiling. MUST
      return success=True or graceful error. MUST NOT silently truncate.
-  4. **invalid_credential:** call once with a deliberately wrong
+  4. **invalid_credential:** when a credentialed call path exists and it is
+     safe to spend one negative probe, call once with a deliberately wrong
      credential value. MUST return success=False (NEVER success=True).
      This is the silent-corruption trap — the test runner's adversarial
      probe will catch it later, but you should catch it now.
@@ -195,7 +207,8 @@ If ANY of these four fails (crash, wrong success value, missing fields):
 - Read the actual error.
 - Fix the harness.
 - Re-run the WHOLE battery (not just the failing case).
-Do not signal HARNESS_COMPLETE until all four pass cleanly.
+With credentials available, do not signal HARNESS_COMPLETE until the required
+credentialed probes pass cleanly or the candidate is truthfully abandoned.
 
 The battery costs 4-5 API calls per harness. That's negligible vs the
 cost of declaring HARNESS_COMPLETE on a broken harness and corrupting

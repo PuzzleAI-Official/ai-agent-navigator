@@ -355,6 +355,84 @@ class TestConversationSimulatorPlugin:
         assert not result.passed
         assert result.score < 1.0
 
+    def test_scripted_substring_is_not_final_semantic_truth(self, monkeypatch):
+        from puzzleeval import semantic_review
+
+        plugin = get_plugin("conversation_simulator")
+
+        def runner(payload):
+            return {
+                "success": True,
+                "output": {"text": "help help help"},
+                "latency_ms": 10,
+                "raw_response": {},
+                "error": None,
+            }
+
+        monkeypatch.setattr(
+            semantic_review,
+            "review_scripted_conversation_semantics",
+            lambda **kwargs: {
+                "available": True,
+                "passed": False,
+                "score": 0.1,
+                "reason": "keyword stuffing did not satisfy the task",
+            },
+        )
+        result = plugin.evaluate_output(
+            response=None,
+            expected={
+                "conversation_script": {
+                    "user_turns": ["Can you help me book an appointment?"],
+                    "assertions": [{"turn_index": 0, "check_type": "contains", "value": "help"}],
+                }
+            },
+            harness_runner=runner,
+            semantic_review_required=True,
+        )
+
+        assert result.passed is False
+        assert result.detail["semantic_review"]["reason"] == "keyword stuffing did not satisfy the task"
+
+    def test_scripted_semantic_paraphrase_can_pass_without_substring(self, monkeypatch):
+        from puzzleeval import semantic_review
+
+        plugin = get_plugin("conversation_simulator")
+
+        def runner(payload):
+            return {
+                "success": True,
+                "output": {"text": "I can assist with scheduling that appointment."},
+                "latency_ms": 10,
+                "raw_response": {},
+                "error": None,
+            }
+
+        monkeypatch.setattr(
+            semantic_review,
+            "review_scripted_conversation_semantics",
+            lambda **kwargs: {
+                "available": True,
+                "passed": True,
+                "score": 0.9,
+                "reason": "paraphrase satisfies the scheduling task",
+            },
+        )
+        result = plugin.evaluate_output(
+            response=None,
+            expected={
+                "conversation_script": {
+                    "user_turns": ["Can you help me book an appointment?"],
+                    "assertions": [{"turn_index": 0, "check_type": "contains", "value": "help"}],
+                }
+            },
+            harness_runner=runner,
+            semantic_review_required=True,
+        )
+
+        assert result.passed is True
+        assert result.score == 0.9
+
     def test_evaluate_handles_runner_crash(self):
         plugin = get_plugin("conversation_simulator")
         def runner(payload):

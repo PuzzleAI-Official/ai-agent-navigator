@@ -107,21 +107,54 @@ EXPECTED_SECTION_HEADERS: tuple[str, ...] = (
     "## Self-critique",
 )
 
+SECTION_HEADING_ALIASES: dict[str, tuple[str, ...]] = {
+    "## SUCCESS CRITERIA evidence walk-through": (
+        "success criteria", "deliverable", "objective", "coverage",
+        "criteria evidence",
+    ),
+    "## Adversarial probe robustness": (
+        "adversarial", "probe", "robustness", "empty input", "max input",
+        "malformed", "idempotency", "concurrency", "repeat call",
+    ),
+    "## User-fit assessment": (
+        "user-fit", "user fit", "blueprint", "sub-task", "subtask",
+        "user request", "business task",
+    ),
+    "## Code quality assessment": (
+        "code quality", "quality", "cleanup", "resource", "exception",
+        "error path", "state decision", "separation",
+    ),
+    "## Self-critique": (
+        "self-critique", "self critique", "one more turn", "would fix",
+        "remaining risk", "critique",
+    ),
+}
+
 
 # ---------------------------------------------------------------------------
 # Regex patterns
 # ---------------------------------------------------------------------------
 
 
-# File:line references (harness.py:42, smoke_test.py:12, _forensics.py:88, etc.)
+# File:line references. Runtime/code files still matter, but reflections can
+# now cite durable Agent 5 research artifacts as first-class evidence.
+_CITABLE_FILE_NAME = (
+    r"(?:[a-z_][a-z0-9_]*\.py|requirements\.txt|conversation_log\.json|"
+    r"_agent_state/(?:"
+    r"objective\.md|docs_entrypoint\.json|research_handoff\.json|"
+    r"research_plan\.json|research_synthesis\.json|implementation_plan\.json|"
+    r"runtime_state\.json|latest_failure_packet\.json|reflection_phase_3\.md|"
+    r"research_findings/[A-Za-z0-9_.-]+\.json"
+    r"))"
+)
+
 _FILE_REF_PATTERN = re.compile(
-    r"\b(?:[a-z_][a-z0-9_]*\.py|api_spec\.txt|requirements\.txt)(?::\d+(?:-\d+)?)?",
+    rf"\b{_CITABLE_FILE_NAME}(?::\d+(?:-\d+)?)?",
     re.IGNORECASE,
 )
 
 _FILE_REF_DETAIL_PATTERN = re.compile(
-    r"\b(?P<name>[a-z_][a-z0-9_]*\.py|api_spec\.txt|requirements\.txt)"
-    r"(?::(?P<start>\d+)(?:-(?P<end>\d+))?)?",
+    rf"\b(?P<name>{_CITABLE_FILE_NAME})(?::(?P<start>\d+)(?:-(?P<end>\d+))?)?",
     re.IGNORECASE,
 )
 
@@ -147,6 +180,20 @@ def _word_count(text: str) -> int:
     return len(re.findall(r"[A-Za-z0-9]+", text))
 
 
+def _normalize_heading(text: str) -> str:
+    text = re.sub(r"^#+\s*", "", text.strip().lower())
+    text = re.sub(r"^\d+[\).\-\s]+", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _heading_matches(canonical: str, observed_heading: str) -> bool:
+    observed = _normalize_heading(observed_heading)
+    canonical_norm = _normalize_heading(canonical)
+    if canonical_norm in observed or observed in canonical_norm:
+        return True
+    return any(alias in observed for alias in SECTION_HEADING_ALIASES[canonical])
+
+
 def _split_sections(reflection_md: str) -> dict[str, str]:
     """Return a mapping of expected_section_header → body text.
 
@@ -156,20 +203,22 @@ def _split_sections(reflection_md: str) -> dict[str, str]:
     agent the canonical structure.
     """
     out: dict[str, str] = {h: "" for h in EXPECTED_SECTION_HEADERS}
-    for header in EXPECTED_SECTION_HEADERS:
-        idx = reflection_md.find(header)
-        if idx < 0:
-            continue
-        rest = reflection_md[idx + len(header):]
-        # Find the start of the next section (any of the expected ones, in any order)
-        end = len(rest)
-        for next_header in EXPECTED_SECTION_HEADERS:
-            if next_header == header:
+    header_matches = list(re.finditer(r"(?m)^##+\s+.+$", reflection_md))
+    for i, match in enumerate(header_matches):
+        heading = match.group(0).strip()
+        body_start = match.end()
+        body_end = (
+            header_matches[i + 1].start()
+            if i + 1 < len(header_matches)
+            else len(reflection_md)
+        )
+        body = reflection_md[body_start:body_end].strip()
+        for canonical in EXPECTED_SECTION_HEADERS:
+            if out[canonical]:
                 continue
-            j = rest.find(next_header)
-            if 0 <= j < end:
-                end = j
-        out[header] = rest[:end].strip()
+            if _heading_matches(canonical, heading):
+                out[canonical] = body
+                break
     return out
 
 
@@ -314,6 +363,81 @@ def validate_citation_targets(
     return errors
 
 
+def _harness_citation_windows(
+    reflection_md: str,
+    harness_code: str | None,
+    *,
+    context_lines: int = 4,
+    max_windows: int = 18,
+    max_chars: int = 9000,
+) -> str:
+    """Return cited ``harness.py`` line windows for the LLM judge.
+
+    Sending the beginning of harness.py is not enough for real reflections:
+    strong evidence often cites later lines. Use compact windows around the
+    cited line numbers so the judge sees the evidence the agent actually cited.
+    """
+
+    if not harness_code:
+        return ""
+    lines = harness_code.splitlines()
+    if not lines:
+        return ""
+
+    windows: list[tuple[int, int]] = []
+    for match in _FILE_REF_DETAIL_PATTERN.finditer(reflection_md or ""):
+        if match.group("name").lower() != "harness.py":
+            continue
+        start = match.group("start")
+        if start is None:
+            continue
+        start_i = max(1, int(start) - context_lines)
+        end_i = int(match.group("end") or start)
+        end_i = min(len(lines), end_i + context_lines)
+        if end_i >= start_i:
+            windows.append((start_i, end_i))
+        if len(windows) >= max_windows:
+            break
+
+    if not windows:
+        return "\n".join(
+            f"{line_no}: {line}"
+            for line_no, line in enumerate(lines[:120], start=1)
+        )[:max_chars]
+
+    merged: list[tuple[int, int]] = []
+    for start_i, end_i in sorted(windows):
+        if not merged or start_i > merged[-1][1] + 1:
+            merged.append((start_i, end_i))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end_i))
+
+    chunks: list[str] = []
+    total = 0
+    for start_i, end_i in merged:
+        body = "\n".join(
+            f"{line_no}: {lines[line_no - 1]}"
+            for line_no in range(start_i, end_i + 1)
+        )
+        chunk = f"\n--- harness.py:{start_i}-{end_i} ---\n{body}\n"
+        if total + len(chunk) > max_chars:
+            break
+        chunks.append(chunk)
+        total += len(chunk)
+    return "".join(chunks).strip()
+
+
+def _has_strong_deterministic_evidence(evidence: ReflectionEvidence) -> bool:
+    """Return true for high-evidence reflections that do not need judging."""
+
+    return (
+        evidence.total_file_refs >= PASS_FILE_REF_FLOOR * 2
+        and evidence.word_count >= PASS_WORD_FLOOR * 2
+        and evidence.sections_with_evidence >= len(EXPECTED_SECTION_HEADERS) - 1
+        and len(evidence.missing_section_headers) <= 1
+    )
+
+
 # ---------------------------------------------------------------------------
 # LLM-judge fallback
 # ---------------------------------------------------------------------------
@@ -330,14 +454,14 @@ Below are three pieces of context:
 
 1. The objective the reflection is grading itself against.
 2. The reflection itself.
-3. (Optional) The harness.py source the reflection cites.
+3. (Optional) The cited harness.py line windows.
 
 Your task: decide whether the reflection's claims are GROUNDED in the
 cited evidence, or whether they're self-attestation hand-waving.
 
 Rules:
 - If the reflection cites file:line references that DON'T appear in the
-  source (when source is provided), that's hand-waving — fail.
+  cited line windows (when source is provided), that's hand-waving — fail.
 - If the reflection makes claims like "concurrency safe" without code
   citations, that's self-attestation — fail.
 - If the reflection cites specific lines + the cited code actually
@@ -378,8 +502,8 @@ def llm_judge_check(
     user_message_parts.append("\n\n# REFLECTION\n\n")
     user_message_parts.append(reflection_md.strip()[:8000])
     if harness_code:
-        user_message_parts.append("\n\n# HARNESS SOURCE (for verifying citations)\n\n")
-        user_message_parts.append(harness_code[:6000])
+        user_message_parts.append("\n\n# CITED HARNESS.PY LINE WINDOWS\n\n")
+        user_message_parts.append(_harness_citation_windows(reflection_md, harness_code))
     user_message = "".join(user_message_parts)
 
     try:
@@ -472,6 +596,9 @@ def evaluate(
         return evidence.verdict, evidence, ""
 
     # BORDERLINE — invoke LLM-judge when configured.
+    if _has_strong_deterministic_evidence(evidence):
+        return ReflectionVerdict.PASS, evidence, "deterministic_strong_evidence"
+
     if not llm_judge_enabled or client is None or not objective_md:
         # Pattern check borderline + judge unavailable → defensive PASS.
         # The retry-directive path is the safety net when reflection is

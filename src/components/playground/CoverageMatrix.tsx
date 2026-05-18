@@ -9,7 +9,7 @@
 //
 //   empty cell     — candidate does NOT cover that scope
 //   amber ⦿        — candidate CLAIMS that scope (Agent 2 guess)
-//   emerald ✓      — that scope is VERIFIED (Phase 6.5)
+//   emerald ✓      — that scope is VERIFIED
 //   amber ⦿*       — same as claimed, but with test results (future phases)
 //
 // The matrix is the honest presentation layer for "one vendor vs best-per-
@@ -137,7 +137,7 @@ export function CoverageMatrix({ candidates, workflowSteps }: Props) {
                   // Per-scope unit-cost overlay shown under the coverage dot
                   // when pricing varies by scope AND this candidate covers
                   // this scope. Null-safe — the overlay is silent when
-                  // pricing_breakdown is missing (deep-verify hasn't run).
+                  // pricing_breakdown is missing (pricing metadata unavailable).
                   const perScope = covered
                     ? perScopeUnitCost(candidate.pricing_breakdown ?? null, step.id)
                     : null;
@@ -188,7 +188,7 @@ export function CoverageMatrix({ candidates, workflowSteps }: Props) {
                       }
                       title={
                         empty
-                          ? "No candidate claims this scope — Phase 6.5 has nothing to verify here"
+                          ? "No candidate claims this scope - selected-candidate verification has no surface here"
                           : thin
                           ? `${count} candidate(s) — thin pool, aim for >=3`
                           : `${count} candidate(s) claim coverage`

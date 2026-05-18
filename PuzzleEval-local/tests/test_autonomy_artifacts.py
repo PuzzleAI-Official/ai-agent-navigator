@@ -17,6 +17,7 @@ Covers the orchestrator-side surface:
 from __future__ import annotations
 
 import json
+import importlib
 from pathlib import Path
 
 import pytest
@@ -69,6 +70,16 @@ def _make_candidate() -> ScreenedCandidate:
     )
 
 
+@pytest.fixture(autouse=True)
+def _reset_build_plan_directive_flag(monkeypatch):
+    monkeypatch.delenv("PUZZLEEVAL_AUTONOMY_BUILD_PLAN_DIRECTIVES", raising=False)
+    import puzzleeval.config as cfg
+    importlib.reload(cfg)
+    yield
+    monkeypatch.delenv("PUZZLEEVAL_AUTONOMY_BUILD_PLAN_DIRECTIVES", raising=False)
+    importlib.reload(cfg)
+
+
 # ---------------------------------------------------------------------------
 # stage_agent_state — orchestrator-side staging at sandbox setup
 # ---------------------------------------------------------------------------
@@ -90,6 +101,47 @@ class TestStageAgentState:
         assert (tmp_path / "_agent_state").is_dir()
         assert (tmp_path / "_agent_state" / "objective.md").is_file()
         assert (tmp_path / "_agent_state" / "runtime_state.json").is_file()
+        assert not (tmp_path / "_agent_state" / "build_plan.md").exists()
+
+    def test_does_not_seed_build_plan_by_default(self, tmp_path: Path, monkeypatch):
+        monkeypatch.delenv("PUZZLEEVAL_AUTONOMY_BUILD_PLAN_DIRECTIVES", raising=False)
+        import puzzleeval.config as cfg
+        importlib.reload(cfg)
+
+        ok = sandbox.stage_agent_state(
+            sandbox_dir=tmp_path,
+            candidate=_make_candidate(),
+            input_data=_make_input(),
+            modality_playbook_ids=[],
+            effective_max_turns=40,
+            effective_max_budget_usd=3.0,
+            platform="linux",
+            initial_model="claude-sonnet-4-6",
+        )
+        assert ok is True
+        assert (tmp_path / "_agent_state" / "objective.md").is_file()
+        assert (tmp_path / "_agent_state" / "runtime_state.json").is_file()
+        assert not (tmp_path / "_agent_state" / "build_plan.md").exists()
+
+    def test_seeds_build_plan_only_when_directive_flag_enabled(
+        self, tmp_path: Path, monkeypatch
+    ):
+        monkeypatch.setenv("PUZZLEEVAL_AUTONOMY_BUILD_PLAN_DIRECTIVES", "1")
+        import puzzleeval.config as cfg
+        importlib.reload(cfg)
+
+        ok = sandbox.stage_agent_state(
+            sandbox_dir=tmp_path,
+            candidate=_make_candidate(),
+            input_data=_make_input(),
+            modality_playbook_ids=[],
+            effective_max_turns=40,
+            effective_max_budget_usd=3.0,
+            platform="linux",
+            initial_model="claude-sonnet-4-6",
+        )
+        assert ok is True
+        assert (tmp_path / "_agent_state" / "build_plan.md").is_file()
 
     def test_objective_has_all_required_sections(self, tmp_path: Path):
         sandbox.stage_agent_state(
@@ -171,6 +223,24 @@ class TestOrchestratorOwnedProtection:
         assert result.startswith("Error:")
         assert "orchestrator-owned" in result
 
+    def test_write_file_rejects_business_fixture_json(self, tmp_path: Path):
+        (tmp_path / "_agent_state").mkdir()
+        result = tools.write_file(
+            {"filename": "_agent_state/business_fixture.json", "content": "{}"},
+            sandbox_dir=tmp_path,
+        )
+        assert result.startswith("Error:")
+        assert "orchestrator-owned" in result
+
+    def test_write_file_rejects_runtime_snapshot_json(self, tmp_path: Path):
+        (tmp_path / "_agent_state").mkdir()
+        result = tools.write_file(
+            {"filename": "_agent_state/runtime_snapshot.json", "content": "{}"},
+            sandbox_dir=tmp_path,
+        )
+        assert result.startswith("Error:")
+        assert "orchestrator-owned" in result
+
     def test_patch_file_rejects_objective_md(self, tmp_path: Path):
         # Even if the file exists, patch_file rejects.
         (tmp_path / "_agent_state").mkdir()
@@ -189,6 +259,20 @@ class TestOrchestratorOwnedProtection:
 
 
 class TestAgentWritableArtifacts:
+    def test_legacy_dispatcher_uses_canonical_md_allowlist(self, tmp_path: Path):
+        pytest.importorskip("anthropic")
+        from puzzleeval.agents import implement_test_env
+
+        assert ".md" in implement_test_env.ALLOWED_EXTENSIONS
+        result, exit_code = implement_test_env._dispatch_tool(
+            "write_file",
+            {"filename": "_agent_state/reflection_phase_3.md", "content": "# reflection"},
+            tmp_path,
+        )
+        assert exit_code == 0
+        assert not result.startswith("Error:"), result
+        assert (tmp_path / "_agent_state" / "reflection_phase_3.md").is_file()
+
     def test_write_file_accepts_build_plan_md(self, tmp_path: Path):
         result = tools.write_file(
             {"filename": "_agent_state/build_plan.md", "content": "# plan\n- [ ] x"},
@@ -243,6 +327,34 @@ class TestAgentWritableArtifacts:
         assert not result.startswith("Error:"), result
         text = (tmp_path / "_agent_state" / "build_plan.md").read_text()
         assert "- [x] todo a" in text
+
+    def test_patch_file_rejects_disallowed_extension_even_when_file_exists(self, tmp_path: Path):
+        (tmp_path / "payload.bin").write_text("old", encoding="utf-8")
+        result = tools.patch_file(
+            {"filename": "payload.bin", "old_string": "old", "new_string": "new"},
+            sandbox_dir=tmp_path,
+        )
+        assert result.startswith("Error:"), result
+        assert "file extension" in result
+        assert (tmp_path / "payload.bin").read_text(encoding="utf-8") == "old"
+
+    def test_patch_file_subdir_guidance_uses_relative_path(self, tmp_path: Path):
+        (tmp_path / "_agent_state").mkdir()
+        (tmp_path / "_agent_state" / "build_plan.md").write_text(
+            "# plan\n- [ ] todo",
+            encoding="utf-8",
+        )
+        result = tools.patch_file(
+            {
+                "filename": "_agent_state/build_plan.md",
+                "old_string": "- [ ] missing",
+                "new_string": "- [x] missing",
+            },
+            sandbox_dir=tmp_path,
+        )
+        assert result.startswith("STOP:"), result
+        assert "read_file('_agent_state/build_plan.md')" in result
+        assert "read_file('build_plan.md')" not in result
 
 
 # ---------------------------------------------------------------------------

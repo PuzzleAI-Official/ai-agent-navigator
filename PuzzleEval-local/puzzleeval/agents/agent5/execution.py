@@ -31,11 +31,13 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
 import random
 import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any
@@ -47,7 +49,9 @@ from puzzleeval.config import (
     AGENT6_SESSION_MAX_RETRIES,
     AGENT6_SESSION_RETRY_BACKOFF_BASE,
     AGENT6_TEST_TIMEOUT,
+    AGENT6_CONVERSATION_TIMEOUT,
 )
+from puzzleeval.rate_limiter import GlobalProviderLimiter
 from puzzleeval.schemas import (
     TestCase,
     TestCaseResult,
@@ -99,6 +103,367 @@ def inflate_b64_sentinels(obj: Any) -> Any:
     if isinstance(obj, list):
         return [inflate_b64_sentinels(v) for v in obj]
     return obj
+
+
+def _bytes_safe_for_json(obj: Any) -> Any:
+    """JSON-border partner for ``inflate_b64_sentinels``.
+
+    Persistent harness sessions exchange one JSON line per turn. Keep the
+    same bytes contract as the legacy file-based subprocess path so audio
+    payloads and binary provider responses do not degrade to Python repr
+    strings.
+    """
+    if isinstance(obj, (bytes, bytearray)):
+        import base64
+        return {"_b64": base64.b64encode(bytes(obj)).decode("ascii")}
+    if isinstance(obj, dict):
+        return {k: _bytes_safe_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_bytes_safe_for_json(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_bytes_safe_for_json(v) for v in obj]
+    return obj
+
+
+_PERSISTENT_WORKER_SCRIPT = r'''
+import base64
+import contextlib
+import json
+import sys
+import time
+import traceback
+
+_PROTOCOL_STDOUT = sys.stdout
+
+
+def _write(obj):
+    _PROTOCOL_STDOUT.write(json.dumps(obj, default=str) + "\n")
+    _PROTOCOL_STDOUT.flush()
+
+
+def _bytes_safe(obj):
+    if isinstance(obj, (bytes, bytearray)):
+        return {"_b64": base64.b64encode(bytes(obj)).decode("ascii")}
+    if isinstance(obj, dict):
+        return {k: _bytes_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_bytes_safe(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_bytes_safe(v) for v in obj]
+    return obj
+
+
+def _inflate(obj):
+    if isinstance(obj, dict):
+        if len(obj) == 1 and isinstance(obj.get("_b64"), str):
+            try:
+                return base64.b64decode(obj["_b64"], validate=False)
+            except Exception:
+                return obj
+        return {k: _inflate(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_inflate(v) for v in obj]
+    return obj
+
+
+def _cleanup_state(state):
+    closed = 0
+    for value in list(state.values()):
+        close = getattr(value, "close", None)
+        if callable(close):
+            try:
+                close()
+                closed += 1
+            except Exception:
+                traceback.print_exc(file=sys.stderr)
+    return closed
+
+
+try:
+    sys.path.insert(0, ".")
+    with contextlib.redirect_stdout(sys.stderr):
+        import harness
+except Exception as exc:
+    _write({
+        "type": "error",
+        "error_type": "import_error",
+        "error": str(exc),
+        "traceback": traceback.format_exc(limit=8),
+    })
+    sys.exit(2)
+
+
+session_state = {}
+
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    try:
+        cmd = json.loads(line)
+    except Exception as exc:
+        _write({"type": "error", "error_type": "bad_command", "error": str(exc)})
+        continue
+
+    cmd_type = cmd.get("type")
+    if cmd_type in ("close", "shutdown"):
+        closed = _cleanup_state(session_state)
+        _write({"type": "closed", "closed_resources": closed})
+        break
+
+    if cmd_type != "turn":
+        _write({
+            "type": "error",
+            "error_type": "unknown_command",
+            "error": str(cmd_type),
+        })
+        continue
+
+    payload = _inflate(cmd.get("payload") or {})
+    if not isinstance(payload, dict):
+        payload = {"payload": payload}
+
+    incoming_state = payload.get("session_state")
+    if isinstance(incoming_state, dict):
+        session_state.update(incoming_state)
+    payload["session_state"] = session_state
+
+    started = time.perf_counter()
+    try:
+        with contextlib.redirect_stdout(sys.stderr):
+            result = harness.run(payload)
+        latency_ms = (time.perf_counter() - started) * 1000.0
+        if isinstance(result, dict):
+            new_state = result.get("session_state")
+            if isinstance(new_state, dict):
+                session_state.update(new_state)
+            result_for_parent = dict(result)
+            # In persistent mode, session_state is worker-owned. Returning
+            # it would stringify non-serializable provider handles such as
+            # WebSockets and then poison the parent-side state dict.
+            result_for_parent.pop("session_state", None)
+            result_for_parent.setdefault("latency_ms", latency_ms)
+        else:
+            result_for_parent = {
+                "success": False,
+                "output": "",
+                "latency_ms": latency_ms,
+                "raw_response": {},
+                "error": "harness.run returned non-dict result",
+            }
+        _write({"type": "result", "result": _bytes_safe(result_for_parent)})
+    except Exception as exc:
+        latency_ms = (time.perf_counter() - started) * 1000.0
+        _write({
+            "type": "result",
+            "result": {
+                "success": False,
+                "output": "",
+                "latency_ms": latency_ms,
+                "tokens_used": None,
+                "cost_usd": None,
+                "raw_response": {"error_type": type(exc).__name__},
+                "error": str(exc),
+            },
+        })
+'''
+
+
+def _sandbox_python_executable(sandbox_dir: Path) -> str:
+    """Prefer the sandbox venv interpreter; fall back to current Python."""
+    if sys.platform == "win32":
+        candidate = sandbox_dir / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = sandbox_dir / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.exists() else sys.executable
+
+
+class PersistentHarnessSession:
+    """One long-lived harness subprocess for one multi-turn conversation."""
+
+    def __init__(
+        self,
+        sandbox_dir: Path,
+        credentials: dict[str, str] | None,
+        *,
+        turn_timeout: int,
+        conversation_timeout: int = AGENT6_CONVERSATION_TIMEOUT,
+        logger: logging.Logger | None = None,
+        trace_id: str = "no-trace",
+        candidate_name: str = "",
+    ) -> None:
+        self.sandbox_dir = sandbox_dir
+        self.credentials = credentials
+        self.turn_timeout = turn_timeout
+        self.conversation_timeout = conversation_timeout
+        self.logger = logger or logging.getLogger(__name__)
+        self.trace_id = trace_id
+        self.candidate_name = candidate_name
+        self.started_at = time.monotonic()
+        self._lock = threading.Lock()
+        self._stdout_queue: "queue.Queue[str]" = queue.Queue()
+        self._stderr_tail: deque[str] = deque(maxlen=80)
+        self._closed = False
+        self._proc = self._start_worker()
+
+    def _start_worker(self) -> subprocess.Popen:
+        from puzzleeval.agents.agent5.sandbox import build_sandbox_env
+
+        env = build_sandbox_env(self.sandbox_dir, self.credentials)
+        proc = subprocess.Popen(
+            [_sandbox_python_executable(self.sandbox_dir), "-u", "-c", _PERSISTENT_WORKER_SCRIPT],
+            cwd=str(self.sandbox_dir),
+            env=env,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+        )
+        threading.Thread(
+            target=self._read_stdout,
+            args=(proc,),
+            name=f"puzzleeval-persistent-stdout-{self.candidate_name[:16]}",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._read_stderr,
+            args=(proc,),
+            name=f"puzzleeval-persistent-stderr-{self.candidate_name[:16]}",
+            daemon=True,
+        ).start()
+        return proc
+
+    def _read_stdout(self, proc: subprocess.Popen) -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            self._stdout_queue.put(line)
+
+    def _read_stderr(self, proc: subprocess.Popen) -> None:
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            self._stderr_tail.append(line.rstrip())
+
+    def _stderr_excerpt(self) -> str:
+        return "\n".join(self._stderr_tail)[-1200:]
+
+    def _remaining_conversation_seconds(self) -> float:
+        return max(0.0, self.conversation_timeout - (time.monotonic() - self.started_at))
+
+    def _failure(self, error: str, error_type: str) -> dict:
+        return {
+            "output": "",
+            "latency_ms": 0.0,
+            "tokens_used": None,
+            "cost_usd": None,
+            "raw_response": {"error_type": error_type},
+            "success": False,
+            "error": error,
+        }
+
+    def turn(self, payload: dict) -> dict:
+        """Execute one turn inside the persistent worker."""
+        with self._lock:
+            if self._closed:
+                return self._failure("persistent harness worker is closed", "worker_closed")
+            remaining = self._remaining_conversation_seconds()
+            if remaining <= 0:
+                self.kill()
+                return self._failure(
+                    f"Persistent harness conversation timed out after {self.conversation_timeout}s",
+                    "conversation_timeout",
+                )
+            if self._proc.poll() is not None:
+                return self._failure(
+                    f"Persistent harness worker died before turn; stderr: {self._stderr_excerpt()}",
+                    "worker_died",
+                )
+
+            command = {
+                "type": "turn",
+                "payload": _bytes_safe_for_json(payload),
+            }
+            try:
+                assert self._proc.stdin is not None
+                self._proc.stdin.write(json.dumps(command, default=str) + "\n")
+                self._proc.stdin.flush()
+            except (BrokenPipeError, OSError) as exc:
+                return self._failure(
+                    f"Persistent harness worker pipe broke: {exc}; stderr: {self._stderr_excerpt()}",
+                    "worker_died",
+                )
+
+            deadline = max(0.1, min(float(self.turn_timeout), remaining))
+            end_at = time.monotonic() + deadline
+            while True:
+                wait = max(0.0, end_at - time.monotonic())
+                if wait <= 0:
+                    self.kill()
+                    return self._failure(
+                        f"Persistent harness worker timed out after {deadline:.1f}s",
+                        "worker_timeout",
+                    )
+                try:
+                    line = self._stdout_queue.get(timeout=min(wait, 0.2))
+                except queue.Empty:
+                    if self._proc.poll() is not None:
+                        return self._failure(
+                            f"Persistent harness worker died during turn; stderr: {self._stderr_excerpt()}",
+                            "worker_died",
+                        )
+                    continue
+                if self._proc.poll() is not None and not line:
+                    return self._failure(
+                        f"Persistent harness worker died during turn; stderr: {self._stderr_excerpt()}",
+                        "worker_died",
+                    )
+                try:
+                    message = json.loads(line)
+                except json.JSONDecodeError:
+                    self._stderr_tail.append(f"[stdout non-json] {line.rstrip()}")
+                    continue
+                if message.get("type") == "result":
+                    result = inflate_b64_sentinels(message.get("result") or {})
+                    if isinstance(result, dict):
+                        return result
+                    return self._failure("Persistent worker returned non-dict result", "bad_result")
+                return self._failure(
+                    f"Persistent harness worker error: {message.get('error')}; stderr: {self._stderr_excerpt()}",
+                    str(message.get("error_type") or "worker_error"),
+                )
+
+    def close(self) -> None:
+        """Ask the worker to close resources and exit; kill on non-response."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            if self._proc.poll() is None:
+                try:
+                    assert self._proc.stdin is not None
+                    self._proc.stdin.write(json.dumps({"type": "close"}) + "\n")
+                    self._proc.stdin.flush()
+                    try:
+                        self._stdout_queue.get(timeout=5)
+                    except queue.Empty:
+                        pass
+                    self._proc.wait(timeout=5)
+                except Exception:
+                    self.kill()
+
+    def kill(self) -> None:
+        self._closed = True
+        if self._proc.poll() is None:
+            try:
+                self._proc.kill()
+            except OSError:
+                pass
+
+    def __enter__(self) -> "PersistentHarnessSession":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        self.close()
 
 
 def execute_single_test(
@@ -217,7 +582,7 @@ def execute_single_test(
             output_path.unlink()
 
         proc = subprocess.run(
-            [sys.executable, "-c", exec_script],
+            [_sandbox_python_executable(sandbox_dir), "-c", exec_script],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -298,10 +663,7 @@ def execute_test_with_session_retry(
     """
 
     # Phase 6 lazy imports — implement_test_env helpers we depend on.
-    from puzzleeval.agents.implement_test_env import (
-        _adaptive_test_timeout,
-        _is_concurrent_session_error,
-    )
+    from puzzleeval.agents.implement_test_env import _is_concurrent_session_error
 
     result = execute_single_test(sandbox_dir, payload, credentials, timeout)
 
@@ -371,7 +733,7 @@ def run_single_test_with_rate_limit(
 
     # Phase 6 lazy imports — implement_test_env helpers we depend on.
     from puzzleeval.agents.implement_test_env import (
-        _is_concurrent_session_error,
+        _adaptive_test_timeout,
         _is_rate_limit_error,
     )
 
@@ -449,7 +811,6 @@ def execute_all_tests(
     even in the parallel path. The limiter is its own pacing layer — the
     parallelism knob is just the concurrency ceiling.
     """
-    from puzzleeval.config import AGENT6_PER_CANDIDATE_PARALLELISM
     shuffled = list(test_cases)
     random.shuffle(shuffled)
 
@@ -823,6 +1184,7 @@ __all__ = [
     "execute_test_with_session_retry",
     "inflate_b64_sentinels",
     "needs_plugin_synthesis",
+    "PersistentHarnessSession",
     "run_single_test_with_rate_limit",
     "synthesize_test_input_via_plugin",
 ]

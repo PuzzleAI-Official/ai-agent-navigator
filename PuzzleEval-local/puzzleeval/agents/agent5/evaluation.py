@@ -29,9 +29,10 @@ import json
 import logging
 import re
 import time
-from typing import Any
-
-import anthropic
+try:
+    import anthropic
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    from puzzleeval.anthropic_client import anthropic  # type: ignore
 
 from puzzleeval.config import (
     AGENT6_EVAL_MAX_TOKENS,
@@ -48,6 +49,12 @@ from puzzleeval.schemas import (
 # all key fields (vendor, line_items, totals) even in verbose responses.
 # Cost: ~$0.01/test at Sonnet rates.
 RAW_RESPONSE_MAX_CHARS = 15000
+
+
+def _normalize_for_comparison(text: str | None) -> str:
+    """Normalize text for mechanical exact-match comparisons."""
+
+    return re.sub(r"\s+", " ", str(text or "").strip().lower())
 
 
 def try_parse_number(text: str) -> float | None:

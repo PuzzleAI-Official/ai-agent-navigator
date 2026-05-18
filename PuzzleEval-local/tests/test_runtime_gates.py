@@ -160,22 +160,31 @@ class TestVoiceHarnessGateValidate:
         assert not result.passed
         assert "audio_b64" in result.evidence["forbidden_keys"]
 
-    def test_text_only_response_passes(self):
-        """Empty raw_response → text-only fallback path is valid."""
+    def test_successful_text_only_response_fails(self):
+        """Successful voice results must carry audio evidence."""
         gate = VoiceHarnessGate()
         state = {
             "raw_response": {},
             "output": "agent text response",
+            "success": True,
         }
         result = gate.validate(state, task=_voice_task())
-        assert result.passed
-        assert result.evidence["shape"] == "text"
+        assert not result.passed
+        assert "audio_bytes or audio_path" in result.reason
 
-    def test_no_raw_response_passes(self):
+    def test_successful_no_raw_response_fails(self):
         gate = VoiceHarnessGate()
-        state = {"output": "text only"}
+        state = {"output": "text only", "success": True}
+        result = gate.validate(state, task=_voice_task())
+        assert not result.passed
+        assert "raw_response audio evidence" in result.reason
+
+    def test_clean_failure_without_audio_passes(self):
+        gate = VoiceHarnessGate()
+        state = {"output": "", "success": False, "error": "provider unavailable"}
         result = gate.validate(state, task=_voice_task())
         assert result.passed
+        assert result.evidence["shape"] == "clean_failure"
 
     def test_non_dict_state_fails(self):
         gate = VoiceHarnessGate()

@@ -25,8 +25,8 @@ class SelectorSpec:
     spec's ``matches(task)`` returns True.
 
     Empty spec (no predicates) → never matches via deterministic mode.
-    Such a contract must use ``selection_mode="always_on"`` or
-    ``selection_mode="llm_routed"`` to be selected.
+    Such a contract must use ``selection_mode="always_on"`` or add a concrete
+    predicate to be selected.
 
     Fields:
         trigger_types: frozenset of strings to match against

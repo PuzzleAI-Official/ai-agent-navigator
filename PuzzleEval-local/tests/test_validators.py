@@ -18,8 +18,12 @@ from puzzleeval.schemas import (
     Constraints,
     InfoStatus,
     JudgementCriterion,
+    Persona,
+    RubricCriterion,
+    ScopeTestSpec,
     SubTask,
     TestCase,
+    TestPlan,
     UserUnderstandingOutput,
     WorkflowBlueprint,
     WorkflowStep,
@@ -601,6 +605,67 @@ class TestAgent3Validator:
         assert v.passed
         assert len(v.errors) == 0
 
+    def test_test_plan_target_joins_scope_id_to_workflow_capability(self):
+        """TestPlan targets are keyed by scope_id, not a capability field."""
+        uo = _make_user_understanding()
+        uo.workflow = WorkflowBlueprint(steps=[
+            WorkflowStep(
+                id="step_1",
+                role="ocr",
+                description="OCR",
+                capability="document OCR",
+                input_from="user",
+                output_format="structured_json",
+            ),
+            WorkflowStep(
+                id="step_2",
+                role="sync",
+                description="Sync",
+                capability="accounting integration",
+                input_from="step_1",
+                output_format="action",
+                depends_on=["step_1"],
+            ),
+        ])
+        uo.test_plan = TestPlan(
+            scope_specs=[
+                ScopeTestSpec(
+                    scope_id="step_1",
+                    test_mode="synthetic_text",
+                    input_type="document_content",
+                    output_type="extraction",
+                    input_description="invoice text",
+                    expected_output_description="structured invoice fields",
+                    sample_input="invoice",
+                    sample_output='{"vendor": "Test Corp"}',
+                    test_count_target=7,
+                ),
+                ScopeTestSpec(
+                    scope_id="step_2",
+                    test_mode="synthetic_structured",
+                    input_type="structured_data",
+                    output_type="action",
+                    input_description="invoice fields",
+                    expected_output_description="QuickBooks action",
+                    sample_input='{"vendor": "Test Corp"}',
+                    sample_output='{"created": true}',
+                    test_count_target=3,
+                ),
+            ],
+            total_test_target=10,
+            notes="depth derived per scope",
+        )
+
+        v = validate_agent3_output(self._make_good_result(), uo)
+
+        assert not v.passed
+        assert any(
+            "Sub-task under-generated" in error
+            and "target 7" in error
+            and "Extract structured data" in error
+            for error in v.errors
+        )
+
     def test_empty_test_cases_fails(self):
         result = Agent3Result(
             test_cases=[],
@@ -686,6 +751,90 @@ class TestAgent3Validator:
         result.test_cases[0].expected_output = "  "
         v = validate_agent3_output(result, _make_user_understanding())
         assert not v.passed
+
+    def test_conversational_unavailable_completion_contradiction_warns(self):
+        result = self._make_good_result()
+        result.test_cases[0] = self._make_test_case(
+            "tc-001",
+            "Extract structured data from invoice photos",
+            scenario="Caller asks for an off-menu same-night service package",
+            input_type="voice_conversation",
+            input_data='{"shape": "twilio"}',
+            input_context={
+                "instructions": (
+                    "Same-night service is unavailable. Do not offer it."
+                )
+            },
+            output_type="voice_conversation",
+            expected_output="Agent successfully books same-night service.",
+            evaluation_mode="agentic",
+            persona=Persona(
+                name="Dean",
+                demographics="Homeowner in Los Angeles",
+                emotional_state="urgent but polite",
+            ),
+            goal="book the unavailable same-night service package",
+            rubric=[
+                RubricCriterion(
+                    name="goal_completion",
+                    description="Did the agent book the same-night service?",
+                    weight=0.7,
+                ),
+                RubricCriterion(
+                    name="continuity_memory",
+                    description="Did the agent remember earlier details?",
+                    weight=0.3,
+                ),
+            ],
+        )
+
+        v = validate_agent3_output(result, _make_user_understanding())
+        assert v.passed
+        assert any("internally inconsistent" in w for w in v.warnings)
+
+    def test_conversational_unavailable_refusal_is_consistent(self):
+        result = self._make_good_result()
+        result.test_cases[0] = self._make_test_case(
+            "tc-001",
+            "Extract structured data from invoice photos",
+            scenario="Caller asks for an off-menu same-night service package",
+            input_type="voice_conversation",
+            input_data='{"shape": "twilio"}',
+            input_context={
+                "instructions": (
+                    "Same-night service is unavailable. Decline it and offer "
+                    "the earliest available appointment."
+                )
+            },
+            output_type="voice_conversation",
+            expected_output="Agent declines same-night service and offers an alternative.",
+            evaluation_mode="agentic",
+            persona=Persona(
+                name="Dean",
+                demographics="Homeowner in Los Angeles",
+                emotional_state="urgent but polite",
+            ),
+            goal="learn that same-night service is unavailable and choose an alternative",
+            rubric=[
+                RubricCriterion(
+                    name="scope_adherence",
+                    description=(
+                        "Did the agent decline the unavailable request and "
+                        "offer an alternative?"
+                    ),
+                    weight=0.7,
+                ),
+                RubricCriterion(
+                    name="continuity_memory",
+                    description="Did the agent remember earlier details?",
+                    weight=0.3,
+                ),
+            ],
+        )
+
+        v = validate_agent3_output(result, _make_user_understanding())
+        assert v.passed
+        assert not any("internally inconsistent" in w for w in v.warnings)
 
     def test_missing_difficulty_spread_warns(self):
         """If a sub-task only has 'easy' cases, should warn."""

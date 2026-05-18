@@ -1,4 +1,4 @@
-"""Regression guards for the four-subagent pre-production audit.
+﻿"""Regression guards for the four-subagent pre-production audit.
 
 Each section covers one audit finding; these tests lock in the fix so a
 future refactor can't silently re-introduce the bug.
@@ -64,7 +64,7 @@ def _agent5_combined_source() -> str:
 
 
 def test_pipeline_runner_gather_has_return_exceptions():
-    """Backend CRITICAL #1 — parallel branches must not cancel each other
+    """Backend CRITICAL #1 â€” parallel branches must not cancel each other
     when one raises. Without return_exceptions=True, an Agent 3 hiccup
     tears down a running Agent 4."""
     src = (
@@ -80,7 +80,7 @@ def test_pipeline_runner_gather_has_return_exceptions():
 
 
 def test_pipeline_runner_selection_cancel_emits_correct_status():
-    """Backend CRITICAL #2 — cancel during the selection pause must
+    """Backend CRITICAL #2 â€” cancel during the selection pause must
     identify itself as 'during_selection', not the previous misleading
     'after_screening' label."""
     src = (
@@ -95,7 +95,7 @@ def test_pipeline_runner_selection_cancel_emits_correct_status():
 
 
 def test_pipeline_runner_no_cost_double_count():
-    """Backend HIGH — final EvaluationReport must use state.total_cost_usd
+    """Backend HIGH â€” final EvaluationReport must use state.total_cost_usd
     alone (already includes all agent costs). Previously was
     state.total_cost_usd + total_cost which double-counted the whole run."""
     src = (
@@ -104,7 +104,7 @@ def test_pipeline_runner_no_cost_double_count():
         / "services"
         / "pipeline_runner.py"
     ).read_text(encoding="utf-8")
-    # The CALL site — not the explanatory comment block.
+    # The CALL site â€” not the explanatory comment block.
     assert "total_cost_usd=state.total_cost_usd + total_cost" not in src, (
         "Cost double-count regressed. assemble_report(total_cost_usd=...) "
         "must pass state.total_cost_usd directly (already includes every "
@@ -116,7 +116,7 @@ def test_pipeline_runner_no_cost_double_count():
 
 
 def test_files_upload_sanitizes_filename():
-    """Backend HIGH — ../../etc/passwd-style traversal must be rejected
+    """Backend HIGH â€” ../../etc/passwd-style traversal must be rejected
     OR sanitized to a safe basename. Upload route must not allow
     writing outside run_upload_dir."""
     src = (
@@ -155,7 +155,7 @@ def test_runs_audio_endpoint_exists():
 
 def test_agent3_input_type_enum_list_is_complete():
     """Agent 3's top-level input_type enum list must match VALID_INPUT_TYPES
-    — stale listing of only 5 values was leading Claude astray."""
+    â€” stale listing of only 5 values was leading Claude astray."""
     from puzzleeval.validators import VALID_INPUT_TYPES
     src = ((ROOT / "puzzleeval" /"agents" / "agent3" / "core.py").read_text(encoding="utf-8") + chr(10) + (ROOT / "puzzleeval" /"agents" / "agent3" / "templates" / "system_prompt.md").read_text(encoding="utf-8"))
     # Slice out the input_type Values section for precise checking.
@@ -165,7 +165,7 @@ def test_agent3_input_type_enum_list_is_complete():
     # Every VALID_INPUT_TYPES value must be named somewhere in that section.
     for enum_value in VALID_INPUT_TYPES:
         assert f'"{enum_value}"' in section, (
-            f"Agent 3 input_type section missing '{enum_value}' — drift with "
+            f"Agent 3 input_type section missing '{enum_value}' â€” drift with "
             f"VALID_INPUT_TYPES will mis-guide test case generation."
         )
 
@@ -179,7 +179,7 @@ def test_agent3_output_type_enum_list_is_complete():
     section = src[start:end]
     for enum_value in VALID_OUTPUT_TYPES:
         assert f'"{enum_value}"' in section, (
-            f"Agent 3 output_type section missing '{enum_value}' — drift with "
+            f"Agent 3 output_type section missing '{enum_value}' â€” drift with "
             f"VALID_OUTPUT_TYPES will mis-guide test case generation."
         )
 
@@ -200,19 +200,23 @@ def test_workflow_step_output_format_description_lists_all_enums():
         )
 
 
-def test_agent5_builder_teaches_multi_turn_harness_payload():
-    """C3 — Agent 5 builder prompt must describe the {audio_url, turn_index,
-    session_state} payload shape so builders don't write single-turn
-    harnesses that KeyError on voice_conversation dispatches."""
+def test_agent5_builder_teaches_conversation_runtime_boundary():
+    """Conversation/voice prompts must point builders at the Phase 5 runtime
+    policy instead of hard-coding every provider into one per-turn recipe."""
     src = _agent5_combined_source()
-    assert "MULTI-CALL HARNESS CONTRACT" in src
-    assert "turn_index" in src
-    assert "session_state" in src
-    assert "audio_url" in src
+    assert "CONVERSATION RUNTIME AND EVIDENCE NOTE" in src
+    assert "implementation_plan.json" in src
+    assert "interaction_pattern.known_family" in src
+    assert "state_owner=provider_server" in src
+    assert "state_owner=harness_process" in src
+    assert "persistent_worker" in src
+    assert "raw_response['audio_bytes']" in src
+    assert "raw_response['audio_path']" in src
+    assert "MULTI-CALL HARNESS CONTRACT" not in src
 
 
 def test_agent5_builder_emits_wss_advisory_section():
-    """C6 — when atlas or docs_url signal a WebSocket endpoint, the
+    """C6 â€” when atlas or docs_url signal a WebSocket endpoint, the
     builder prompt must carry an advisory telling the builder to NOT
     silently build a REST facsimile."""
     src = _agent5_combined_source()
@@ -227,7 +231,7 @@ def test_agent5_builder_emits_wss_advisory_section():
 
 
 def test_beta_header_is_the_correct_value():
-    """C1 — the most critical bug from the audit. Wrong header kills the
+    """C1 â€” the most critical bug from the audit. Wrong header kills the
     entire NEW-AA tool_runner path. Must be exactly code-execution-2025-08-25
     per Anthropic docs for the code_execution_20260120 tool."""
     src = (ROOT / "puzzleeval" / "plugin_tool_runner.py").read_text(encoding="utf-8")
@@ -235,12 +239,12 @@ def test_beta_header_is_the_correct_value():
     assert '"code-execution-2025-08-25"' in src
     # Old wrong value must be gone.
     assert '"code-execution-2026-01-20"' not in src, (
-        "Wrong beta header regressed — every tool_runner call will 400."
+        "Wrong beta header regressed â€” every tool_runner call will 400."
     )
 
 
 def test_tool_runner_accumulates_eval_cost():
-    """C4 — ToolRunnerVerdict.cost_usd must accumulate into eval_cost
+    """C4 â€” ToolRunnerVerdict.cost_usd must accumulate into eval_cost
     so the report's total_test_cost_usd isn't under-counted when the
     tool_runner path runs."""
     src = _agent5_combined_source()
@@ -254,7 +258,7 @@ def test_tool_runner_accumulates_eval_cost():
 
 
 def test_tool_runner_harness_runner_conditional():
-    """H3 — harness_runner must only be injected for multi-call modalities.
+    """H3 â€” harness_runner must only be injected for multi-call modalities.
     Previously injected for every test, inviting Claude to mis-pick
     conversation_simulator for simple text evals.
 
@@ -275,7 +279,7 @@ def test_tool_runner_harness_runner_conditional():
 
 
 def test_evaluate_with_tool_runner_narrow_widening():
-    """plugin_tool_runner.py — runner-driven widening must be gated on
+    """plugin_tool_runner.py â€” runner-driven widening must be gated on
     multi-call modality, not every call."""
     src = (ROOT / "puzzleeval" / "plugin_tool_runner.py").read_text(encoding="utf-8")
     assert "is_multi_call_test" in src
@@ -283,7 +287,7 @@ def test_evaluate_with_tool_runner_narrow_widening():
 
 
 def test_eligible_plugins_simplified_semantics():
-    """plugin_tool_runner.py — the AND-then-OR contradiction is gone.
+    """plugin_tool_runner.py â€” the AND-then-OR contradiction is gone.
     Either-side-matches is the documented semantics now."""
     from puzzleeval.plugin_tool_runner import eligible_plugins
     # conversation_simulator claims input_types=["conversation"] and
@@ -304,7 +308,7 @@ def test_ll_judge_eval_cost_uses_accumulation_not_assignment():
 
 
 # ---------------------------------------------------------------------------
-# 4. EvaluationReport.scope_runs — Phase 9 now surfaces to frontend
+# 4. EvaluationReport.scope_runs â€” Phase 9 now surfaces to frontend
 # ---------------------------------------------------------------------------
 
 
@@ -318,7 +322,7 @@ def test_evaluation_report_has_scope_runs_field():
 
 
 def test_agent5_system_prompt_has_cache_control():
-    """D1 — Agent 5's 10.7K-token system prompt must have cache_control
+    """D1 â€” Agent 5's 10.7K-token system prompt must have cache_control
     ephemeral so it caches across the 6-24 turns per candidate. Without
     this, every turn re-pays the full system-prompt input cost.
 
@@ -363,7 +367,7 @@ def test_agent5_system_prompt_has_cache_control():
 
 def test_agent5_ptl_detection_strict():
     """Regression: PTL recovery used to match any 400 containing the word
-    "context" — which false-positived on an unrelated
+    "context" â€” which false-positived on an unrelated
     `context_management.edits.0...` schema error. Each false-positive
     retried instantly, hit the same 400, halved max_tokens, and blew
     through the retry budget in microseconds. Detection must be keyed to
@@ -374,7 +378,7 @@ def test_agent5_ptl_detection_strict():
     # detection expression.
     bad_expr = '"context" in error_msg'
     assert bad_expr not in src, (
-        "PTL detector still matches any error containing 'context' — "
+        "PTL detector still matches any error containing 'context' â€” "
         "this false-positives on schema errors like "
         "'context_management.edits.0.<edit>.trigger'."
     )
@@ -383,16 +387,16 @@ def test_agent5_ptl_detection_strict():
         '"prompt is too long"' in src
         or '"prompt too long"' in src
         or '"maximum context length"' in src
-    ), "PTL detector lost its real markers — it will never trigger."
+    ), "PTL detector lost its real markers â€” it will never trigger."
 
 
 def test_agent2_structure_prompt_no_duplicate_candidate_class_block():
-    """D3 — the candidate-class principle was duplicated verbatim across
+    """D3 â€” the candidate-class principle was duplicated verbatim across
     RESEARCH + STRUCTURE prompts. Keep it in RESEARCH only; STRUCTURE
     gets a one-liner pointer. ~1800 token saving per Agent 2 run."""
     from puzzleeval.agents.research import STRUCTURE_SYSTEM_PROMPT
     # The RESEARCH prompt's "Examples of the duality" marker should NOT
-    # appear in STRUCTURE anymore — it was the biggest duplicated block.
+    # appear in STRUCTURE anymore â€” it was the biggest duplicated block.
     assert "Examples of the duality" not in STRUCTURE_SYSTEM_PROMPT
     # But the one-line preservation rule IS still there.
     assert "Developer-primitive" in STRUCTURE_SYSTEM_PROMPT or (
@@ -401,7 +405,7 @@ def test_agent2_structure_prompt_no_duplicate_candidate_class_block():
 
 
 def test_agent5_has_turn_budget_nudge():
-    """A11 — when builder approaches MAX_TURNS without completing, inject
+    """A11 â€” when builder approaches MAX_TURNS without completing, inject
     a nudge so Claude commits to HARNESS_COMPLETE or HARNESS_FAILED
     instead of starting a new refactor."""
     src = _agent5_combined_source()
@@ -410,7 +414,7 @@ def test_agent5_has_turn_budget_nudge():
 
 
 def test_candidate_interaction_pattern_hint_has_websocket_and_sse():
-    """C4 — Agent 2's hint enum must include 'websocket' and 'sse_streaming'
+    """C4 â€” Agent 2's hint enum must include 'websocket' and 'sse_streaming'
     so voice/realtime candidates get a pre-signal before Agent 4 deep-verify."""
     from puzzleeval.schemas import Candidate
     field = Candidate.model_fields["api_interaction_pattern_hint"]
@@ -421,7 +425,7 @@ def test_candidate_interaction_pattern_hint_has_websocket_and_sse():
 
 def test_agent5_verify_contradiction_resolved():
     """The 'DO NOT write verification scripts' rule must explicitly
-    clarify it's about Phase 1 ad-hoc scripts — NOT the Phase 2
+    clarify it's about Phase 1 ad-hoc scripts â€” NOT the Phase 2
     <verify_against_docs> eyeball check. Audit flagged this as a contradiction."""
     src = _builder_prompt_text()
     # Must mention Phase 1 context explicitly.
@@ -471,7 +475,7 @@ def test_agent2_uses_server_tool_timeout():
 
 
 def test_agent4_screening_uses_server_tool_timeout():
-    """Agent 4 deep-verify does up to 15 turns × web_fetch/web_search.
+    """Agent 4 deep-verify does up to 15 turns Ã— web_fetch/web_search.
     Needs the longer timeout."""
     src = (ROOT / "puzzleeval" / "agents" / "agent4" / "core.py").read_text(
         encoding="utf-8"
@@ -497,7 +501,7 @@ def test_agent1_input_has_proceed_with_partial_info_field():
     from puzzleeval.schemas import Agent1Input
     fields = Agent1Input.model_fields
     assert "proceed_with_partial_info" in fields, (
-        "Agent1Input missing proceed_with_partial_info field — "
+        "Agent1Input missing proceed_with_partial_info field â€” "
         "--no-interactive flag cannot reach Agent 1"
     )
     # Default must be False to preserve multi-turn behavior for chat flows.
@@ -544,7 +548,7 @@ def test_provider_registry_has_openai_and_elevenlabs():
 
 
 def test_provider_registry_sync_to_environ_fills_missing_keys():
-    """The registry → os.environ propagation fills empty slots without
+    """The registry â†’ os.environ propagation fills empty slots without
     overriding existing values. Core capability: registry becomes a
     first-class credential source on par with .env."""
     import os
@@ -559,13 +563,13 @@ def test_provider_registry_sync_to_environ_fills_missing_keys():
     })
     # Pre-set one key; empty-string the other (common CI footgun).
     os.environ["SYNC_TEST_KEY_A"] = "from_shell"  # explicit WIN
-    os.environ["SYNC_TEST_KEY_B"] = ""            # empty → evicted
+    os.environ["SYNC_TEST_KEY_B"] = ""            # empty â†’ evicted
     try:
         applied = sync_to_environ(reg)
         assert os.environ["SYNC_TEST_KEY_A"] == "from_shell"  # preserved
         assert os.environ["SYNC_TEST_KEY_B"] == "from_registry"  # filled
         assert "SYNC_TEST_KEY_B" in applied
-        assert "SYNC_TEST_KEY_A" not in applied  # not written — already set
+        assert "SYNC_TEST_KEY_A" not in applied  # not written â€” already set
     finally:
         os.environ.pop("SYNC_TEST_KEY_A", None)
         os.environ.pop("SYNC_TEST_KEY_B", None)
@@ -601,7 +605,7 @@ def test_package_autoload_propagates_registry_to_environ():
     # Any key from registry we added should now be in os.environ.
     # MINDEE_API_KEY is present in the committed registry.
     assert os.environ.get("MINDEE_API_KEY"), (
-        "MINDEE_API_KEY not in os.environ after package import — "
+        "MINDEE_API_KEY not in os.environ after package import â€” "
         "registry autoload failed"
     )
 
@@ -682,7 +686,7 @@ def test_builder_prompt_has_error_handling_contract():
     """
     from puzzleeval.agents.implement_test_env import BUILDER_SYSTEM_PROMPT
     assert "ERROR-HANDLING CONTRACT" in BUILDER_SYSTEM_PROMPT
-    # Each of the six adversarial probes must be named in the contract so
+    # Each mechanical adversarial probe must be named in the contract so
     # the model can't selectively handle only happy-path errors.
     for probe in (
         "Empty / missing input",
@@ -700,25 +704,14 @@ def test_builder_prompt_has_error_handling_contract():
     assert "except Exception as exc" in BUILDER_SYSTEM_PROMPT
 
 
-def test_smoke_test_template_exercises_adversarial_probes():
-    """Regression: the old smoke test only verified structural shape +
-    connection-error mock. It never caught contract violations, so
-    harnesses reached HARNESS_COMPLETE with happy-path-only error
-    handling and then died in the adversarial battery. The new template
-    replays the same six probes the battery will run."""
+def test_smoke_test_is_optional_offline_mechanical_check():
+    """Smoke is a local aid; representative probes are the production proof."""
     from puzzleeval.agents.implement_test_env import BUILDER_SYSTEM_PROMPT
-    for probe_label in (
-        "Probe 2: empty input",
-        "Probe 3: malformed input",
-        "Probe 4: oversized input",
-        "Probe 5: bad credentials",
-        "Probe 6: concurrency",
-    ):
-        assert probe_label in BUILDER_SYSTEM_PROMPT, (
-            f"Smoke test template missing {probe_label}"
-        )
-    # The _assert_clean_failure helper is what enforces the contract.
-    assert "_assert_clean_failure" in BUILDER_SYSTEM_PROMPT
+    assert "## Optional Smoke Check" in BUILDER_SYSTEM_PROMPT
+    assert "Smoke is not the completion proof" in BUILDER_SYSTEM_PROMPT
+    assert "PUZZLEEVAL_SMOKE_OFFLINE=1" in BUILDER_SYSTEM_PROMPT
+    assert "six " + "adversarial probes" not in BUILDER_SYSTEM_PROMPT
+    assert "_assert_clean_failure" not in BUILDER_SYSTEM_PROMPT
 
 
 def test_agent3_empty_retry_helper_exists():
@@ -747,7 +740,7 @@ def test_agent3_empty_retry_wired_into_generate_function():
     # `if not result.test_cases:`.
     assert "if not result.test_cases:" in src
     assert "_retry_empty_generation(" in src
-    # Order matters — empty-retry must run BEFORE topup so topup can
+    # Order matters â€” empty-retry must run BEFORE topup so topup can
     # operate on a non-empty result.
     empty_idx = src.find("_retry_empty_generation(")
     topup_idx = src.find("_topup_undergenerated_subtasks(", empty_idx)
@@ -801,9 +794,9 @@ def test_agent2_validator_suppresses_legacy_warning_on_phase4_coverage():
                 adoption_difficulty="easy",
                 relevance_score=0.9,
                 source="test",
-                # Short Agent-2 summary — would fail fuzzy match alone.
+                # Short Agent-2 summary â€” would fail fuzzy match alone.
                 relevant_subtasks=["Invoice OCR & data extraction"],
-                # But Phase 4 coverage is populated — this MUST suppress
+                # But Phase 4 coverage is populated â€” this MUST suppress
                 # the fuzzy warning.
                 covers_step_ids=["step_1"],
                 coverage_confidence={"step_1": "claimed"},
@@ -815,12 +808,12 @@ def test_agent2_validator_suppresses_legacy_warning_on_phase4_coverage():
     r = validate_agent2_output(agent2, agent1)
     warning_text = "\n".join(r.warnings)
     assert "Sub-tasks not covered by any candidate" not in warning_text, (
-        "Phase 4 coverage is complete — legacy fuzzy warning should be suppressed."
+        "Phase 4 coverage is complete â€” legacy fuzzy warning should be suppressed."
     )
 
 
 def test_agent2_validator_still_warns_when_phase4_coverage_incomplete():
-    """Inverse of the above — if covers_step_ids is empty (legacy flow),
+    """Inverse of the above â€” if covers_step_ids is empty (legacy flow),
     the fuzzy check must still run. Don't silently drop coverage
     detection on pre-Phase-4 pipelines."""
     from puzzleeval.validators import validate_agent2_output
@@ -842,7 +835,7 @@ def test_agent2_validator_still_warns_when_phase4_coverage_incomplete():
         search_keywords=["kw"],
         constraints=Constraints(),
         info_status=InfoStatus(has_concrete_subtasks=True, has_domain=True),
-        workflow=None,  # No blueprint → pure legacy flow.
+        workflow=None,  # No blueprint â†’ pure legacy flow.
     )
     agent2 = Agent2Result(
         candidates=[
@@ -856,7 +849,7 @@ def test_agent2_validator_still_warns_when_phase4_coverage_incomplete():
                 relevance_score=0.9,
                 source="test",
                 relevant_subtasks=["totally unrelated capability summary"],
-                # covers_step_ids empty — Phase 4 not active.
+                # covers_step_ids empty â€” Phase 4 not active.
             ),
         ],
         search_approach="test",
@@ -870,7 +863,7 @@ def test_agent2_validator_still_warns_when_phase4_coverage_incomplete():
 def test_adversarial_battery_calls_harness_with_positional_dict():
     """Regression: the adversarial battery's subprocess driver used to
     call ``run(**payload)`` (keyword-splat), but the harness contract is
-    ``run(input_data: dict) -> dict`` — a SINGLE positional dict. Every
+    ``run(input_data: dict) -> dict`` â€” a SINGLE positional dict. Every
     probe raised TypeError BEFORE the harness's own code ran, so every
     harness ever built was reported as 'crash' and test execution was
     skipped. This is the direct reason real runs (real_debug_3 through
@@ -879,10 +872,10 @@ def test_adversarial_battery_calls_harness_with_positional_dict():
     """
     from puzzleeval import adversarial_verifier
     # The driver source is embedded as a string literal in _invoke_harness.
-    # Grep it rather than execute — faster + doesn't need a sandbox.
+    # Grep it rather than execute â€” faster + doesn't need a sandbox.
     import inspect
     src = inspect.getsource(adversarial_verifier._invoke_harness)
-    # The active driver line is `"    result = run(payload)\n"` — the
+    # The active driver line is `"    result = run(payload)\n"` â€” the
     # leading 4-space indent + the assignment distinguish the live code
     # from any free-text mention of `run(**payload)` that lives in a
     # comment explaining the historical bug.
@@ -891,26 +884,26 @@ def test_adversarial_battery_calls_harness_with_positional_dict():
         "calling convention after any adversarial_verifier refactor."
     )
     assert '"    result = run(**payload)\\n"' not in src, (
-        "The buggy kwargs-splat call is back — every harness will crash."
+        "The buggy kwargs-splat call is back â€” every harness will crash."
     )
 
 
 def test_execute_single_test_round_trips_bytes_via_b64_sentinel():
     """Regression: voice_dual_7 produced 5 caller MP3s + a "merged
-    conversation" file that was caller-only — the agent's TTS audio
+    conversation" file that was caller-only â€” the agent's TTS audio
     silently vanished. Root cause: harness returned raw `bytes` in
     raw_response.audio_bytes; subprocess driver used
     `json.dump(..., default=str)` which stringified bytes as
     `"b'\\xff\\xfb...'"` (Python repr); plugin's
     `isinstance(audio_bytes, bytes)` check then failed. General fix:
-    bytes-safe round-trip — exec_script encodes bytes as
+    bytes-safe round-trip â€” exec_script encodes bytes as
     `{"_b64": "..."}` sentinels, Agent 5 inflates them back to bytes
     before returning the result dict."""
     from puzzleeval.agents.implement_test_env import _inflate_b64_sentinels
     import base64
     raw_audio = b"\xff\xfb\x90\x00" + b"A" * 1024  # MP3-ish payload
     encoded = {"_b64": base64.b64encode(raw_audio).decode("ascii")}
-    # Round-trip the sentinel — must come back as exact bytes.
+    # Round-trip the sentinel â€” must come back as exact bytes.
     out = _inflate_b64_sentinels({
         "raw_response": {
             "audio_bytes": encoded,
@@ -970,27 +963,27 @@ def test_id3v2_strip_handles_real_openai_tts_header():
         f"bytes (expected {len(fake_frame)})"
     )
 
-    # No ID3v2 → pass through.
+    # No ID3v2 â†’ pass through.
     no_tag = b"\xff\xfb\x90\x00" + b"B" * 200
     assert _strip_id3v2_header(no_tag) == no_tag
 
-    # Malformed ID3v2 (size byte with high bit set) → leave alone.
+    # Malformed ID3v2 (size byte with high bit set) â†’ leave alone.
     bad_size = b"ID3\x04\x00\x00\xff\xff\xff\xff" + b"C" * 100
     assert _strip_id3v2_header(bad_size) == bad_size
 
-    # ID3v1 trailer (TAG + 125 bytes at end) — strip.
+    # ID3v1 trailer (TAG + 125 bytes at end) â€” strip.
     body_with_v1 = fake_frame + b"TAG" + b"D" * 125
     assert _strip_id3v1_trailer(body_with_v1) == fake_frame
-    # No trailer → pass through.
+    # No trailer â†’ pass through.
     assert _strip_id3v1_trailer(fake_frame) == fake_frame
 
 
 def test_voice_plugin_session_dir_is_thread_local():
-    """Regression: voice_dual_6 + voice_dual_7 — Agent 5 runs
+    """Regression: voice_dual_6 + voice_dual_7 â€” Agent 5 runs
     candidates in parallel via ThreadPoolExecutor. Each worker called
     `plugin.set_session_dir(<sandbox>/voice/)` for its own candidate.
     The plugin is a module-level singleton, so the LAST set_session_dir
-    won for both workers → BOTH candidates' caller+agent audio landed
+    won for both workers â†’ BOTH candidates' caller+agent audio landed
     in one folder (whichever set it last). Real-run evidence:
     voice_dual_6's audio_paths showed `elevenlabs_voice_stack/voice/`
     for OpenAI Voice Stack's audio. Fix: thread-local session_dir so
@@ -1034,7 +1027,7 @@ def test_voice_plugin_responder_derives_content_type_from_audio_format():
     (corrupted playback) AND the merger refused to concat the
     mixed-extension caller(.mp3)+agent(.wav) sets, producing a
     caller-only "merged conversation". General fix: derive
-    content_type from audio_format ("mp3" → "audio/mpeg") when not
+    content_type from audio_format ("mp3" â†’ "audio/mpeg") when not
     explicitly provided."""
     src = (
         ROOT / "puzzleeval" / "tool_plugins" / "voice_realtime.py"
@@ -1066,7 +1059,7 @@ def test_voice_plugin_extracts_audio_from_base64_string():
 
 
 def test_agent5_skips_pre_call_for_multi_call_modalities():
-    """Regression: voice_dual_6 — Agent 5 was pre-calling
+    """Regression: voice_dual_6 â€” Agent 5 was pre-calling
     ``harness.run(adapted_input)`` ONCE per test case to seed the
     evaluator's `response` argument. For multi-call modalities (voice
     plugin owns the loop), the adapted input lacks audio_url +
@@ -1076,7 +1069,7 @@ def test_agent5_skips_pre_call_for_multi_call_modalities():
     harnesses (OpenAI) tolerated the bogus pre-call and got plugin
     eval. Fix: detect multi-call modality (input_type or output_type
     in {conversation, voice_conversation, voice_turn}) and SKIP the
-    pre-call — synthesize a placeholder so the plugin's drive_loop
+    pre-call â€” synthesize a placeholder so the plugin's drive_loop
     owns every real harness invocation."""
     src = _agent5_combined_source()
     assert "multi_call_pre_call_skipped" in src, (
@@ -1094,9 +1087,9 @@ def test_agent5_sets_voice_session_dir_before_evaluation():
     ``runs/<trace_id>/harnesses/<slug>/voice/``. Reason: the prior
     wiring only set session_dir on the plugin during INPUT synthesis
     (``_synthesize_test_input_via_plugin``), which is skipped for
-    ``input_type=conversation`` tests — drive_conversation runs INSIDE
+    ``input_type=conversation`` tests â€” drive_conversation runs INSIDE
     evaluate_output, with no session_dir set. The backend's audio
-    streamer refuses paths outside its allowed runs roots → frontend
+    streamer refuses paths outside its allowed runs roots â†’ frontend
     silently can't play those clips. Fix: set session_dir on every
     plugin that supports it BEFORE every candidate's test execution
     so synthesis + multi-turn drive both write into the run dir."""
@@ -1113,7 +1106,7 @@ def test_agent5_sets_voice_session_dir_before_evaluation():
 
 
 def test_tool_runner_direct_invokes_owner_plugin_for_multi_call_modality():
-    """Regression: trace voice_dual_4 — same input, same eligible
+    """Regression: trace voice_dual_4 â€” same input, same eligible
     plugins, BUT Claude's tool_runner non-deterministically picked
     voice_realtime for ElevenLabs (5 turns driven, verdict promoted)
     while skipping it for OpenAI (collapsed to llm_judge fallback,
@@ -1140,7 +1133,7 @@ def test_tool_runner_direct_invokes_owner_plugin_for_multi_call_modality():
 
 
 def test_orphan_scrubber_matches_advisor_tool_result_by_suffix():
-    """Regression: trace voice_dual_3 — the orphan-server-tool-use
+    """Regression: trace voice_dual_3 â€” the orphan-server-tool-use
     scrubber matched ``web_search_tool_result``/``web_fetch_tool_result``
     explicitly, but missed ``advisor_tool_result`` because the SDK
     uses a per-tool-family type literal (``<name>_tool_result``). The
@@ -1164,7 +1157,7 @@ def test_orphan_scrubber_matches_advisor_tool_result_by_suffix():
     assert (
         '("web_search_tool_result", "web_fetch_tool_result",'
         not in src
-    ), "Old explicit-list classifier still present — would re-bug."
+    ), "Old explicit-list classifier still present â€” would re-bug."
 
 
 def test_agent5_builder_scrubs_orphan_server_tool_use_every_turn():
@@ -1227,7 +1220,7 @@ def test_tool_runner_promotes_plugin_verdict_when_claude_skips_score_verdict():
     )
     assert "_CapturedPluginVerdict" in src
     # When a plugin returns EvaluationResult(fallback_reason=None) with
-    # non-empty reasoning, we promote it — the positive invariant the
+    # non-empty reasoning, we promote it â€” the positive invariant the
     # promotion branch guards.
     assert "fallback_reason is None" in src and "reasoning.strip()" in src
 
@@ -1236,7 +1229,7 @@ def test_voice_plugin_emits_merged_conversation_audio_path():
     """Regression: trace voice_debug_6 produced 2 per-turn audio files
     and the user wanted to hear the full call as one file. After
     drive_conversation, the plugin merges caller_0/agent_0/caller_1/
-    agent_1/… into a single ``conversation_<token>.<ext>`` clip and
+    agent_1/â€¦ into a single ``conversation_<token>.<ext>`` clip and
     surfaces it as the FIRST artifact with role='conversation'. Guard
     that the merge function exists + is invoked + the merged artifact
     is featured in audio_paths."""
@@ -1275,7 +1268,7 @@ def test_voice_plugin_emits_merged_conversation_audio_path():
 
 
 def test_voice_plugin_merge_returns_none_on_mixed_extensions():
-    """The merger refuses mixed extensions — concatenating an mp3 with
+    """The merger refuses mixed extensions â€” concatenating an mp3 with
     a wav produces garbage. Return None and let callers keep per-turn
     artifacts instead of creating a corrupt file."""
     from puzzleeval.tool_plugins.voice_realtime import VoiceRealtimePlugin
@@ -1297,7 +1290,7 @@ def test_voice_plugin_merge_returns_none_on_mixed_extensions():
 def test_audio_route_allowlist_includes_cli_dev_root():
     """Regression: the backend audio-streaming route used to only serve
     files under ``puzzleeval-api/runs``. CLI-driven runs land under
-    ``PuzzleEval-local/runs`` and got 403 — the frontend silently
+    ``PuzzleEval-local/runs`` and got 403 â€” the frontend silently
     couldn't play their audio. The allowlist must include both roots
     plus any extras from ``PUZZLEEVAL_EXTRA_RUNS_ROOTS``."""
     src = (
@@ -1340,21 +1333,21 @@ def test_credential_resolver_unions_cross_provider_registry_entries():
     assert creds.get("ELEVENLABS_API_KEY") == "el_key"
     # OpenAI matches because "OpenAI" appears in validation_notes.
     assert creds.get("OPENAI_API_KEY") == "oa_key"
-    # Mindee never appears in searchable surface → NOT included.
+    # Mindee never appears in searchable surface â†’ NOT included.
     assert "MINDEE_API_KEY" not in creds
 
 
 def test_voice_plugin_extracts_script_from_json_string_dict():
     """Regression: trace voice_debug_3. ``TestCase.expected_output`` is
-    typed ``str`` — multi-turn voice tests serialize the script as a
+    typed ``str`` â€” multi-turn voice tests serialize the script as a
     JSON string. The extractor used to parse ONLY list-shaped strings
     (starting with ``[``), not the natural dict-shaped form
     (``'{"conversation_script": [...]}'``). Every voice test fell
-    through to single-turn evaluation → score 0.1 regardless of
+    through to single-turn evaluation â†’ score 0.1 regardless of
     content. Must handle BOTH shapes."""
     from puzzleeval.tool_plugins.voice_realtime import _extract_conversation_script
 
-    # Dict-wrapped JSON string — the shape that real tests use.
+    # Dict-wrapped JSON string â€” the shape that real tests use.
     dict_json = (
         '{"conversation_script": ['
         '{"user_text": "hi", "expected_agent_contains": "hello"}'
@@ -1364,7 +1357,7 @@ def test_voice_plugin_extracts_script_from_json_string_dict():
     assert isinstance(out, list) and len(out) == 1
     assert out[0]["user_text"] == "hi"
 
-    # List-shaped JSON string — legacy shape, still supported.
+    # List-shaped JSON string â€” legacy shape, still supported.
     list_json = (
         '[{"user_text": "hi", "expected_agent_contains": "hello"},'
         ' {"user_text": "bye", "expected_agent_contains": "goodbye"}]'
@@ -1380,12 +1373,12 @@ def test_voice_plugin_extracts_script_from_json_string_dict():
 
 def test_agent5_harness_runner_threads_input_context_per_test_case():
     """Regression: trace voice_debug_3. The harness runner closure used
-    to be hoisted out of the per-test loop for performance — but that
+    to be hoisted out of the per-test loop for performance â€” but that
     meant every test case got the SAME runner, so the user's
     per-test-case ``input_context`` (system prompt / persona /
     grounding) never reached the harness on multi-turn plugin-driven
     runs. voice_realtime builds its per-turn payload from scratch
-    ({audio_url, turn_index, session_state}) — anything not in the
+    ({audio_url, turn_index, session_state}) â€” anything not in the
     payload the plugin forwards disappears. Fix: wrap the runner per
     test case, merging this case's ``input_context`` into every payload
     the plugin forwards. Guard: the source must mention the per-test
@@ -1400,7 +1393,7 @@ def test_agent5_harness_runner_threads_input_context_per_test_case():
     # long as both runner closures inject input_context.
     count_legacy = src.count('merged["input_context"] = _ctx')
     count_new = src.count('_merge_with_default_input_context(')
-    # Helper definition (1) + two closure call sites (2) ≥ 3 in the new
+    # Helper definition (1) + two closure call sites (2) â‰¥ 3 in the new
     # pattern; OR the legacy pattern appears at least twice.
     assert (count_legacy >= 2) or (count_new >= 3), (
         f"Expected the input_context-merging runner wrapper in BOTH "
@@ -1413,7 +1406,7 @@ def test_agent5_harness_runner_threads_input_context_per_test_case():
 def test_builder_prompt_teaches_harness_to_read_input_context_instructions():
     """Regression: trace voice_debug_3 built a harness that looked for
     input_context['system_prompt'] but not input_context['instructions']
-    — the canonical key the voice plugin uses. With the runner wrapper
+    â€” the canonical key the voice plugin uses. With the runner wrapper
     shipping ``input_context`` on every turn, the builder prompt must
     explicitly teach the harness to read ``input_context['instructions']``
     first, aliased to common synonyms, and refuse to hardcode a
@@ -1421,8 +1414,8 @@ def test_builder_prompt_teaches_harness_to_read_input_context_instructions():
     from puzzleeval.agents.implement_test_env import _build_initial_message
     # The prompt-extension lives inside the test-case-forms block
     # built by _build_initial_message when multi-call modalities are
-    # present. Grep the source directly for the invariant — the
-    # MULTI-CALL HARNESS CONTRACT must teach the instructions keys.
+    # present. Grep the source directly for the invariant â€” the
+    # Conversation runtime/evidence note must teach the instructions keys.
     src = _agent5_combined_source()
     # Canonical key is "instructions".
     assert "input_context['instructions']" in src
@@ -1444,11 +1437,11 @@ def test_validate_agent5_accepts_none_agent4_output():
     ``AttributeError: 'NoneType' object has no attribute 'validated_candidates'``
     because the cross-agent consistency check dereferenced
     ``agent4_output.validated_candidates`` unconditionally. The validator
-    must tolerate ``agent4_output=None`` — the check is observational,
+    must tolerate ``agent4_output=None`` â€” the check is observational,
     not a correctness gate."""
     from puzzleeval.validators import validate_agent5_output
     from puzzleeval.schemas import Agent5Result, TestHarness
-    # Minimal successful harness — no Agent 4 context available.
+    # Minimal successful harness â€” no Agent 4 context available.
     h = TestHarness(
         candidate_name="voice-agent-x",
         provider="OpenAI",
@@ -1526,7 +1519,7 @@ def test_agent3_validator_backfills_empty_coverage_summary():
     agent3 = Agent3Result(
         test_cases=tc_list,
         generation_notes="",
-        coverage_summary={},  # The bug — empty.
+        coverage_summary={},  # The bug â€” empty.
     )
     r = validate_agent3_output(agent3, agent1)
     # Validator mutates `result.coverage_summary` in place.
@@ -1537,7 +1530,7 @@ def test_agent3_validator_backfills_empty_coverage_summary():
 
 
 # ---------------------------------------------------------------------------
-# Agent 4 → Agent 5 handoff (deep-verify + atlas staging REMOVED)
+# Agent 4 â†’ Agent 5 handoff (deep-verify + atlas staging REMOVED)
 # ---------------------------------------------------------------------------
 #
 # Agent 4 is now shallow verify only (exists / blocked). Agent 5 does its
@@ -1569,7 +1562,7 @@ def test_agent5_no_atlas_staging_block():
 
 
 # ---------------------------------------------------------------------------
-# User selection filter → Agent 4 sync
+# User selection filter â†’ Agent 4 sync
 # ---------------------------------------------------------------------------
 
 
@@ -1595,7 +1588,7 @@ def test_agent1_schema_carries_explicit_candidates_list():
     # JSON round-trip must preserve the list.
     round_tripped = UserUnderstandingOutput.model_validate_json(obj.model_dump_json())
     assert round_tripped.explicit_candidates == ["OpenAI", "ElevenLabs"]
-    # Default is the empty list — no backcompat break for pre-fix saved artifacts.
+    # Default is the empty list â€” no backcompat break for pre-fix saved artifacts.
     obj_default = UserUnderstandingOutput(
         summary="foo",
         sub_tasks=[],
@@ -1632,7 +1625,7 @@ def test_inject_explicit_candidates_adds_missing_and_skips_present():
         search_approach="web",
         coverage_notes="",
     )
-    # "OpenAI" substring-matches; "ElevenLabs" doesn't → inject one.
+    # "OpenAI" substring-matches; "ElevenLabs" doesn't â†’ inject one.
     result = inject_explicit_candidates(
         pool,
         explicit_names=["OpenAI", "ElevenLabs"],
@@ -1650,7 +1643,7 @@ def test_inject_explicit_candidates_adds_missing_and_skips_present():
 
 
 def test_inject_explicit_candidates_empty_passthrough():
-    """No explicit names → identity."""
+    """No explicit names â†’ identity."""
     from puzzleeval.agents.research import inject_explicit_candidates
     from puzzleeval.schemas import Agent2Result
 
@@ -1658,10 +1651,11 @@ def test_inject_explicit_candidates_empty_passthrough():
     assert inject_explicit_candidates(pool, []) is pool
 
 
-def test_agent5_filters_out_uncredentialed_candidates(tmp_path, monkeypatch):
-    """Credential-gated selection: candidates without a key in
-    provider_registry.json (and not "no_auth") get filtered out BEFORE
-    Agent 5 builds. A build that can't authenticate is a guaranteed waste.
+def test_agent5_rejects_uncredentialed_build_list_contract(tmp_path, monkeypatch):
+    """Agent 5 no longer filters credentials; it rejects invalid build lists.
+
+    Credential-gated selection happens in the orchestrator before Agent 5.
+    Directly passing an uncredentialed candidate is a contract failure.
     """
     from puzzleeval.agents.implement_test_env import run_implement_test_env_agent
     from puzzleeval.schemas import (
@@ -1670,7 +1664,7 @@ def test_agent5_filters_out_uncredentialed_candidates(tmp_path, monkeypatch):
     )
     from unittest.mock import patch
 
-    # Empty registry → nothing is credentialed.
+    # Empty registry â†’ nothing is credentialed.
     monkeypatch.setenv("PUZZLEEVAL_REGISTRY_PATH", str(tmp_path / "empty.json"))
     (tmp_path / "empty.json").write_text('{"providers": {}}', encoding="utf-8")
 
@@ -1704,13 +1698,15 @@ def test_agent5_filters_out_uncredentialed_candidates(tmp_path, monkeypatch):
     with patch("puzzleeval.agents.implement_test_env.anthropic.Anthropic"):
         result = run_implement_test_env_agent(inp)
 
-    # No harnesses built — credential gate filtered the candidate out.
+    # No harnesses built. Agent 5 reports the invalid build-list contract
+    # instead of silently filtering/reselecting.
     assert len(result.harnesses) == 0
-    assert len(result.failed_harnesses) == 0
+    assert len(result.failed_harnesses) == 1
+    assert result.failed_harnesses[0].failure_category == "invalid_build_candidate_contract"
     assert result.total_candidates_attempted == 0
 
 
-# is_pass_decision / _atlas_from_spec_text tests removed — the deep-verify
+# is_pass_decision / _atlas_from_spec_text tests removed â€” the deep-verify
 # runner that provided both functions was deleted when Agent 4 became
 # shallow-verify-only.
 
@@ -1721,7 +1717,7 @@ def test_audio_route_registered_before_run_id_route():
     audio endpoint returns 404 "Run not found". That was why every
     voice recording silently failed to play in the frontend.
 
-    Source-grep guard — watches for the correct ordering in the
+    Source-grep guard â€” watches for the correct ordering in the
     routes file without standing up the full app.
     """
     runs_py = (
@@ -1777,7 +1773,7 @@ class TestVoicePCM16StringNormalization:
     a bytes-like object is required, not 'str'``, and wave's
     ``writeframes`` raises TypeError. Both paths caught the exception,
     ``audio_bytes_out`` stayed as the string, ``audio_content_type``
-    stayed None, and downstream never saved any agent audio — all 8
+    stayed None, and downstream never saved any agent audio â€” all 8
     voice tests scored 0/8 with zero ``response_*`` files on disk.
 
     Fix: base64-decode at the TOP of the PCM16 branch, before pydub
@@ -1800,7 +1796,7 @@ class TestVoicePCM16StringNormalization:
         window = src[max(0, idx - 1500):idx]
         assert "b64decode" in window, (
             "Responder must base64-decode audio_bytes_out before the "
-            "pcm16 pydub/wave branch — otherwise strings get silently "
+            "pcm16 pydub/wave branch â€” otherwise strings get silently "
             "mishandled and agent audio vanishes."
         )
         assert "isinstance(audio_bytes_out, str)" in window, (
@@ -1832,12 +1828,12 @@ class TestVoicePCM16StringNormalization:
             decoded, sample_rate=24000, channels=1,
         )
         if encoded_mp3 is not None:
-            # pydub + ffmpeg available → real MP3 bytes (ID3 or frame sync)
+            # pydub + ffmpeg available â†’ real MP3 bytes (ID3 or frame sync)
             assert encoded_mp3[:3] == b"ID3" or encoded_mp3[:2] in (
                 b"\xff\xfb", b"\xff\xf3", b"\xff\xf2",
             ), "encoded bytes must be valid MP3 framing"
         else:
-            # pydub missing → fallback to WAV must work
+            # pydub missing â†’ fallback to WAV must work
             wav = _wrap_pcm16_as_wav(decoded, sample_rate=24000, channels=1)
             assert wav[:4] == b"RIFF", "WAV fallback must produce RIFF header"
 
@@ -1846,7 +1842,7 @@ class TestVoicePCM16StringNormalization:
         harness that saves audio to a temp WAV and returns
         `raw_response["audio_path"]` (instead of the b64-string
         `audio_bytes` pattern). The voice plugin responder only knew
-        about audio_bytes/twiml/ncco — the audio_path branch silently
+        about audio_bytes/twiml/ncco â€” the audio_path branch silently
         fell through, zero agent audio saved, scores 0/8.
 
         Both shapes are reasonable harness choices (some devs prefer
@@ -1866,7 +1862,7 @@ class TestVoicePCM16StringNormalization:
             "Real-run trace abb00832 showed OpenAI harnesses choose this "
             "shape, producing 0 agent audio when unhandled."
         )
-        # Must read the file + map extension → content_type.
+        # Must read the file + map extension â†’ content_type.
         assert "Harness-on-disk return shape" in src
 
     def test_responder_audio_content_type_set_after_successful_pcm16_encode(
@@ -1876,7 +1872,7 @@ class TestVoicePCM16StringNormalization:
         sets ``ct = 'audio/mpeg'``, and after _wrap_pcm16_as_wav sets
         ``ct = 'audio/wav'``. Otherwise the downstream saver falls
         through to 'audio/wav' default which mislabels the MP3 we just
-        encoded — future tooling that routes by content_type would pick
+        encoded â€” future tooling that routes by content_type would pick
         the wrong decoder."""
         src = (
             ROOT
@@ -1903,7 +1899,7 @@ class TestReadBeforePatchGate:
     We mirror this gate in `_tool_patch_file` via a per-build
     `read_state: dict[str, float]` threaded through `_dispatch_tool`.
     Forces the builder to plan patches with current file contents in
-    memory — eliminates the iterative-micro-patch waste pattern
+    memory â€” eliminates the iterative-micro-patch waste pattern
     observed in trace 28cb2648 (5 consecutive patches = $1.67 burned)."""
 
     def test_patch_before_read_returns_error(self, tmp_path):
@@ -1937,7 +1933,7 @@ class TestReadBeforePatchGate:
         assert target.read_text(encoding="utf-8") == "new content\n"
 
     def test_patch_after_write_succeeds_without_separate_read(self, tmp_path):
-        """Write populates read_state — immediate same-turn patch is fine
+        """Write populates read_state â€” immediate same-turn patch is fine
         because the caller knows what was just written. Matches Claude
         Code's FileWriteTool behavior."""
         from puzzleeval.agents.implement_test_env import (
@@ -1955,7 +1951,7 @@ class TestReadBeforePatchGate:
         assert "Patched" in result
 
     def test_consecutive_patches_same_turn_ok(self, tmp_path):
-        """Two patches in a row to the same file in ONE turn are fine —
+        """Two patches in a row to the same file in ONE turn are fine â€”
         the first patch updates read_state so the second doesn't trip
         the staleness check."""
         from puzzleeval.agents.implement_test_env import (
@@ -1978,7 +1974,7 @@ class TestReadBeforePatchGate:
 
     def test_legacy_callers_without_read_state_unaffected(self, tmp_path):
         """When `read_state=None` (tests, direct callers), the gate does
-        NOT fire — preserves backward compat for 828+ existing tests."""
+        NOT fire â€” preserves backward compat for 828+ existing tests."""
         from puzzleeval.agents.implement_test_env import _tool_patch_file
         target = tmp_path / "x.py"
         target.write_text("old\n", encoding="utf-8")
@@ -2005,15 +2001,16 @@ class TestSpecConformingContextManagement:
       - ONE consolidated `clear_tool_uses_20250919` edit
       - `clear_tool_inputs: False` (safer default: preserves tool call
         parameters, clears only result bodies)
-      - `clear_at_least: {input_tokens: 10000}` — per docs, ensures
+      - `clear_at_least: {input_tokens: 10000}` â€” per docs, ensures
         every clearing event saves more tokens than the cache-rewrite
         cost. Without it, small clears can be net-negative with
         message-level caching.
-      - `keep: {type: tool_uses, value: 3}` — explicit default; most-
+      - `keep: {type: tool_uses, value: 3}` â€” explicit default; most-
         recent tool interactions preserved.
-      - `exclude_tools: [write_file, patch_file, advisor]` — edit-tool
-        history and strategic guidance are never cleared.
-      - Separate `clear_thinking_20251015: keep: all` edit — preserves
+      - `exclude_tools` includes every locally dispatched Agent 5 custom
+        tool plus advisor â€” local tool/result pairing, edit history, and
+        strategic guidance are never cleared.
+      - Separate `clear_thinking_20251015: keep: all` edit â€” preserves
         ALL thinking blocks to maximize cache hits (docs quote:
         "preserve all thinking blocks by setting keep: all").
     """
@@ -2033,11 +2030,11 @@ class TestSpecConformingContextManagement:
             f"this as `boolean` (default false). A list shape is "
             f"undefined behavior."
         )
-        # Our preferred value is False — preserves call-parameter
+        # Our preferred value is False â€” preserves call-parameter
         # context so Claude still sees what it did even after results
         # are cleared.
         assert '"clear_tool_inputs": False' in window, (
-            f"Preferred default is False (safer — keeps tool CALL "
+            f"Preferred default is False (safer â€” keeps tool CALL "
             f"parameters visible so Claude can reason about its own "
             f"action history). Found: {window!r}."
         )
@@ -2054,7 +2051,7 @@ class TestSpecConformingContextManagement:
         the combination net-positive."""
         src = _agent5_combined_source()
         assert '"clear_at_least":' in src, (
-            "clear_at_least guard missing — context clearing could "
+            "clear_at_least guard missing â€” context clearing could "
             "fire when savings are less than cache invalidation cost. "
             "Add `clear_at_least: {type: input_tokens, value: N}` to "
             "the clear_tool_uses edit."
@@ -2071,9 +2068,11 @@ class TestSpecConformingContextManagement:
         idx = src.find('"exclude_tools":')
         assert idx > 0
         window = src[idx:idx + 400]
-        for tool in ("write_file", "patch_file", "advisor"):
+        from puzzleeval.agents.agent5.tools import CUSTOM_TOOL_NAMES
+
+        for tool in sorted(set(CUSTOM_TOOL_NAMES) | {"advisor"}):
             assert f'"{tool}"' in window, (
-                f"{tool} must be in exclude_tools — Claude needs to "
+                f"{tool} must be in exclude_tools â€” Claude needs to "
                 f"see its edit history / strategic guidance to maintain "
                 f"file-state awareness across long builds."
             )
@@ -2086,10 +2085,10 @@ class TestSpecConformingContextManagement:
 
         Without this edit, the default ('keep only last turn's
         thinking') would invalidate the message cache at every
-        thinking-block boundary — defeating the message-level cache."""
+        thinking-block boundary â€” defeating the message-level cache."""
         src = _agent5_combined_source()
         assert '"clear_thinking_20251015"' in src, (
-            "Missing clear_thinking_20251015 edit — default thinking "
+            "Missing clear_thinking_20251015 edit â€” default thinking "
             "clearing invalidates message cache at every thinking "
             "boundary. Add an edit with keep: 'all' to preserve cache."
         )
@@ -2108,7 +2107,7 @@ class TestSpecConformingContextManagement:
 
     def test_pipeline_runner_records_agents_into_pipeline_summary(self):
         """Real run e21f6077 exposed that `pipeline_summary.json.agents`
-        was always `[]` on FastAPI backend runs — the PipelineRun
+        was always `[]` on FastAPI backend runs â€” the PipelineRun
         object was created and finalized, but `save_agent_result` was
         never called, so the summary had empty agents and
         ``total_cost_usd=0`` even when ``state.total_cost_usd`` showed
@@ -2131,10 +2130,10 @@ class TestSpecConformingContextManagement:
             "pipeline_run.agents so pipeline_summary.json shows the "
             "per-agent cost breakdown instead of empty agents list."
         )
-        # Agent 1 also needs a record — it runs in the /chat phase
+        # Agent 1 also needs a record â€” it runs in the /chat phase
         # before _record_agent_cost_and_emit fires for later agents.
         assert 'name="agent_1"' in src, (
-            "Agent 1 must also be appended to pipeline_run.agents — "
+            "Agent 1 must also be appended to pipeline_run.agents â€” "
             "it completes in the /chat conversation phase before the "
             "pipeline worker's _record_agent_cost_and_emit path fires."
         )
@@ -2303,13 +2302,13 @@ class TestMessageLevelPromptCaching:
         importlib.reload(_c)
         assert hasattr(_c, "CACHE_MESSAGES_ENABLED")
         assert _c.CACHE_MESSAGES_ENABLED is True, (
-            "CACHE_MESSAGES_ENABLED must default to True — the docs-"
+            "CACHE_MESSAGES_ENABLED must default to True â€” the docs-"
             "verified cache savings are sizeable and the worst case "
             "(cache miss) matches pre-change cost."
         )
         assert hasattr(_c, "CACHE_CLEAR_AT_LEAST_TOKENS")
         assert _c.CACHE_CLEAR_AT_LEAST_TOKENS >= 1, (
-            "CACHE_CLEAR_AT_LEAST_TOKENS must be positive — the whole "
+            "CACHE_CLEAR_AT_LEAST_TOKENS must be positive â€” the whole "
             "point is to skip small clears that cost more in cache "
             "invalidation than they save."
         )
@@ -2397,13 +2396,14 @@ class TestMessageLevelPromptCaching:
 
 class TestConversationMergeNormalizesSampleRate:
     """Real-run trace 28cb2648: caller TTS produced 44.1 kHz MP3, agent
-    PCM16 → pydub MP3 produced 24 kHz, byte-concat resulted in playback
+    PCM16 â†’ pydub MP3 produced 24 kHz, byte-concat resulted in playback
     pausing at the first sample-rate transition (~4 seconds in). Fix:
     decode every per-turn file via pydub, resample to a uniform format
     (first segment's rate + channels), concatenate, and export. Byte-
     concat path stays as fallback when pydub/ffmpeg unavailable."""
 
     def test_merger_via_pydub_normalizes_to_uniform_format(self, tmp_path):
+        pytest.importorskip("pydub")
         from pydub import AudioSegment
         from pydub.generators import Sine
         from puzzleeval.tool_plugins.voice_realtime import VoiceRealtimePlugin
@@ -2445,7 +2445,7 @@ class TestConversationMergeNormalizesSampleRate:
         """When pydub raises (ffmpeg missing, corrupt file, etc), the
         byte-concat fallback still produces *some* file rather than None."""
         from puzzleeval.tool_plugins.voice_realtime import VoiceRealtimePlugin
-        # Two empty .mp3 files — pydub will refuse them, so fallback
+        # Two empty .mp3 files â€” pydub will refuse them, so fallback
         # path runs.
         a = tmp_path / "caller_session-t0.mp3"
         b = tmp_path / "response_session-t0_x.mp3"
@@ -2464,7 +2464,7 @@ class TestConversationMergeNormalizesSampleRate:
         )
         assert merged is not None, (
             "Byte-concat fallback must produce SOME file even when "
-            "pydub fails — degraded but not none."
+            "pydub fails â€” degraded but not none."
         )
 
     def test_merger_path_grep_for_pydub_helper(self):
@@ -2491,9 +2491,9 @@ class TestDefaultInputContextFallback:
     """Real-run trace f1312253 (latest run, post-Option-A): the agent
     audio kept disappearing because:
       1. Agent 3's prompt rule says voice tests MUST emit
-         `input_context.instructions` — but Agent 3 emitted `null`.
+         `input_context.instructions` â€” but Agent 3 emitted `null`.
       2. Agent 5's builder prompt teaches a DEFAULT_INSTRUCTIONS
-         fallback IN the harness — but the harness Agent 5 wrote
+         fallback IN the harness â€” but the harness Agent 5 wrote
          literally contained `if not instructions: return _fail(
          'missing system prompt in input_context', t0)`.
 
@@ -2504,12 +2504,12 @@ class TestDefaultInputContextFallback:
     BEFORE the harness sees the payload. The runner is OUR code; we
     can guarantee adherence. The harness's hard-fail check passes
     because we always supply instructions. Test-case input_context
-    still wins when present — the default only fires on the explicit
+    still wins when present â€” the default only fires on the explicit
     null path."""
 
     def test_default_input_context_fills_every_alias(self):
         """The default must populate EVERY system-prompt alias the
-        observed harnesses accept — not just `instructions`. ElevenLabs
+        observed harnesses accept â€” not just `instructions`. ElevenLabs
         + OpenAI both walk the same alias list, but a future provider
         could read any of them first."""
         from puzzleeval.agents.implement_test_env import (
@@ -2519,7 +2519,7 @@ class TestDefaultInputContextFallback:
         assert isinstance(ctx, dict)
         for alias in _SYSTEM_PROMPT_ALIASES:
             assert alias in ctx, (
-                f"Default must fill alias {alias!r} — both observed voice "
+                f"Default must fill alias {alias!r} â€” both observed voice "
                 f"harnesses (OpenAI Realtime + ElevenLabs Conversational AI) "
                 f"walk this list in order."
             )
@@ -2545,7 +2545,7 @@ class TestDefaultInputContextFallback:
 
         # Case 2: Agent 3 emitted other keys but no system-prompt field.
         # Other keys must be preserved AND every system-prompt alias must
-        # be filled from the default — otherwise the harness's
+        # be filled from the default â€” otherwise the harness's
         # `_extract_system_prompt` walks the list and returns None.
         out = _merge_with_default_input_context(
             {"persona_name": "Vera", "scenario_id": "tc-001"}, default,
@@ -2585,7 +2585,7 @@ class TestDefaultInputContextFallback:
         assert n >= 3, (
             f"Expected the merge helper invoked in both runner closures "
             f"(plus its definition); found {n} occurrences. Runner-level "
-            f"merge is what makes the fix general — not the simpler "
+            f"merge is what makes the fix general â€” not the simpler "
             f"presence check."
         )
 
@@ -2600,8 +2600,8 @@ class TestModalityContractInjection:
     skills-style loader (see CLAUDE.md AD-002 revisit trigger).
 
     Real-run trace abb00832: Agent 5 chose to return audio via
-    `raw_response.audio_path` (file path) — the plugin only knew about
-    `audio_bytes` (b64 string) — silent fall-through, 0 agent audio.
+    `raw_response.audio_path` (file path) â€” the plugin only knew about
+    `audio_bytes` (b64 string) â€” silent fall-through, 0 agent audio.
     The voice contract enumerates BOTH valid shapes so the builder
     can't accidentally pick a third."""
 
@@ -2610,14 +2610,15 @@ class TestModalityContractInjection:
         # Both shape names must appear so Claude knows the menu.
         assert "audio_bytes" in _VOICE_HARNESS_CONTRACT
         assert "audio_path" in _VOICE_HARNESS_CONTRACT
-        # Hard rule numbering — uniquely identifies the section so future
-        # rewrites can't accidentally drop the rule list.
-        assert "HARD RULES" in _VOICE_HARNESS_CONTRACT
+        # Outcome-contract heading uniquely identifies the section so future
+        # rewrites can't accidentally restore a numbered implementation recipe.
+        assert "Voice Harness Outcome Contract" in _VOICE_HARNESS_CONTRACT
+        assert "persistent_worker" in _VOICE_HARNESS_CONTRACT
         # The forbidden-keys callout must enumerate the alternatives we've
         # seen Claude invent so the next harness author doesn't try them.
         for forbidden in ("audio_url", "audio_data"):
             assert forbidden in _VOICE_HARNESS_CONTRACT, (
-                f"Contract must explicitly forbid {forbidden} — listed "
+                f"Contract must explicitly forbid {forbidden} â€” listed "
                 f"as a known anti-pattern in the contract docstring."
             )
 
@@ -2631,7 +2632,7 @@ class TestModalityContractInjection:
             {"input_type": "voice_conversation", "output_type": "voice_conversation"},
         ]
         rendered = _render_builder_prompt(BUILDER_SYSTEM_PROMPT, test_cases=voice_tests)
-        assert "Voice harness return-shape contract" in rendered
+        assert "Voice Harness Outcome Contract" in rendered
         assert "audio_bytes" in rendered
         assert "audio_path" in rendered
         # Placeholder is fully replaced.
@@ -2639,7 +2640,7 @@ class TestModalityContractInjection:
 
     def test_non_voice_modality_skips_contract(self):
         """OCR / code-gen / chat-text / generic tests do NOT need the
-        voice contract — and shouldn't pay the prompt-token tax for it."""
+        voice contract â€” and shouldn't pay the prompt-token tax for it."""
         from puzzleeval.agents.implement_test_env import (
             BUILDER_SYSTEM_PROMPT, _render_builder_prompt,
         )
@@ -2649,9 +2650,9 @@ class TestModalityContractInjection:
             [{"input_type": "text", "output_type": "free_text"}],
         ):
             rendered = _render_builder_prompt(BUILDER_SYSTEM_PROMPT, test_cases=non_voice)
-            assert "Voice harness return-shape contract" not in rendered, (
+            assert "Voice Harness Outcome Contract" not in rendered, (
                 f"Non-voice test {non_voice} must NOT inject the voice "
-                f"contract — wastes ~600 tokens per builder turn."
+                f"contract â€” wastes ~600 tokens per builder turn."
             )
             # Placeholder still cleanly stripped to empty.
             assert "__MODALITY_CONTRACT__" not in rendered
@@ -2665,11 +2666,11 @@ class TestModalityContractInjection:
         for empty in (None, [], ()):
             rendered = _render_builder_prompt(BUILDER_SYSTEM_PROMPT, test_cases=empty)
             assert "__MODALITY_CONTRACT__" not in rendered
-            assert "Voice harness return-shape contract" not in rendered
+            assert "Voice Harness Outcome Contract" not in rendered
 
     def test_modality_contract_is_independent_of_os_rules(self):
         """The modality contract and the OS-specific rules are two
-        independent injection points — voice tests on Windows should
+        independent injection points â€” voice tests on Windows should
         get BOTH; voice tests on Linux should get the voice contract +
         Linux POSIX block; OCR tests on Windows should get the Windows
         block but no voice contract. This composability is what makes
@@ -2681,18 +2682,18 @@ class TestModalityContractInjection:
         voice_tests = [{"input_type": "voice_turn", "output_type": "audio_content"}]
         with unittest.mock.patch("sys.platform", "win32"):
             r = _render_builder_prompt(BUILDER_SYSTEM_PROMPT, test_cases=voice_tests)
-            assert "Voice harness return-shape contract" in r
+            assert "Voice Harness Outcome Contract" in r
             assert "Windows" in r
         with unittest.mock.patch("sys.platform", "linux"):
             r = _render_builder_prompt(BUILDER_SYSTEM_PROMPT, test_cases=voice_tests)
-            assert "Voice harness return-shape contract" in r
+            assert "Voice Harness Outcome Contract" in r
             assert "POSIX" in r
         with unittest.mock.patch("sys.platform", "win32"):
             r = _render_builder_prompt(
                 BUILDER_SYSTEM_PROMPT,
                 test_cases=[{"input_type": "document_content", "output_type": "structured_json"}],
             )
-            assert "Voice harness return-shape contract" not in r
+            assert "Voice Harness Outcome Contract" not in r
             assert "Windows" in r
 
 
@@ -2703,7 +2704,7 @@ class TestNoContainerThreadingAfterRevert:
     400 container_id cascades across every sub-agent, 3-5 min sandbox
     spin-up latency on Agent 2, silent hangs on non-beta
     messages.create when the `container` kwarg is passed. The basic
-    20250910 / 20250305 web tools don't create a sandbox — no container
+    20250910 / 20250305 web tools don't create a sandbox â€” no container
     threading needed anywhere. These tests lock in the revert so a
     future 'let's re-upgrade' pass doesn't silently reintroduce the
     container_id failure surface without intentional planning."""
@@ -2726,7 +2727,7 @@ class TestNoContainerThreadingAfterRevert:
         """Revert guard: if this fails because someone switched back to
         20260209, read research.py's top-of-file comment FIRST and be
         prepared to re-thread container_id through EVERY sub-agent
-        (builder, Agent 4 verify, ask_research, Agent 2 — the last
+        (builder, Agent 4 verify, ask_research, Agent 2 â€” the last
         requires moving to beta.messages.create first)."""
         for agent_file in (
             "implement_test_env.py", "screening.py", "research.py",
@@ -2734,11 +2735,11 @@ class TestNoContainerThreadingAfterRevert:
             src = (
                 ROOT / "puzzleeval" / "agents" / agent_file
             ).read_text(encoding="utf-8")
-            # Check the ACTIVE tool defs — not historical comments.
+            # Check the ACTIVE tool defs â€” not historical comments.
             # We grep for the literal `"type": "web_fetch_20260209"` pattern
             # that only appears in active code.
             assert '"type": "web_fetch_20260209"' not in src, (
-                f"{agent_file} uses web_fetch_20260209 — see research.py "
+                f"{agent_file} uses web_fetch_20260209 â€” see research.py "
                 f"top-of-file comment for why we reverted."
             )
             assert '"type": "web_search_20260209"' not in src, agent_file
@@ -2747,14 +2748,14 @@ class TestNoContainerThreadingAfterRevert:
 class TestExplicitCandidateRelevanceBoost:
     """Real-run trace d3b49875: user said 'Compare OpenAI and ElevenLabs
     voice stacks', Agent 1 correctly captured explicit_candidates=
-    ['OpenAI', 'ElevenLabs'], Agent 2 found both — but scored them
+    ['OpenAI', 'ElevenLabs'], Agent 2 found both â€” but scored them
     #6 (0.61) and #7 (0.445) because adoption_difficulty=easy packaged
     products outranked them for a non-technical user. Phase 7's
     default_picks showed ServiceAgent/iVAI/AI Front Desk. User had
     to manually override the selection to test what they asked for.
 
     Fix: inject_explicit_candidates now also BOOSTS relevance_score
-    to ≥0.95 on already-present candidates whose name substring-matches
+    to â‰¥0.95 on already-present candidates whose name substring-matches
     an explicit_candidates entry, not just injects new synthetic ones."""
 
     def test_explicit_boosts_existing_candidate_relevance(self):
@@ -2803,7 +2804,7 @@ class TestExplicitCandidateRelevanceBoost:
             found, ["OpenAI", "ElevenLabs"], blueprint_step_ids=["step_1"],
         )
         by_name = {c.name: c for c in result.candidates}
-        # Boosted to at least 0.95 — ensures Phase 7 default_picks surfaces
+        # Boosted to at least 0.95 â€” ensures Phase 7 default_picks surfaces
         # them above the 0.84 packaged products.
         assert by_name["OpenAI Realtime API"].relevance_score >= 0.95, (
             "Explicit 'OpenAI' must boost OpenAI Realtime API above 0.95 "
@@ -2819,7 +2820,7 @@ class TestExplicitCandidateRelevanceBoost:
         """Real-run trace 4068e872: user said 'compare OpenAI and
         ElevenLabs voice stacks', Agent 2 found both naturally at
         relevance 0.35 + 0.63. inject_explicit_candidates BOOSTED them
-        to 0.95 in memory — but pipeline_runner only saved state when
+        to 0.95 in memory â€” but pipeline_runner only saved state when
         NEW candidates were added (len increased). The boost was
         silently discarded, default_picks chose the top packaged
         products, user had to manually override. Fix: save state on
@@ -2841,7 +2842,7 @@ class TestExplicitCandidateRelevanceBoost:
         )
 
     def test_explicit_already_high_score_unchanged(self):
-        """Idempotence: if a candidate already scores ≥0.95, we don't
+        """Idempotence: if a candidate already scores â‰¥0.95, we don't
         mess with it."""
         from puzzleeval.agents.research import inject_explicit_candidates
         from puzzleeval.schemas import Agent2Result, Candidate
@@ -2880,7 +2881,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
     def test_builder_prompt_has_windows_command_translation_table(self):
         """Fix A: the Windows-specific translation table exists and is
         injected when the host OS is Windows. Linux/macOS runs get their
-        own (shorter) blocks — see test_os_specific_rules_*.
+        own (shorter) blocks â€” see test_os_specific_rules_*.
 
         After the Phase 1 contract migration, the Windows rules live in
         capability_playbooks/platform_windows.md. The legacy constant
@@ -2889,7 +2890,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
         """
         src = _agent5_combined_source()
         assert "_OS_RULES_WINDOWS" in src, (
-            "Builder must keep the Windows-specific rules constant — "
+            "Builder must keep the Windows-specific rules constant â€” "
             "without it, Windows runs regress to ~$1.36 wasted on "
             "Unix muscle-memory commands."
         )
@@ -2900,7 +2901,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
         ).read_text(encoding="utf-8")
         for cmd in ("`tail", "`head", "`grep", "findstr"):
             assert cmd in playbook_src, (
-                f"Windows translation table must mention {cmd} — "
+                f"Windows translation table must mention {cmd} â€” "
                 f"real-run trace showed it's a common failure"
             )
 
@@ -2921,7 +2922,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
 
     def test_os_specific_rules_are_conditional_not_unconditional(self):
         """Cross-OS scaling: the Windows translation table MUST NOT be
-        injected on Linux/macOS — it's wasted context + potentially
+        injected on Linux/macOS â€” it's wasted context + potentially
         confusing (e.g., teaching `findstr` on Linux where it doesn't
         exist).
 
@@ -2932,7 +2933,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
         contracts via always-on selection on platform predicate.
 
         The behavior contract (Windows runs include Windows-specific
-        guidance; Linux runs don't) is preserved — it now flows through
+        guidance; Linux runs don't) is preserved â€” it now flows through
         the unified contract block instead of a dedicated placeholder.
         """
         import puzzleeval.agents.implement_test_env as m
@@ -2952,7 +2953,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
         with unittest.mock.patch("sys.platform", "linux"):
             rendered = m._render_builder_prompt(m.BUILDER_SYSTEM_PROMPT)
             assert "findstr" not in rendered, (
-                "Linux runs MUST NOT carry Windows translation table — "
+                "Linux runs MUST NOT carry Windows translation table â€” "
                 "that's wasted context + misleading (findstr doesn't exist)."
             )
             assert "OS: Linux" in rendered
@@ -2977,7 +2978,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
         Phase D of the prompt-refactor moved the OS-name reference out
         of the prompt body and into the platform_*.md playbooks (each
         loads a "OS: <name> detected" header). Unknown platforms have
-        no playbook → no OS hint, but the rendered prompt is otherwise
+        no playbook â†’ no OS hint, but the rendered prompt is otherwise
         complete and the cache invariant is preserved (no dangling
         placeholders).
         """
@@ -2990,7 +2991,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
             assert "__OS_SPECIFIC_RULES__" not in rendered
             assert "__MODALITY_CONTRACT__" not in rendered
             assert "__OS_TYPE__" not in rendered
-            # Phase 1 / Phase 2 / Signals must still all be present —
+            # Phase 1 / Phase 2 / Signals must still all be present â€”
             # only the OS hint is missing for unknown platforms.
             assert "PHASE 1" in rendered
             assert "PHASE 2" in rendered
@@ -3008,16 +3009,16 @@ class TestEfficiencyHardening_RealRun_d3b49875:
             "pattern (write once, run once instead of N probe commands)."
         )
 
-    def test_builder_prompt_has_parallel_write_rule(self):
+    def test_builder_prompt_has_same_turn_write_rule(self):
         """When multiple file contents are decided, emit all write_file
         tool_use blocks in ONE assistant response. The Phase D refactor
-        renamed the section to 'Parallel scaffold writes (Phase 2 entry)'
+        renamed the section to 'Same-turn scaffold writes (Phase 2 entry)'
         but the rule is preserved."""
         src = _builder_prompt_text()
         assert (
-            "Parallel scaffold writes" in src or "parallel" in src.lower()
+            "Same-turn scaffold writes" in src or "same-turn" in src.lower()
         ) and "write_file" in src, (
-            "Builder prompt must teach the parallel-write pattern."
+            "Builder prompt must teach the same-turn write batching pattern."
         )
 
     def test_venv_preinstall_manifest_exists(self):
@@ -3032,7 +3033,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
         for required in ("requests", "websocket-client", "pydub",
                           "soundfile", "numpy"):
             assert required in pkg_prefixes, (
-                f"VENV_PREINSTALL_MANIFEST must include {required} — "
+                f"VENV_PREINSTALL_MANIFEST must include {required} â€” "
                 f"a core dep the real-run Agent 5 wasted turns on."
             )
 
@@ -3053,7 +3054,7 @@ class TestEfficiencyHardening_RealRun_d3b49875:
 
     def test_builder_prompt_advertises_preinstalled_packages(self):
         """The builder must KNOW the pre-installed packages are
-        available — otherwise it'll still probe them. Prompt must
+        available â€” otherwise it'll still probe them. Prompt must
         list them explicitly under 'pre-installed'."""
         src = _builder_prompt_text()
         assert "pre-installed" in src, (
@@ -3070,11 +3071,11 @@ class TestEfficiencyHardening_RealRun_d3b49875:
 
 
 # ==========================================================================
-# 2026-04-21 Observability audit fixes — cost + cache + telemetry
+# 2026-04-21 Observability audit fixes â€” cost + cache + telemetry
 # ==========================================================================
 # Background: a forensic audit of the cost / token / cache observability
 # surface found three real accounting bugs that under-reported actual
-# spend. Every bug had the same shape — a fallback path or missing field
+# spend. Every bug had the same shape â€” a fallback path or missing field
 # caused real LLM spend to be silently dropped from reports. Fixes below
 # are in-place corrections with regression guards.
 
@@ -3083,7 +3084,7 @@ class TestCalculateCallCostFallbackIncludesCache:
     """OBSERVABILITY BUG #1: when Anthropic's response.usage.iterations[]
     array is absent (older API versions, non-beta endpoints, or edge
     cases), `_calculate_call_cost` previously fell back to counting
-    ONLY input_tokens and output_tokens — silently dropping the top-level
+    ONLY input_tokens and output_tokens â€” silently dropping the top-level
     cache_creation_input_tokens and cache_read_input_tokens which ARE
     available on every response. On cached builds (every turn after the
     first), this under-reported cost by 5-40%.
@@ -3206,7 +3207,7 @@ class TestAdvisorModelFallbackNotHardcoded:
     """OBSERVABILITY BUG #3: the advisor-iteration rate lookup previously
     defaulted to the literal "claude-opus-4-7" when the iteration
     didn't report its model. This would silently mis-price a future
-    advisor model. Now uses the executor model as the fallback —
+    advisor model. Now uses the executor model as the fallback â€”
     advisor typically runs same-or-stronger model as the caller, so
     executor-price is a safer floor."""
 
@@ -3228,7 +3229,7 @@ class TestAdvisorModelFallbackNotHardcoded:
             stripped = line.strip()
             if stripped.startswith("#"):
                 continue
-            # Active code line — check for the banned pattern
+            # Active code line â€” check for the banned pattern
             assert 'getattr(iteration, "model", "claude-opus-4-7")' not in line, (
                 f"Hardcoded `claude-opus-4-7` advisor fallback must be "
                 f"replaced with executor-model fallback. Found: {line!r}"
@@ -3236,7 +3237,7 @@ class TestAdvisorModelFallbackNotHardcoded:
         # The new pattern should be present
         assert 'getattr(iteration, "model", None) or model' in src, (
             "Expected `getattr(iteration, 'model', None) or model` "
-            "pattern in advisor iteration rate selection — safer "
+            "pattern in advisor iteration rate selection â€” safer "
             "fallback than a hardcoded version."
         )
 
@@ -3258,7 +3259,7 @@ class TestFailedHarnessPreservesBuildCost:
             "FailedHarness must have a `build_cost_usd` field so "
             "partial-failure costs can be reported in run totals."
         )
-        # Must default to 0.0 — pre-accumulation failures (venv setup,
+        # Must default to 0.0 â€” pre-accumulation failures (venv setup,
         # missing credentials) legitimately have no cost.
         assert fields["build_cost_usd"].default == 0.0
 
@@ -3352,7 +3353,7 @@ class TestConversationSummaryTelemetry:
     """2026-04-21 observability feature: emit a
     `conversation_summary.json` alongside `conversation_log.json` for
     every candidate build. Provides per-candidate cache hit rate, cost
-    breakdown, per-model spend, and top-3 costliest turns — without
+    breakdown, per-model spend, and top-3 costliest turns â€” without
     mutating the turn-by-turn conversation_log.json schema (downstream
     readers stay unaffected).
     """
@@ -3451,7 +3452,7 @@ class TestConversationSummaryTelemetry:
     def test_summary_detects_system_only_caching(self):
         """Constant cache_read at ~25K per turn (the system prompt +
         tools baseline) is the signature of pre-2026-04-21 system-
-        only caching. No turn exceeds the 40K threshold ⇒ heuristic
+        only caching. No turn exceeds the 40K threshold â‡’ heuristic
         correctly reports message cache inactive."""
         from puzzleeval.agents.implement_test_env import (
             _compute_conversation_summary,
@@ -3470,7 +3471,7 @@ class TestConversationSummaryTelemetry:
         """Real-run b79d79b5 regression: every turn has some cache_write
         (Anthropic writes the new tail content on EVERY turn even when
         the bulk of input comes from cache). The prior heuristic
-        required at least 3 zero-write turns to detect growth — that
+        required at least 3 zero-write turns to detect growth â€” that
         path never fires in practice, producing false negatives. New
         heuristic ignores cache_write entirely and just checks max
         cache_read against the baseline."""
@@ -3490,7 +3491,7 @@ class TestConversationSummaryTelemetry:
              "cache_read_tokens": 82567, "cache_create_tokens": 119, "cost_usd": 0.06},
         ]
         s = _compute_conversation_summary(conversation_log, "TestCo")
-        # 0 read-only turns — every turn has cache_write
+        # 0 read-only turns â€” every turn has cache_write
         assert s["cache_analysis"]["turns_with_cache_read_only"] == 0
         # But message cache is OBVIOUSLY active (max cache_read 82K >> 25K baseline)
         assert s["cache_analysis"]["message_cache_likely_active"] is True, (
@@ -3531,7 +3532,7 @@ class TestConversationSummaryTelemetry:
         conversation_log = [
             {"turn": 0, "model": "m", "input_tokens": 100, "output_tokens": 10,
              "cache_read_tokens": 0, "cache_create_tokens": 0, "cost_usd": 0.01},
-            {"turn": "save-docs-0"},  # Non-integer — must be ignored
+            {"turn": "save-docs-0"},  # Non-integer â€” must be ignored
             {"turn": 1, "model": "m", "input_tokens": 200, "output_tokens": 20,
              "cache_read_tokens": 0, "cache_create_tokens": 0, "cost_usd": 0.02},
         ]
@@ -3560,7 +3561,7 @@ class TestConversationSummaryTelemetry:
             "grep-able without parsing every turn."
         )
         # Summary is valid JSON with expected top-level keys.
-        # Use subset semantics — additive enrichments (build_phases,
+        # Use subset semantics â€” additive enrichments (build_phases,
         # boundary_turns added in NEW-AM) must not break this contract.
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         required_keys = {
@@ -3570,7 +3571,7 @@ class TestConversationSummaryTelemetry:
         assert required_keys.issubset(summary.keys()), (
             f"summary missing required keys: {required_keys - summary.keys()}"
         )
-        # conversation_log.json unchanged shape — still a list
+        # conversation_log.json unchanged shape â€” still a list
         log_data = json.loads(log_path.read_text(encoding="utf-8"))
         assert isinstance(log_data, list)
 
@@ -3646,7 +3647,7 @@ class TestConversationSummaryTelemetry:
             _compute_conversation_summary,
         )
         conversation_log = [
-            # No latency_ms field — pre-fix shape
+            # No latency_ms field â€” pre-fix shape
             {"turn": 0, "model": "m", "input_tokens": 100, "output_tokens": 10,
              "cache_read_tokens": 0, "cache_create_tokens": 0, "cost_usd": 0.01},
             {"turn": 1, "model": "m", "input_tokens": 200, "output_tokens": 20,
@@ -3660,7 +3661,7 @@ class TestConversationSummaryTelemetry:
         assert agg["latency_avg_ms"] == 0.0
         # Critical: turns_with_latency tracks how many turns actually had
         # a positive latency. Lets the summary distinguish "old log,
-        # no data" from "new log, every turn was instant" — both look
+        # no data" from "new log, every turn was instant" â€” both look
         # identical in latency_ms otherwise.
         assert agg["turns_with_latency"] == 0
         # Other fields still aggregate normally
@@ -3686,7 +3687,7 @@ class TestConversationSummaryTelemetry:
         turn_log_src = inspect.getsource(turn_blocks.build_initial_turn_log)
         assert '"latency_ms": call_latency_ms' in turn_log_src, (
             "build_initial_turn_log must persist call_latency_ms as the "
-            "latency_ms field — conversation_summary.json reads it."
+            "latency_ms field â€” conversation_summary.json reads it."
         )
 
         # Loop owner: the wall-clock variable must still be computed
@@ -3694,13 +3695,13 @@ class TestConversationSummaryTelemetry:
         loop_src = _agent5_combined_source()
         assert "call_latency_ms = round((time.time() - call_start)" in loop_src, (
             "call_latency_ms must be computed from call_start (the "
-            "wall-clock at the start of the API call) — recomputing "
+            "wall-clock at the start of the API call) â€” recomputing "
             "later loses the actual API roundtrip duration."
         )
 
     def test_build_turn_callback_fires_with_rich_diagnostic_payload(self):
         """Real-run audit (2026-04-25): the user observed Agent 5 stuck
-        with no per-turn visibility — generic 'Researching API docs'
+        with no per-turn visibility â€” generic 'Researching API docs'
         messages told us nothing about WHICH page Claude was reading or
         WHICH search query it ran. Lock the enrichment: progress_callback
         must fire AFTER block iteration with tool_calls_detail capturing
@@ -3723,7 +3724,7 @@ class TestConversationSummaryTelemetry:
         helper_src = inspect.getsource(turn_blocks.emit_build_turn_progress)
 
         # Server-tool inputs MUST be captured (not dropped). Negative
-        # assertion still applies to the loop source — the placeholder
+        # assertion still applies to the loop source â€” the placeholder
         # literal must never reappear there.
         assert '"(server tool -- handled by API)"' not in loop_src, (
             "Server-tool inputs must be captured (URL for web_fetch, "
@@ -3740,7 +3741,7 @@ class TestConversationSummaryTelemetry:
                 "fields to the SSE consumer."
             )
 
-        # Incremental conversation_log.json save — tail-able mid-build.
+        # Incremental conversation_log.json save â€” tail-able mid-build.
         # This stays in the loop owner; without it the file only exists
         # post-build, useless for debugging a stuck builder.
         assert 'sandbox_dir / "conversation_log.json"' in loop_src, (
@@ -3752,8 +3753,8 @@ class TestConversationSummaryTelemetry:
         """Real-run audit (2026-04-25): the user couldn't tell from the
         summary whether Agent 5 spent its time researching, building, or
         validating. build_phases derives phase boundaries from turn data
-        (api_spec.txt write → research-end, "SMOKE TEST PASSED" in tool
-        results → build-end, "HARNESS_COMPLETE" in text → validate-end)
+        (api_spec.txt write â†’ research-end, "SMOKE TEST PASSED" in tool
+        results â†’ build-end, "HARNESS_COMPLETE" in text â†’ validate-end)
         and reports per-phase turn count, cost, latency."""
         from puzzleeval.agents.implement_test_env import (
             _compute_conversation_summary,
@@ -3775,7 +3776,7 @@ class TestConversationSummaryTelemetry:
              "input_tokens": 2000, "output_tokens": 800,
              "cache_read_tokens": 5000, "cache_create_tokens": 1000,
              "cost_usd": 0.05, "latency_ms": 8000.0,
-             "tool_results": [{"tool": "write_file", "wrote_path": "api_spec.txt", "wrote_chars": 5000}]},
+             "tool_results": [{"tool": "write_file", "wrote_path": "_agent_state/implementation_plan.json", "wrote_chars": 5000}]},
             {"turn": 3, "model": "claude-opus-4-7",
              "input_tokens": 2000, "output_tokens": 800,
              "cache_read_tokens": 5000, "cache_create_tokens": 1000,
@@ -3785,7 +3786,7 @@ class TestConversationSummaryTelemetry:
              "input_tokens": 2000, "output_tokens": 800,
              "cache_read_tokens": 5000, "cache_create_tokens": 1000,
              "cost_usd": 0.05, "latency_ms": 4000.0,
-             "tool_results": [{"tool": "run_code", "result": "SMOKE TEST PASSED — all checks ok"}]},
+             "tool_results": [{"tool": "run_code", "result": "SMOKE TEST PASSED â€” all checks ok"}]},
             {"turn": 5, "model": "claude-opus-4-7",
              "input_tokens": 2000, "output_tokens": 800,
              "cache_read_tokens": 5000, "cache_create_tokens": 1000,
@@ -3797,11 +3798,11 @@ class TestConversationSummaryTelemetry:
 
         # boundary_turns enumerate phase transitions
         bt = s["boundary_turns"]
-        assert bt["api_spec_written_at"] == 2
+        assert bt["build_gate_accepted_at"] == 2
         assert bt["smoke_passed_at"] == 4
         assert bt["harness_complete_at"] == 5
 
-        # build_phases breakdown — research / build / validate buckets
+        # build_phases breakdown â€” research / build / validate buckets
         bp = s["build_phases"]
         assert "research" in bp
         assert bp["research"]["turns"] == 2  # turns 0, 1
@@ -3815,8 +3816,8 @@ class TestConversationSummaryTelemetry:
         assert bp["build"]["last_turn"] == 3
 
         assert "validate" in bp
-        assert bp["validate"]["turns"] == 1  # turn 4 (smoke passed at 4 → validate starts at 5)
-        # Actually with our bucketing: tn < smoke_passed_at (4) → build, tn < harness_complete_at (5) → validate
+        assert bp["validate"]["turns"] == 1  # turn 4 (smoke passed at 4 â†’ validate starts at 5)
+        # Actually with our bucketing: tn < smoke_passed_at (4) â†’ build, tn < harness_complete_at (5) â†’ validate
         # So turn 4 = validate (since 4 < 5), turn 5 = post (since 5 >= 5)
 
         # post phase = HARNESS_COMPLETE turn
@@ -3841,7 +3842,7 @@ class TestConversationSummaryTelemetry:
         ]
         s = _compute_conversation_summary(conversation_log, "TestCo")
         assert s["boundary_turns"] == {
-            "api_spec_written_at": -1,
+            "build_gate_accepted_at": -1,
             "smoke_passed_at": -1,
             "harness_complete_at": -1,
         }
@@ -3850,6 +3851,31 @@ class TestConversationSummaryTelemetry:
         # No other phases populated
         assert "build" not in s["build_phases"]
         assert "validate" not in s["build_phases"]
+
+    def test_summary_uses_implementation_plan_as_default_build_gate(self):
+        from puzzleeval.agents.implement_test_env import (
+            _compute_conversation_summary,
+        )
+
+        conversation_log = [
+            {"turn": 0, "model": "claude-sonnet-4-6", "input_tokens": 100,
+             "output_tokens": 10, "cache_read_tokens": 0, "cache_create_tokens": 0,
+             "cost_usd": 0.01, "latency_ms": 1000.0, "tool_results": []},
+            {"turn": 1, "model": "claude-sonnet-4-6", "input_tokens": 100,
+             "output_tokens": 10, "cache_read_tokens": 0, "cache_create_tokens": 0,
+             "cost_usd": 0.01, "latency_ms": 1000.0,
+             "tool_results": [{"tool": "write_file", "wrote_path": "_agent_state/implementation_plan.json"}]},
+            {"turn": 2, "model": "claude-opus-4-7", "input_tokens": 100,
+             "output_tokens": 10, "cache_read_tokens": 0, "cache_create_tokens": 0,
+             "cost_usd": 0.01, "latency_ms": 1000.0,
+             "tool_results": [{"tool": "write_file", "wrote_path": "harness.py"}]},
+        ]
+
+        s = _compute_conversation_summary(conversation_log, "TestCo")
+
+        assert s["boundary_turns"]["build_gate_accepted_at"] == 1
+        assert s["build_phases"]["research"]["last_turn"] == 0
+        assert s["build_phases"]["build"]["first_turn"] == 1
 
     def test_web_fetch_and_search_results_captured_in_block_iteration(self):
         """Source-grep guard: the block iteration loop must handle
@@ -3867,169 +3893,21 @@ class TestConversationSummaryTelemetry:
         # Both must contribute to turn_log["tool_results"]
         assert '"chars_returned"' in src
         assert '"top_results"' in src
-
-    def test_synthesize_api_spec_skips_when_checklist_incomplete(self):
-        """Real-run audit (2026-04-25, trace 8ded6706): Sonnet's Phase 1
-        research turn took 358-408 seconds per candidate ($1.20 each)
-        re-extracting fields the BuildReadinessChecklist already had.
-        The pre-render fast path generates an api_spec.txt skeleton from
-        the checklist when all 4 non-negotiables are confirmed — but
-        MUST return None (fall through to legacy full-research) when
-        the checklist is missing, sentinel, or has any non-negotiable
-        not at confirmed status. Otherwise we'd pre-render specs from
-        unverified data and the harness would target wrong endpoints."""
-        from puzzleeval.agents.implement_test_env import (
-            _synthesize_api_spec_from_checklist,
-        )
-        from puzzleeval.schemas import (
-            ScreenedCandidate, BuildReadinessChecklist, FieldStatus,
-            default_unknown_checklist,
-        )
-
-        # Helper: build a minimal candidate (covers all required fields)
-        def _make_candidate(checklist):
-            return ScreenedCandidate(
-                name="TestCo", provider="TestCo Inc",
-                description="Test", relevance_score=0.9,
-                adoption_difficulty="easy",
-                claimed_capabilities=["x"],
-                relevant_subtasks=["sub_1"],
-                source="research_agent",
-                confirmed_capabilities=["x"], auth_method="api_key",
-                api_access_method="free_tier",
-                verified_api_docs_url="https://example.com/docs",
-                pricing_model="freemium", pricing_details="",
-                rate_limit_info="", data_format_notes="",
-                screening_notes="", checklist=checklist,
-            )
-
-        # Case 1: checklist=None → no pre-render
-        c = _make_candidate(None)
-        assert _synthesize_api_spec_from_checklist(c) is None
-
-        # Case 2: sentinel checklist → no pre-render
-        c = _make_candidate(default_unknown_checklist("test failure"))
-        assert _synthesize_api_spec_from_checklist(c) is None
-
-        # Case 3: real checklist with one INFERRED non-negotiable → partial pre-render
-        # NEW-AM v3 lifted the "all 4 confirmed" requirement. Now we render
-        # confirmed fields as authoritative and inferred fields with a
-        # [INFERRED — verify on first call] marker. Cuts redundant Sonnet
-        # research on the confirmed fields while keeping a clear signal
-        # about which to verify.
-        partial = BuildReadinessChecklist(
-            populated_by="agent_4",
-            endpoint_path=FieldStatus(status="confirmed", value="https://api.x/v1"),
-            auth_method=FieldStatus(status="inferred", value="bearer"),  # inferred — must verify
-            request_body_shape=FieldStatus(status="confirmed", value='{"x": "y"}'),
-            response_body_shape=FieldStatus(status="confirmed", value='{"ok": true}'),
-        )
-        c = _make_candidate(partial)
-        spec = _synthesize_api_spec_from_checklist(c)
-        assert spec is not None, (
-            "NEW-AM v3 partial pre-render: 3-of-4 confirmed should still "
-            "produce a spec; the inferred field gets [INFERRED] marker."
-        )
-        assert "[INFERRED" in spec, "inferred field must be flagged for verification"
-        # The confirmed values must still appear authoritatively
-        assert "https://api.x/v1" in spec
-        assert '{"x": "y"}' in spec
-
-        # Case 3b: zero confirmed non-negotiables → fall through (not enough scaffolding)
-        all_inferred = BuildReadinessChecklist(
-            populated_by="agent_4",
-            endpoint_path=FieldStatus(status="inferred", value="https://api.x/v1"),
-            auth_method=FieldStatus(status="inferred", value="bearer"),
-            request_body_shape=FieldStatus(status="inferred", value='{"x": "y"}'),
-            response_body_shape=FieldStatus(status="inferred", value='{"ok": true}'),
-        )
-        c = _make_candidate(all_inferred)
-        assert _synthesize_api_spec_from_checklist(c) is None, (
-            "All-inferred non-negotiables: not enough scaffolding to "
-            "pre-render meaningfully; fall through to legacy full research."
-        )
-
-        # Case 3c: endpoint unknown → fall through (can't build without endpoint)
-        no_endpoint = BuildReadinessChecklist(
-            populated_by="agent_4",
-            endpoint_path=FieldStatus(status="unknown"),  # missing endpoint
-            auth_method=FieldStatus(status="confirmed", value="bearer"),
-            request_body_shape=FieldStatus(status="confirmed", value='{"x": "y"}'),
-            response_body_shape=FieldStatus(status="confirmed", value='{"ok": true}'),
-        )
-        c = _make_candidate(no_endpoint)
-        assert _synthesize_api_spec_from_checklist(c) is None, (
-            "Without endpoint, can't pre-render anything useful — fall through."
-        )
-
-        # Case 4: all 4 non-negotiables CONFIRMED → real pre-render
-        full = BuildReadinessChecklist(
-            populated_by="agent_4",
-            endpoint_path=FieldStatus(status="confirmed",
-                                       value="https://api.x/v1/widgets",
-                                       source_url="https://docs.x/api"),
-            auth_method=FieldStatus(status="confirmed",
-                                     value="Bearer in Authorization header"),
-            request_body_shape=FieldStatus(status="confirmed",
-                                            value='{"name": "string"}'),
-            response_body_shape=FieldStatus(status="confirmed",
-                                             value='{"id": "uuid"}'),
-        )
-        c = _make_candidate(full)
-        spec = _synthesize_api_spec_from_checklist(c)
-        assert spec is not None
-        assert spec.startswith("API_SPEC_START")
-        assert "API_SPEC_END" in spec
-        # Non-negotiable values must appear in the rendered spec
-        assert "https://api.x/v1/widgets" in spec
-        assert "Bearer in Authorization header" in spec
-        assert '{"name": "string"}' in spec
-        assert '{"id": "uuid"}' in spec
-        # Source URL preserved
-        assert "https://docs.x/api" in spec
-        # Service name + provider preserved for grep-ability
-        assert "TestCo" in spec
-        # NEW-AM v2: the 40% additive sections must be marked as
-        # REQUIRES_AUGMENT so Sonnet does targeted research, not skip.
-        # Pre-rendering ONLY the confirmed 60% would lose harness-
-        # critical info (override message shapes, auxiliary endpoint
-        # bodies, per-test-case INPUT_COMPATIBILITY/ROUTING_TABLE).
-        assert "[REQUIRES_AUGMENT" in spec, (
-            "Pre-rendered spec must mark per-test-case + auxiliary "
-            "fields as REQUIRES_AUGMENT so Sonnet does targeted "
-            "research instead of skipping (which would drop harness "
-            "quality on override message shapes and per-test-case "
-            "input mappings)."
-        )
-        for required_augment in (
-            "AUXILIARY_ENDPOINTS_REQUEST_BODIES",
-            "OVERRIDE_OR_SPECIAL_MESSAGE_SHAPES",
-            "INPUT_COMPATIBILITY",
-            "ROUTING_TABLE",
-            "WORKING_EXAMPLE",
-        ):
-            assert required_augment in spec, (
-                f"Pre-rendered spec must include section {required_augment!r} "
-                "(marked REQUIRES_AUGMENT) — without it, Sonnet/Opus has "
-                "no checklist of what augment work remains."
-            )
-        # NEW-AM v3 — completeness-confidence note must be in the spec
-        # to warn against trusting REQUEST_BODY_SHAPE as exhaustive.
-        assert "COMPLETENESS_NOTE" in spec, (
-            "Pre-rendered spec must include COMPLETENESS_NOTE warning "
-            "the builder that REQUEST_BODY_SHAPE captures the PRIMARY "
-            "shape, not all variants. Without this Opus might trust the "
-            "spec as exhaustive and miss override / lifecycle / variant "
-            "messages needed by the test cases."
-        )
+        # The request side matters too: empty fetch results often have no
+        # URL in the result block, so diagnostics must capture the paired
+        # server_tool_use input (web_fetch URL / web_search query).
+        assert 'block.type == "server_tool_use"' in src
+        assert '"web_fetch", "web_search", "advisor"' in src
+        assert "server_tool_inputs_by_id" in src
+        assert '"requested_url"' in src
+        assert '"query"' in src
 
     def test_streaming_response_contract_injects_for_voice_tests(self):
         """NEW-AM v4: real-run trace 4427591c (2026-04-25) caught two
-        builds of the SAME ElevenLabs ConvAI provider producing 60% vs
-        20% pass rates because the prompt didn't teach response-collection
-        patterns. The new streaming-response contract teaches the
-        error-timeout + reset-on-event pattern that should land in
-        any harness collecting a streaming response.
+        builds of the SAME provider producing different collection behavior
+        because the prompt did not require observable completion evidence.
+        The Phase 5 streaming-response contract now defines the outcome
+        evidence, not a provider-specific reader recipe.
 
         Voice tests must trigger the injection."""
         from puzzleeval.agents.implement_test_env import (
@@ -4040,8 +3918,8 @@ class TestConversationSummaryTelemetry:
                       "output_type": "voice_conversation"}]
         result = _streaming_response_contract(voice_tcs)
         assert result, "voice_conversation tests must inject the streaming contract"
-        assert "error-timeout" in result.lower()
-        assert "reset" in result.lower()
+        assert "output_completion_signal" in result.lower()
+        assert "state_owner" in result.lower()
         assert "completion" in result.lower()
 
         # Voice turn test (single-turn but TTS streams)
@@ -4055,16 +3933,16 @@ class TestConversationSummaryTelemetry:
     def test_streaming_response_contract_does_NOT_inject_for_rest_tests(self):
         """Anti-contamination guard: OCR / vision / single-call REST
         builds must see EMPTY injection. The contract is for streaming
-        response collection only — adding it to OCR builds would be a
+        response collection only â€” adding it to OCR builds would be a
         bandaid that pollutes unrelated harness builds."""
         from puzzleeval.agents.implement_test_env import (
             _streaming_response_contract,
         )
 
-        # OCR (file in, structured JSON out — single blocking REST call)
+        # OCR (file in, structured JSON out â€” single blocking REST call)
         ocr_tcs = [{"input_type": "file", "output_type": "structured_json"}]
         assert _streaming_response_contract(ocr_tcs) == "", (
-            "OCR/REST builds must NOT receive streaming contract — "
+            "OCR/REST builds must NOT receive streaming contract â€” "
             "single-call APIs don't need it and the rule would be "
             "noise. Anti-bandaid guard."
         )
@@ -4074,7 +3952,7 @@ class TestConversationSummaryTelemetry:
                        "output_type": "classification"}]
         assert _streaming_response_contract(vision_tcs) == ""
 
-        # Single-turn chatbot (text in, free_text out — REST)
+        # Single-turn chatbot (text in, free_text out â€” REST)
         chat_tcs = [{"input_type": "text", "output_type": "free_text"}]
         assert _streaming_response_contract(chat_tcs) == ""
 
@@ -4092,14 +3970,13 @@ class TestConversationSummaryTelemetry:
         assert _streaming_response_contract(None) == ""
 
     def test_streaming_contract_is_principle_based_not_bandaid(self):
-        """The contract content must teach the ABSTRACTION (error-timeout
-        + reset-on-event), not specific provider quirks. No provider
-        names or specific timeout numbers from one provider's docs.
-        Anti-bandaid invariant — keeps the rule general across providers."""
+        """The contract content must define outcome evidence, not specific
+        provider quirks. No provider names or specific timeout numbers.
+        Anti-bandaid invariant â€” keeps the rule general across providers."""
         from puzzleeval.agents.implement_test_env import (
             _STREAMING_RESPONSE_CONTRACT,
         )
-        # Provider-name guard — no specific provider should be hardcoded
+        # Provider-name guard â€” no specific provider should be hardcoded
         # in the contract (would be a bandaid for that provider)
         for forbidden_name in (
             "ElevenLabs", "elevenlabs",
@@ -4109,27 +3986,27 @@ class TestConversationSummaryTelemetry:
             "Bland",
         ):
             assert forbidden_name not in _STREAMING_RESPONSE_CONTRACT, (
-                f"Streaming contract mentions {forbidden_name!r} — that's a "
+                f"Streaming contract mentions {forbidden_name!r} â€” that's a "
                 "bandaid for one provider. Use principle-based language "
                 "(LLM-backed providers, async polling APIs, etc.)."
             )
-        # Specific-magic-number guard — the actual broken pattern from
+        # Specific-magic-number guard â€” the actual broken pattern from
         # trace 4427591c was `silence_after_secs=1.5`. The contract
         # MUST NOT teach that specific bad value. Other "1.5" occurrences
         # in general guidance (e.g., "1-1.5s VAD trailing silence") are
-        # principle-based ranges, not bandaids — those are fine.
+        # principle-based ranges, not bandaids â€” those are fine.
         assert "silence_after_secs=1.5" not in _STREAMING_RESPONSE_CONTRACT
         assert "silence_after_secs = 1.5" not in _STREAMING_RESPONSE_CONTRACT
         # Anti-bandaid: don't teach "use 1.5 seconds" as a recommendation
         for forbidden_phrase in ("1.5 seconds for", "1.5s for"):
             assert forbidden_phrase not in _STREAMING_RESPONSE_CONTRACT, (
                 f"Contract recommends specific timeout {forbidden_phrase!r} "
-                "— use ranges instead (8-15 seconds for LLM-backed)."
+                "â€” use ranges instead (8-15 seconds for LLM-backed)."
             )
-        # Must teach the actual pattern
-        assert "reset" in _STREAMING_RESPONSE_CONTRACT.lower()
-        assert "error-timeout" in _STREAMING_RESPONSE_CONTRACT.lower() or \
-               "error_timeout" in _STREAMING_RESPONSE_CONTRACT.lower()
+        # Must define outcome evidence without code recipes.
+        assert "output-bearing events" in _STREAMING_RESPONSE_CONTRACT.lower()
+        assert "output_completion_signal" in _STREAMING_RESPONSE_CONTRACT.lower()
+        assert "```python" not in _STREAMING_RESPONSE_CONTRACT
 
     def test_streaming_contract_routes_through_unified_dispatcher(self):
         """Phase 1.C consolidation: every conditional contract (platform +
@@ -4168,7 +4045,7 @@ class TestConversationSummaryTelemetry:
         rsrc = inspect.getsource(ite._render_builder_prompt)
         assert "compose_contract_block" in rsrc, (
             "_render_builder_prompt must invoke the unified selector "
-            "(compose_contract_block) — that's the Phase 1.C canonical "
+            "(compose_contract_block) â€” that's the Phase 1.C canonical "
             "path."
         )
         assert "TaskContext" in rsrc
@@ -4176,7 +4053,7 @@ class TestConversationSummaryTelemetry:
     def test_voice_test_cases_get_BOTH_contracts_composed(self):
         """Voice test cases need BOTH voice return-shape contract AND
         streaming response collection contract. The unified dispatcher
-        must compose both — not pick one or the other."""
+        must compose both â€” not pick one or the other."""
         from puzzleeval.agents.implement_test_env import (
             _modality_specific_contract,
             _VOICE_HARNESS_CONTRACT,
@@ -4189,7 +4066,7 @@ class TestConversationSummaryTelemetry:
             "Voice tests must get the voice return-shape contract"
         )
         assert _STREAMING_RESPONSE_CONTRACT in result, (
-            "Voice tests must ALSO get the streaming-collection contract — "
+            "Voice tests must ALSO get the streaming-collection contract â€” "
             "voice WebSocket needs both"
         )
 
@@ -4219,58 +4096,15 @@ class TestConversationSummaryTelemetry:
         )
         ocr_tcs = [{"input_type": "file", "output_type": "structured_json"}]
         assert _modality_specific_contract(ocr_tcs) == "", (
-            "OCR/REST tests must see empty unified contract — zero "
+            "OCR/REST tests must see empty unified contract â€” zero "
             "prompt overhead for non-streaming builds"
         )
 
     # Phase 8: deleted source-grep test `test_phase_transition_fires_on_patch_api_spec`.
     # Behavior covered by: tests/test_dispatch_helpers.py::TestDetectPhaseTransition + tests/test_build_loop_behavior.py::TestPhaseTransitionTriggers
 
-    def test_phase1_prompt_forbids_sonnet_writing_code_files(self):
-        """No scaffold writes during Phase 1 — `harness.py`,
-        `requirements.txt`, `smoke_test.py`, and `live_test.py` belong
-        to Phase 2 (Opus). The Phase B refactor moved enforcement into
-        deterministic code (gate B3 in agent5/tools.py via
-        is_phase1_scaffold_violation predicate keyed on
-        api_spec_written), so the prompt no longer carries the verbose
-        SONNET FORBIDDEN list — the gate IS the contract. Defense-in-
-        depth: prompt teaches the rule too, just more concisely.
-        """
-        from puzzleeval.agents.implement_test_env import BUILDER_SYSTEM_PROMPT
-
-        prompt = BUILDER_SYSTEM_PROMPT
-        # Defense-in-depth in the prompt: scaffold rule references the gate.
-        assert (
-            "scaffold" in prompt.lower()
-            or "Phase-1 → Phase-2" in prompt
-            or "Phase 1 → Phase 2" in prompt
-            or "Phase-2 scaffold" in prompt
-        ), "Prompt must reference the Phase-1→Phase-2 scaffold contract."
-        # The specific forbidden filenames must still appear as canonical
-        # files (they're listed elsewhere in the prompt as the only
-        # legitimate sandbox files).
-        for filename in ("harness.py", "smoke_test.py", "live_test.py", "requirements.txt"):
-            assert filename in prompt
-        # Code-side enforcement is the canonical contract.
-        from puzzleeval.agents.agent5.dispatch_helpers import (
-            SCAFFOLD_FILENAMES,
-            is_phase1_scaffold_violation,
-        )
-        assert "harness.py" in SCAFFOLD_FILENAMES
-        assert "smoke_test.py" in SCAFFOLD_FILENAMES
-        assert "live_test.py" in SCAFFOLD_FILENAMES
-        assert "requirements.txt" in SCAFFOLD_FILENAMES
-        # Gate behavior: scaffold writes refused while api_spec_written is False.
-        assert is_phase1_scaffold_violation("harness.py", api_spec_written=False)
-        assert not is_phase1_scaffold_violation("harness.py", api_spec_written=True)
-
     def test_live_test_contract_injects_for_voice_tests(self):
-        """NEW-AM v6 live-test contract (real-run trace a4860e94, 2026-04-25):
-        voice/conversation tests must get the rigorous live-test
-        guidance — Phase 3's OCR-style live-test pattern doesn't apply
-        and the builder improvises (sometimes badly: trace a4860e94's
-        OpenAI live_test passed with audio_url=None, real tests got 0/5).
-        """
+        """Voice/audio tests get the Phase 5 live-test outcome contract."""
         from puzzleeval.agents.implement_test_env import (
             _live_test_contract_for,
             _LIVE_TEST_CONTRACT_VOICE,
@@ -4283,15 +4117,12 @@ class TestConversationSummaryTelemetry:
         # Single-turn voice
         result = _live_test_contract_for([{"output_type": "voice_turn"}])
         assert result == _LIVE_TEST_CONTRACT_VOICE
-        # Multi-turn text chat
-        result = _live_test_contract_for([{"input_type": "conversation"}])
-        assert result == _LIVE_TEST_CONTRACT_VOICE
 
     def test_live_test_contract_does_NOT_inject_for_rest_tests(self):
         """Anti-contamination guard: OCR/vision/single-call REST builds
         must see EMPTY live-test contract injection. The OCR-style
         Phase 3 live test (test each file type, success+output_len>100)
-        still works for these — the new contract is voice-specific
+        still works for these â€” the new contract is voice-specific
         guidance that would just be noise."""
         from puzzleeval.agents.implement_test_env import (
             _live_test_contract_for,
@@ -4303,6 +4134,8 @@ class TestConversationSummaryTelemetry:
         assert _live_test_contract_for(vision_tcs) == ""
         chat_tcs = [{"input_type": "text", "output_type": "free_text"}]
         assert _live_test_contract_for(chat_tcs) == ""
+        text_conversation_tcs = [{"input_type": "conversation", "output_type": "conversation"}]
+        assert _live_test_contract_for(text_conversation_tcs) == ""
         wh_tcs = [{"input_type": "webhook_event",
                    "output_type": "structured_json"}]
         assert _live_test_contract_for(wh_tcs) == ""
@@ -4312,9 +4145,8 @@ class TestConversationSummaryTelemetry:
         assert _live_test_contract_for(None) == ""
 
     def test_live_test_contract_principle_based_not_provider_specific(self):
-        """The contract content must teach the PATTERN (real audio +
-        multi-turn + production payload shape + audio assertions),
-        not specific provider quirks. Anti-bandaid invariant."""
+        """The contract content must define production/task-equivalence
+        outcomes, not specific provider quirks."""
         from puzzleeval.agents.implement_test_env import (
             _LIVE_TEST_CONTRACT_VOICE,
         )
@@ -4323,25 +4155,29 @@ class TestConversationSummaryTelemetry:
                           "openai realtime", "Vapi", "vapi", "Retell",
                           "retell"):
             assert forbidden not in _LIVE_TEST_CONTRACT_VOICE, (
-                f"Live-test contract mentions {forbidden!r} — bandaid risk. "
+                f"Live-test contract mentions {forbidden!r} â€” bandaid risk. "
                 "Use principle-based language."
             )
-        # Must teach the production payload shape
-        for required in ('"audio_url"', '"turn_index"', '"session_state"',
-                         '"input_context"'):
-            assert required in _LIVE_TEST_CONTRACT_VOICE, (
-                f"Live-test contract missing required field {required} "
-                "from the production payload shape."
+        # Must teach production/task equivalence and runtime evidence.
+        for required in (
+            "caller audio",
+            "turn index",
+            "input context",
+            "conversation history",
+            "persistent_worker",
+            "production-equivalence evidence",
+            "task-equivalence evidence",
+        ):
+            assert required in _LIVE_TEST_CONTRACT_VOICE.lower(), (
+                f"Live-test contract missing outcome term {required!r}."
             )
-        # Must teach 2-turn minimum
-        assert "2-turn" in _LIVE_TEST_CONTRACT_VOICE.lower() or "2 turns" in _LIVE_TEST_CONTRACT_VOICE.lower()
-        # Must teach audio assertion (not just success=True)
-        assert "audio_bytes" in _LIVE_TEST_CONTRACT_VOICE
+        # Must require audio evidence, not just success=True.
+        assert "agent audio" in _LIVE_TEST_CONTRACT_VOICE.lower()
 
     def test_live_test_contract_routes_through_unified_dispatcher(self):
         """NEW-AM v6 consolidation: live-test contract composes through
         `_modality_specific_contract` (single placeholder, single
-        dispatcher) — no separate __LIVE_TEST_CONTRACT__ placeholder
+        dispatcher) â€” no separate __LIVE_TEST_CONTRACT__ placeholder
         which would proliferate injection points."""
         import inspect
         from puzzleeval.agents import implement_test_env as ite
@@ -4360,9 +4196,9 @@ class TestConversationSummaryTelemetry:
 
     def test_voice_test_cases_get_THREE_contracts_composed(self):
         """Voice test cases need ALL THREE contracts composed:
-          1. voice harness return-shape contract
-          2. streaming response collection contract
-          3. live-test rigor contract
+          1. voice harness outcome contract
+          2. streaming response outcome contract
+          3. live-test outcome contract
         The unified dispatcher must combine all three."""
         from puzzleeval.agents.implement_test_env import (
             _modality_specific_contract,
@@ -4376,8 +4212,7 @@ class TestConversationSummaryTelemetry:
         assert _VOICE_HARNESS_CONTRACT in result
         assert _STREAMING_RESPONSE_CONTRACT in result
         assert _LIVE_TEST_CONTRACT_VOICE in result, (
-            "Voice tests must get the live-test rigor contract — "
-            "without it, builder improvises (often badly)."
+            "Voice tests must get the live-test outcome contract."
         )
 
     def test_execute_single_test_uses_per_call_unique_filenames(self):
@@ -4385,19 +4220,19 @@ class TestConversationSummaryTelemetry:
         2026-04-25): pre-fix used SHARED `_test_input.json` and
         `_test_output.json` filenames in the candidate's sandbox. With
         AGENT6_PER_CANDIDATE_SESSION_PARALLELISM=6, multiple test
-        workers running in parallel raced on the same files →
+        workers running in parallel raced on the same files â†’
         cross-test contamination.
 
         Real evidence from trace a4860e94 ElevenLabs tc-001:
             persona = James Whitfield, phone 555-204-7381
             transcript[3] agent: 'Thanks for calling Acme Plumbing,
                                   Maria. ... 555-918-4422'
-                                  ↑ tc-002's name + phone leaked in
+                                  â†‘ tc-002's name + phone leaked in
 
         Lock the per-call unique filename pattern:
           * `_test_input_{call_id}.json` (call_id = secrets.token_hex(8))
           * `_test_output_{call_id}.json`
-        Subprocess reads/writes its OWN file → no race.
+        Subprocess reads/writes its OWN file â†’ no race.
         """
         import inspect
         from puzzleeval.agents import implement_test_env as ite
@@ -4407,12 +4242,12 @@ class TestConversationSummaryTelemetry:
         # Must NOT use the shared filenames anymore
         assert '"_test_input.json"' not in src, (
             "_execute_single_test must NOT use the shared filename "
-            "_test_input.json — it caused cross-test bleed in trace "
+            "_test_input.json â€” it caused cross-test bleed in trace "
             "a4860e94. Use per-call unique filenames instead."
         )
         assert '"_test_output.json"' not in src, (
             "_execute_single_test must NOT use the shared filename "
-            "_test_output.json — same race issue."
+            "_test_output.json â€” same race issue."
         )
         # Must use the per-call unique pattern via secrets.token_hex
         assert "secrets.token_hex(8)" in src, (
@@ -4431,11 +4266,11 @@ class TestConversationSummaryTelemetry:
         Rich-docs candidates (OpenAI Realtime SIP had 9 capabilities,
         5 user_selectable_params, full interaction_model, detailed
         pricing) consumed the 12K budget on findings + structured
-        fields, leaving the fenced JSON block truncated → sentinel
-        checklist → no pre-render fast path → Agent 5 had to do full
+        fields, leaving the fenced JSON block truncated â†’ sentinel
+        checklist â†’ no pre-render fast path â†’ Agent 5 had to do full
         Sonnet research.
 
-        16384 is the new floor: Sonnet output rate $15/MTok × 4K extra
+        16384 is the new floor: Sonnet output rate $15/MTok Ã— 4K extra
         tokens = $0.06 worst case per candidate when actually used,
         $0 otherwise. Still well below Sonnet's 64K per-call cap.
         """
@@ -4447,122 +4282,6 @@ class TestConversationSummaryTelemetry:
             "after findings + structured fields + adaptive thinking. "
             "Without it, Agent 4 returns sentinel checklists and "
             "Agent 5 loses the pre-render fast path."
-        )
-
-    def test_provider_surface_uses_correct_endpointsummary_fields(self):
-        """Real-run audit (trace 8ded6706, 2026-04-25) found the
-        synthesizer was reading non-existent EndpointSummary fields
-        (`method`, `path`, `role`) instead of the actual schema fields
-        (`name`, `relevance_to_use_case`, `selection_note`). Result:
-        every provider_surface entry rendered as '[?] ? ?' silently
-        dropping the alternatives info — defeating the whole purpose
-        of surfacing alternatives. Lock the correct field reads."""
-        from puzzleeval.agents.implement_test_env import (
-            _synthesize_api_spec_from_checklist,
-        )
-        from puzzleeval.schemas import (
-            ScreenedCandidate, BuildReadinessChecklist, FieldStatus,
-            EndpointSummary,
-        )
-
-        cl = BuildReadinessChecklist(
-            populated_by="agent_4",
-            endpoint_path=FieldStatus(status="confirmed", value="wss://api.x/v1/realtime"),
-            auth_method=FieldStatus(status="confirmed", value="Bearer"),
-            request_body_shape=FieldStatus(status="confirmed", value='{"type":"init"}'),
-            response_body_shape=FieldStatus(status="confirmed", value='{"type":"audio"}'),
-            provider_surface=[
-                EndpointSummary(
-                    name="WebSocket /v1/realtime",
-                    purpose="Bidirectional voice conversation",
-                    relevance_to_use_case="primary",
-                    selection_note="matches voice_agent scope",
-                ),
-                EndpointSummary(
-                    name="POST /v1/audio/transcriptions",
-                    purpose="Standalone STT, single audio file",
-                    relevance_to_use_case="alternative",
-                    selection_note="rejected — not real-time",
-                ),
-                EndpointSummary(
-                    name="POST /v1/audio/speech",
-                    purpose="Standalone TTS",
-                    relevance_to_use_case="unrelated",
-                ),
-            ],
-        )
-        c = ScreenedCandidate(
-            name="OpenAI Realtime", provider="OpenAI",
-            description="Voice", relevance_score=0.95,
-            adoption_difficulty="easy",
-            claimed_capabilities=["voice"],
-            relevant_subtasks=["sub_1"],
-            source="research_agent",
-            confirmed_capabilities=["voice"], auth_method="bearer_token",
-            api_access_method="free_signup",
-            verified_api_docs_url="https://platform.openai.com/docs/realtime",
-            pricing_model="usage", pricing_details="",
-            rate_limit_info="", data_format_notes="",
-            screening_notes="", checklist=cl,
-        )
-        spec = _synthesize_api_spec_from_checklist(c)
-        assert spec is not None
-        # Real endpoint NAMES must appear (not '?')
-        assert "WebSocket /v1/realtime" in spec
-        assert "POST /v1/audio/transcriptions" in spec
-        assert "POST /v1/audio/speech" in spec
-        # Real RELEVANCE labels must appear (not '?')
-        assert "[primary]" in spec
-        assert "[alternative]" in spec
-        assert "[unrelated]" in spec
-        # Selection notes surfaced when present
-        assert "rejected — not real-time" in spec or "rejected" in spec
-        # No bare '[?]' or 'method=?' from old field-name bug
-        assert "[?]" not in spec, (
-            "Provider surface entries should not render as '[?]' — that "
-            "indicates the synthesizer is reading wrong EndpointSummary "
-            "field names (the original 'method'/'path'/'role' bug)."
-        )
-
-    def test_pre_rendered_spec_keeps_sonnet_for_targeted_augment(self):
-        """Real-run analysis (trace 8ded6706, 2026-04-25) showed
-        Sonnet's 6-min research turn was ~60% redundant (re-extracting
-        confirmed checklist fields) but ~40% added real value the
-        checklist doesn't carry by design (auxiliary endpoints,
-        override message shapes, per-test-case INPUT_COMPATIBILITY +
-        ROUTING_TABLE, WORKING_EXAMPLE). NEW-AM v2 design decision:
-        pre-render only the AUTHORITATIVE 60% with explicit
-        [REQUIRES_AUGMENT] markers; Sonnet still runs Phase 1 to do
-        targeted-augment research (~2-3 min instead of 6) on the
-        remaining 40%. This is cheaper than routing the augment work
-        through Opus (Opus output tokens cost ~1.7x more than Sonnet)
-        AND it preserves harness quality.
-        """
-        import inspect
-        from puzzleeval.agents import implement_test_env as ite
-
-        # Phase 4.2: pre-render logic moved from _build_single_harness
-        # into _setup_sandbox_and_credentials. The contract checks now
-        # target both the setup helper (synthesizer call + write) AND
-        # the build loop (state initialization).
-        setup_src = inspect.getsource(ite._setup_sandbox_and_credentials)
-        loop_src = _agent5_combined_source()
-
-        # Pre-render call site must exist in setup
-        assert "_synthesize_api_spec_from_checklist(candidate)" in setup_src, (
-            "_setup_sandbox_and_credentials must call the synthesizer "
-            "before returning to the build loop."
-        )
-        # Must write to api_spec.txt in setup
-        assert '(sandbox_dir / "api_spec.txt").write_text' in setup_src
-
-        # api_spec_written must NOT be seeded True from pre-render.
-        # Sonnet still owns Phase 1 — does targeted augment, writes
-        # the final spec, which triggers the normal Phase 1→2 transition.
-        assert "api_spec_written = False\n    if pre_rendered_spec:" in loop_src, (
-            "api_spec_written should stay False at build start so Sonnet "
-            "does targeted-augment Phase 1; the normal write_file trigger "
-            "flips it to True after augment."
         )
 
     def test_promote_verdict_aggregates_test_cost_from_components(self):
@@ -4610,7 +4329,7 @@ class TestConversationSummaryTelemetry:
                        'result_text[-2000:]'):
             assert marker in src, (
                 f"custom-tool dispatch path missing diagnostic field "
-                f"{marker!r} — the whole point of NEW-AM enrichment is "
+                f"{marker!r} â€” the whole point of NEW-AM enrichment is "
                 f"to surface these on every tool call."
             )
 
@@ -4670,8 +4389,8 @@ class TestAgent6EvalMaxTokensBump:
     enabled. Thinking burns 1-3K tokens (subset of max_tokens per
     Anthropic docs), leaving only 1-3K for the batch JSON output.
     8-test-case batch needs 3-5K tokens for JSON alone. Output
-    truncates → parse fails → retry also truncates → terminal fail
-    → all tests scored 0. Fix: bump to 16000 (matches AGENT5 pattern).
+    truncates â†’ parse fails â†’ retry also truncates â†’ terminal fail
+    â†’ all tests scored 0. Fix: bump to 16000 (matches AGENT5 pattern).
     """
 
     def test_max_tokens_default_is_sufficient_for_adaptive_thinking_plus_batch_json(self):
@@ -4686,7 +4405,7 @@ class TestAgent6EvalMaxTokensBump:
             f"adaptive thinking (which is a subset of max_tokens per "
             f"Anthropic docs) PLUS batch JSON for ~8 test cases. "
             f"Got {_c.AGENT6_EVAL_MAX_TOKENS}. Prior 4096 caused "
-            f"silent JSON truncation on real run 045bbd10 → all "
+            f"silent JSON truncation on real run 045bbd10 â†’ all "
             f"tests scored 0/100."
         )
 
@@ -4704,16 +4423,16 @@ class TestAgent6EvalMaxTokensBump:
 
 class TestAgent3FOneTestPerFile:
     """Real run 045bbd10 (OCR) generated 8 test cases from 3 user
-    files — 2 tests on AC-Repair.png, 3 tests on Roof-Repair.png,
+    files â€” 2 tests on AC-Repair.png, 3 tests on Roof-Repair.png,
     3 tests on water-damage.pdf. The staging layer dutifully copied
     each file with a _tc-NNN suffix, then ran the candidate API
     separately for each test. 5 of the 8 API calls were against
-    byte-identical inputs and produced byte-identical responses —
+    byte-identical inputs and produced byte-identical responses â€”
     wasted 62% of the candidate-API budget for zero extra information.
 
     Root cause: Agent 3F's prompt explicitly told Claude to emit
-    'Medium-variety file → 2-3 test cases on the SAME source.' The
-    mental model was 'each test is a distinct API call' — which
+    'Medium-variety file â†’ 2-3 test cases on the SAME source.' The
+    mental model was 'each test is a distinct API call' â€” which
     made sense for text-mode synthetic inputs but is wrong for
     file-mode where the API is deterministic.
 
@@ -4729,7 +4448,7 @@ class TestAgent3FOneTestPerFile:
             ROOT / "puzzleeval" /"agents" / "agent3f" / "core.py").read_text(encoding="utf-8") + chr(10) + (
             ROOT / "puzzleeval" /"agents" / "agent3f" / "templates" / "system_prompt.md").read_text(encoding="utf-8"))
         # Core new rule must be present in its general form (one-per-input,
-        # not one-per-file — the general principle applies to every modality).
+        # not one-per-file â€” the general principle applies to every modality).
         assert "EMIT EXACTLY ONE TestCase PER UNIQUE INPUT" in src, (
             "Agent 3F prompt must state the one-per-input rule as a hard "
             "requirement. Without it, Claude reverts to multi-tests-per-input "
@@ -4798,9 +4517,9 @@ class TestAgent3FOneTestPerFile:
         src = ((
             ROOT / "puzzleeval" /"agents" / "agent3f" / "core.py").read_text(encoding="utf-8") + chr(10) + (
             ROOT / "puzzleeval" /"agents" / "agent3f" / "templates" / "system_prompt.md").read_text(encoding="utf-8"))
-        # The old "Medium-variety file → 2-3 test cases" rule should be gone.
+        # The old "Medium-variety file â†’ 2-3 test cases" rule should be gone.
         assert "Medium-variety file \u2192 2-3 test cases" not in src, (
-            "Old multi-tests-per-file rule re-introduced — this "
+            "Old multi-tests-per-file rule re-introduced â€” this "
             "wastes deterministic-API calls. See real run 045bbd10."
         )
         # And the aim: 1.5-2x file count
@@ -4825,7 +4544,7 @@ class TestBuilderTurnEfficiencyRules:
     sequential scaffold writes, fragmented probe scripts, and tiny
     consecutive patches. Phase C of the prompt-refactor pulled out the
     trace-IDs (Klippa, ElevenLabs, Veryfi, a4860e94) and incident
-    anecdotes — they were narrative-padding the prompt that the agent
+    anecdotes â€” they were narrative-padding the prompt that the agent
     was simultaneously told NOT to produce. The tests below now pin the
     PRINCIPLES, not the war stories, and rely on the corresponding code
     gates (B3 phase-keyed scaffold-block, B4 pre-spec research budget)
@@ -4835,23 +4554,23 @@ class TestBuilderTurnEfficiencyRules:
     def _read_builder_prompt(self) -> str:
         return _builder_prompt_text()
 
-    def test_scaffold_parallelism_principle_present(self):
-        """Phase-2 scaffold writes must land in one parallel turn.
-        The Phase D refactor removed the verbose <use_parallel_tool_calls>
+    def test_scaffold_same_turn_batch_principle_present(self):
+        """Phase-2 scaffold writes must land in one assistant response.
+        The Phase D refactor removed the verbose <use_same_turn_tool_batches>
         Sonnet FORBIDDEN list; gate B3 enforces that contract in code,
-        the prompt teaches the principle (parallel + phase-keyed)."""
+        the prompt teaches the principle (same-turn + phase-keyed)."""
         src = self._read_builder_prompt()
         # Phase-2 scaffold writes section exists.
         assert "Phase-2 scaffold writes" in src or "scaffold writes" in src.lower()
-        # Names the four scaffold files as the parallel-write set.
+        # Names the four scaffold files as the same-turn write set.
         for filename in ("requirements.txt", "harness.py", "smoke_test.py", "live_test.py"):
             assert filename in src, (
                 f"Scaffold writes principle must explicitly name {filename!r}."
             )
         # Phase-keyed enforcement, not model-keyed (per R6 design fix).
-        assert "api_spec_written" in src or "model switch" in src.lower(), (
+        assert "implementation plan gate" in src.lower() or "build gate" in src.lower(), (
             "Prompt must reference the phase-keyed transition (gate B3 "
-            "enforces it deterministically based on api_spec_written)."
+            "enforces it deterministically based on the implementation plan)."
         )
 
     def test_scaffold_rule_uses_principle_not_trace_anecdote(self):
@@ -4860,12 +4579,12 @@ class TestBuilderTurnEfficiencyRules:
         stories. Pin the absence of the anecdote and the presence of
         the underlying parallelism principle."""
         src = self._read_builder_prompt()
-        # War-story breadcrumbs must be GONE — they were narrative padding.
+        # War-story breadcrumbs must be GONE â€” they were narrative padding.
         assert "Veryfi" not in src, (
-            "Phase C removed the Veryfi anecdote — principle-based teaching."
+            "Phase C removed the Veryfi anecdote â€” principle-based teaching."
         )
         assert "trace a4860e94" not in src, (
-            "Phase C removed the trace-ID — gate B3 enforces the contract."
+            "Phase C removed the trace-ID â€” gate B3 enforces the contract."
         )
         # Principle preserved.
         assert "parallel" in src.lower(), (
@@ -4888,7 +4607,7 @@ class TestBuilderTurnEfficiencyRules:
         assert "fragmented" in inv_section.lower() or "fragmenting" in inv_section.lower()
 
     def test_probe_rule_uses_principle_not_trace_anecdote(self):
-        """Klippa anecdote removed in Phase C — pin its absence and the
+        """Klippa anecdote removed in Phase C â€” pin its absence and the
         principle that replaced it."""
         src = self._read_builder_prompt()
         inv_section = src.split(
@@ -4897,12 +4616,12 @@ class TestBuilderTurnEfficiencyRules:
         assert "Klippa" not in inv_section
         assert "$0.40" not in inv_section
         # Principle still teaches the response-shape probing scenario
-        # (when to write a probe — debugging an existing harness).
+        # (when to write a probe â€” debugging an existing harness).
         assert "harness" in inv_section.lower() and "debug" in inv_section.lower()
 
     def test_patch_consolidation_section_exists(self):
         """The <consolidate_related_patches> block addresses tiny
-        consecutive patches addressing one logical bug — preserved
+        consecutive patches addressing one logical bug â€” preserved
         through Phase C even after dropping the ElevenLabs anecdote."""
         src = self._read_builder_prompt()
         assert "<consolidate_related_patches>" in src
@@ -4917,7 +4636,7 @@ class TestBuilderTurnEfficiencyRules:
 
     def test_patch_consolidation_warns_against_over_deferring(self):
         """The 'this does NOT ask you to DEFER the first patch' guard
-        is a critical risk mitigation — preserved through Phase C in
+        is a critical risk mitigation â€” preserved through Phase C in
         the trimmed-but-principled rewrite."""
         src = self._read_builder_prompt()
         sec = src.split("<consolidate_related_patches>")[1].split(
@@ -4934,13 +4653,13 @@ class TestBuilderTurnEfficiencyRules:
         )
 
     def test_patch_consolidation_uses_principle_not_trace_anecdote(self):
-        """ElevenLabs trace anecdote removed in Phase C — pin its
+        """ElevenLabs trace anecdote removed in Phase C â€” pin its
         absence."""
         src = self._read_builder_prompt()
         sec = src.split("<consolidate_related_patches>")[1].split(
             "</consolidate_related_patches>")[0]
         assert "ElevenLabs" not in sec, (
-            "Phase C removed the ElevenLabs anecdote — principle-based teaching."
+            "Phase C removed the ElevenLabs anecdote â€” principle-based teaching."
         )
         assert "12-14" not in sec, (
             "Phase C removed the turn-range trace breadcrumb."
@@ -4953,8 +4672,8 @@ class TestBuilderTurnEfficiencyRules:
         src = self._read_builder_prompt()
         # Pull each rule section
         sections = [
-            src.split("<use_parallel_tool_calls>")[1].split(
-                "</use_parallel_tool_calls>")[0],
+            src.split("<use_same_turn_tool_batches>")[1].split(
+                "</use_same_turn_tool_batches>")[0],
             src.split("<investigate_comprehensively>")[1].split(
                 "</investigate_comprehensively>")[0],
             src.split("<consolidate_related_patches>")[1].split(
@@ -4971,20 +4690,20 @@ class TestBuilderTurnEfficiencyRules:
             for b in banned:
                 assert b.lower() not in section.lower(), (
                     f"Rule contains modality-specific carve-out: "
-                    f"{b!r}. Rules must be general — specific "
+                    f"{b!r}. Rules must be general â€” specific "
                     f"failure modes can be cited as evidence but "
                     f"the RULE itself must apply broadly."
                 )
 
 
 class TestGateCRuntimePatchFragmentationNudge:
-    """Gate C — runtime nudge for patch fragmentation (plan §4.2).
+    """Gate C â€” runtime nudge for patch fragmentation (plan Â§4.2).
 
     The prompt-side <consolidate_related_patches> rule (already tested
     in ``TestBuilderTurnEfficiencyRules``) teaches the pattern
     statically. Gate C adds a RUNTIME component: when the builder
     demonstrably nibbles the same file with two small consecutive
-    patches, inject a soft one-time nudge suggesting parallel edits
+    patches, inject a soft one-time nudge suggesting same-turn edits
     for the next bug on that file.
 
     Runtime enforcement > prompt-only teaching because Claude may
@@ -4999,7 +4718,7 @@ class TestGateCRuntimePatchFragmentationNudge:
         per build).
       - Bookkeeping entries (save-docs, verify-N) don't poison detection.
       - Config flag + token-ceiling knob exist.
-      - Nudge text is soft (advisory, not a mandate) — preserves the
+      - Nudge text is soft (advisory, not a mandate) â€” preserves the
         Gate A softening philosophy.
       - Injection is runtime, not prompt-static.
     """
@@ -5035,7 +4754,7 @@ class TestGateCRuntimePatchFragmentationNudge:
 
     def test_detects_two_small_same_file_patches(self):
         """Happy path: last 2 real turns both patched harness.py with
-        < 600-token outputs → detector returns 'harness.py'."""
+        < 600-token outputs â†’ detector returns 'harness.py'."""
         detect = self._import_detector()
         conv_log = [
             self._patch_turn(5, "harness.py", output_tokens=180),
@@ -5046,7 +4765,7 @@ class TestGateCRuntimePatchFragmentationNudge:
         assert result == "harness.py", (
             "Two consecutive small patches to the same file must be "
             "detected and return the filename. Otherwise the runtime "
-            "nudge never fires and the plan §4.2 intent is lost."
+            "nudge never fires and the plan Â§4.2 intent is lost."
         )
 
     def test_ignores_already_nudged_files(self):
@@ -5064,14 +4783,14 @@ class TestGateCRuntimePatchFragmentationNudge:
                         output_token_ceiling=600)
         assert result is None, (
             "Files already in already_nudged_files must NOT trigger "
-            "the nudge again — at-most-once per file per build is "
+            "the nudge again â€” at-most-once per file per build is "
             "the whole point."
         )
 
     def test_ignores_large_turns(self):
         """Rewrite-style patches naturally produce larger outputs (the
         builder writes the full new section + rationale). Those
-        aren't 'fragmentation' — they're legitimate single-commit
+        aren't 'fragmentation' â€” they're legitimate single-commit
         work. Detector must not flag them."""
         detect = self._import_detector()
         conv_log = [
@@ -5099,7 +4818,7 @@ class TestGateCRuntimePatchFragmentationNudge:
         result = detect(conv_log, already_nudged_files=set(),
                         output_token_ceiling=600)
         assert result is None, (
-            "Patches to DIFFERENT files are not fragmentation — "
+            "Patches to DIFFERENT files are not fragmentation â€” "
             "that's healthy distributed progress. Detector must "
             "require same-file."
         )
@@ -5126,7 +4845,7 @@ class TestGateCRuntimePatchFragmentationNudge:
                         output_token_ceiling=600)
         assert result == "harness.py", (
             "Bookkeeping rows (save-docs-N, verify-N) must be "
-            "transparently skipped — they're not 'real turns'. "
+            "transparently skipped â€” they're not 'real turns'. "
             "Without this, the detector silently never fires "
             "because real and bookkeeping entries interleave in "
             "production conversation logs."
@@ -5134,7 +4853,7 @@ class TestGateCRuntimePatchFragmentationNudge:
 
     def test_ignores_turn_with_multiple_tool_calls(self):
         """A turn that patches harness.py AND runs run_code is genuine
-        iterate-and-verify — the agent is checking the patch effect
+        iterate-and-verify â€” the agent is checking the patch effect
         immediately. Detector must NOT flag that as fragmentation.
         Nudging healthy iterate-and-verify would be counterproductive."""
         detect = self._import_detector()
@@ -5172,7 +4891,7 @@ class TestGateCRuntimePatchFragmentationNudge:
         )
 
     def test_nudge_is_runtime_not_prompt_static(self):
-        """The nudge MUST be injected at runtime (per plan §4.2) —
+        """The nudge MUST be injected at runtime (per plan Â§4.2) â€”
         NOT statically embedded in BUILDER_SYSTEM_PROMPT where it
         would fire on every turn regardless of conversation shape.
         Source-grep guard: the operation tag must appear in
@@ -5186,7 +4905,7 @@ class TestGateCRuntimePatchFragmentationNudge:
             "grep runs for nudge events and measure effectiveness."
         )
         # Must call the detector from the per-turn loop, not anywhere
-        # else (e.g., not in a prompt builder — that would make it
+        # else (e.g., not in a prompt builder â€” that would make it
         # prompt-static again).
         assert "_detect_patch_fragmentation_pattern(" in src, (
             "Runtime detector must be invoked from the builder loop "
@@ -5196,16 +4915,16 @@ class TestGateCRuntimePatchFragmentationNudge:
 
 
 class TestAskResearchContextInheritance:
-    """ask_research overhaul (plan §4.3): the sub-agent used to be a
+    """ask_research overhaul (plan Â§4.3): the sub-agent used to be a
     last-resort escape hatch with a thin generic prompt. It has been
     repositioned as a PEER INTEGRATION ENGINEER with:
 
       1. Auto-inherited context (api_spec excerpt, recent errors,
-         harness code, provider details) — already wired at dispatch.
-      2. A two-regime prompt: targeted (specific question) vs
-         exploratory (open-ended / thin context).
-      3. Budget bump 2+2 → 3+3 to support exploratory mode's
-         multi-angle search.
+         harness code, provider details) â€” already wired at dispatch.
+      2. A scoped-regime prompt: planned task vs unscoped/thin-context
+         refusal vs explicit migration/deprecation check.
+      3. Loop prevention: broad exploratory research is refused rather
+         than diversified across the open web.
       4. Tool description that invites normal use (not last resort)
          and explicitly trusts NOT-FOUND failures.
 
@@ -5213,39 +4932,29 @@ class TestAskResearchContextInheritance:
     can't silently degrade the capability back to 'last resort only'.
 
     Six cases:
-      (a) Dispatch enriches the question with api_spec excerpt
+      (a) Dispatch enriches the question with durable Agent 5 artifacts
       (b) Dispatch includes recent tool-result errors
       (c) Dispatch attaches harness code snippet (first 40 lines)
       (d) Sub-agent prompt teaches Regime A (targeted) explicitly
-      (e) Sub-agent prompt teaches Regime B (exploratory) explicitly
+      (e) Sub-agent prompt teaches Regime B (unscoped refusal) explicitly
       (f) Tool description repositions from last-resort to normal use
     """
 
     def _read_agent5_src(self) -> str:
         return _agent5_combined_source()
 
-    def test_dispatch_injects_api_spec_excerpt(self):
-        """The ask_research dispatch path reads api_spec.txt (if
-        present) and threads the first 2K chars + DOC_REFERENCES +
-        DOC_MAP sections into the question. Without this the
-        sub-agent re-derives what's already known and wastes budget."""
+    def test_dispatch_injects_durable_research_context(self):
+        """The ask_research dispatch path reads durable Agent 5 research
+        artifacts so the sub-agent does not re-derive known facts."""
         src = self._read_agent5_src()
-        # The enrichment block must reference the spec file and the
-        # full_spec slice. Allow either the exact comment phrase or
-        # the code that reads + slices the file.
-        assert 'api_spec.txt' in src and 'full_spec = spec_path.read_text' in src, (
-            "ask_research dispatch must read api_spec.txt and pass "
-            "excerpts to the sub-agent (plan §4.3.1). Without this "
-            "the sub-agent gets a bare question and re-searches "
-            "for info already in the spec."
+        assert 'research_synthesis.json' in src and 'implementation_plan.json' in src, (
+            "ask_research dispatch must pass durable research artifacts to "
+            "the sub-agent. Without this the sub-agent gets a bare question "
+            "and re-searches for info already in the synthesis/plan."
         )
-        # Must slice to first 2K chars so the context stays bounded
-        # (large spec files would blow the sub-agent's budget).
-        assert "spec_summary = full_spec[:2000]" in src, (
-            "Spec excerpt must be capped at 2000 chars so the "
-            "sub-agent's context stays bounded. Without a cap, a "
-            "10K+ char api_spec would dominate the sub-agent's "
-            "input and crowd out the actual question."
+        assert 'text[:limit]' in src and 'research_findings' in src, (
+            "Artifact excerpts must be bounded so large research files do "
+            "not crowd out the specific question."
         )
 
     def test_dispatch_captures_recent_error_context(self):
@@ -5274,7 +4983,7 @@ class TestAskResearchContextInheritance:
         # The dispatch should use _read_harness_code to load from disk
         # rather than trusting the accumulated conversation state.
         assert "_read_harness_code(sandbox_dir)" in src, (
-            "Dispatch must call _read_harness_code(sandbox_dir) — "
+            "Dispatch must call _read_harness_code(sandbox_dir) â€” "
             "reading from disk is the ground truth; conversation "
             "state may lag."
         )
@@ -5290,7 +4999,7 @@ class TestAskResearchContextInheritance:
         )
         assert "REGIME A" in TARGETED_RESEARCH_SYSTEM.upper(), (
             "Two-regime prompt must name REGIME A explicitly so the "
-            "sub-agent self-classifies. Plan §4.3.2 hinges on this."
+            "sub-agent self-classifies. Plan Â§4.3.2 hinges on this."
         )
         # Regime A strategy: one precise search, stop.
         assert "ONE" in TARGETED_RESEARCH_SYSTEM, (
@@ -5299,33 +5008,24 @@ class TestAskResearchContextInheritance:
             "cost-saver half of the two-regime design."
         )
 
-    def test_sub_agent_prompt_teaches_regime_b_exploratory(self):
-        """The prompt must explicitly teach the exploratory regime
-        for open-ended questions or thin context. Cover the multi-
-        angle strategy (docs / GitHub / community / archive) so the
-        sub-agent spreads its budget instead of repeating the same
-        search."""
+    def test_sub_agent_prompt_blocks_regime_b_unscoped_research(self):
+        """Open-ended/thin-context research should be refused, not fanned out."""
         from puzzleeval.agents.implement_test_env import (
             TARGETED_RESEARCH_SYSTEM,
         )
         assert "REGIME B" in TARGETED_RESEARCH_SYSTEM.upper(), (
-            "Two-regime prompt must name REGIME B for exploratory "
-            "mode (plan §4.3.2). Without it, thin-context questions "
-            "get the same single-search treatment as targeted ones "
-            "and come back with poor answers."
+            "Scoped prompt must name REGIME B so thin-context questions are "
+            "classified as unscoped instead of being researched broadly."
         )
-        # Regime B should reference multi-angle sources explicitly —
-        # the prompt teaches the Google-like spread (docs + GitHub +
-        # community + archive).
-        for source in ("github", "stackoverflow", "archive"):
-            assert source.lower() in TARGETED_RESEARCH_SYSTEM.lower(), (
-                f"Regime B multi-angle strategy must include "
-                f"{source!r} as a search channel. Missing channels "
-                f"mean the sub-agent repeats the official-docs "
-                f"search and returns duplicate results."
-            )
+        assert "UNSCOPED OR THIN CONTEXT" in TARGETED_RESEARCH_SYSTEM
+        assert "Do NOT run broad exploratory research" in TARGETED_RESEARCH_SYSTEM
+        assert "unscoped_research_request" in TARGETED_RESEARCH_SYSTEM
+        for source in ("stackoverflow", "web.archive.org"):
+            assert source.lower() not in TARGETED_RESEARCH_SYSTEM.lower()
+        assert "REGIME C" in TARGETED_RESEARCH_SYSTEM
+        assert "official SDK repo or package registry" in TARGETED_RESEARCH_SYSTEM
         # Must also teach the honest-failure output format so
-        # exploratory mode doesn't fabricate an answer when
+        # unscoped mode doesn't fabricate an answer when
         # research genuinely turned up nothing. Phase 2C.4 promoted
         # the contract from a 2-tier (ANSWER / NOT FOUND) format to
         # a 3-tier output schema (ANSWER / REASONABLE_GUESS /
@@ -5351,7 +5051,7 @@ class TestAskResearchContextInheritance:
         # The peer-engineer framing + 'not a last resort' guidance.
         assert "peer integration engineer" in description.lower(), (
             "Tool description must use peer-engineer framing (plan "
-            "§4.3.4). Prior 'last resort' framing caused underuse — "
+            "Â§4.3.4). Prior 'last resort' framing caused underuse â€” "
             "the builder suffered through Google-able questions "
             "because the tool read as forbidden unless desperate."
         )
@@ -5361,16 +5061,16 @@ class TestAskResearchContextInheritance:
             "implicit framing from earlier versions of Agent 5's "
             "prompt history bleeds through."
         )
-        # Cost transparency — the builder should know the price so
+        # Cost transparency â€” the builder should know the price so
         # it doesn't under/over-use.
         assert "$0." in description, (
             "Tool description must quote the per-call cost so the "
             "builder can compare against probe-script alternatives."
         )
-        # Budget tightened 3→2 (NEW-AM v5, post real-run trace
+        # Budget tightened 3â†’2 (NEW-AM v5, post real-run trace
         # a4860e94 deep-dive). Real-run measurement: ElevenLabs
         # build's Sonnet T2 fired ask_research and the sub-agent took
-        # 487 SECONDS (~8 min) — 60% of build's wall-clock — researching
+        # 487 SECONDS (~8 min) â€” 60% of build's wall-clock â€” researching
         # one auxiliary endpoint shape. With max_uses=3+3=6 server
         # tools, sub-agent had headroom for exhaustive multi-angle
         # exploration. Capping to 2+2 forces shorter focused answers;
@@ -5384,18 +5084,18 @@ class TestAskResearchContextInheritance:
             ROOT / "puzzleeval" / "agents" / "agent5" / "research_subagent.py"
         ).read_text(encoding="utf-8")
         assert '"max_uses": 2' in src, (
-            "Sub-agent tool budget must be 2 (NEW-AM v5 — capped "
+            "Sub-agent tool budget must be 2 (NEW-AM v5 â€” capped "
             "to prevent the 8-min ask_research stalls observed in "
             "real-run trace a4860e94). If this regresses to 3 the "
             "exhaustive exploration mode comes back."
         )
-        # Anti-regression — must NOT have the prior 3+3 budget for
+        # Anti-regression â€” must NOT have the prior 3+3 budget for
         # ask_research's web tools
         # (other places in the file may have max_uses=3 for the
-        # builder's OWN web tools — that's fine; what we're locking
+        # builder's OWN web tools â€” that's fine; what we're locking
         # is the sub-agent's tools at the targeted_research call site)
         # Find the sub-agent's tool block (LAST `max_content_tokens=10000`
-        # — the FIRST is WEB_FETCH_TOOL constant for the builder's own
+        # â€” the FIRST is WEB_FETCH_TOOL constant for the builder's own
         # web tools; the SECOND is inside the ask_research sub-agent's
         # tools=[] list).
         sub_agent_block_idx = src.rfind('"max_content_tokens": 10000')
@@ -5423,8 +5123,8 @@ class TestAgent1TestCountTargetDerivation:
     produced 8 regardless of actual input signals.
 
     Fix: rewrite Agent 1's test_count_target rule so Claude DERIVES
-    the count from real signals — file count (file mode), coverage-
-    dimension count (text mode) — and REQUIRE it to show derivation
+    the count from real signals â€” file count (file mode), coverage-
+    dimension count (text mode) â€” and REQUIRE it to show derivation
     in notes. Also change the worked example to demonstrate
     derivation rather than anchor a number.
     """
@@ -5464,7 +5164,7 @@ class TestAgent1TestCountTargetDerivation:
             "Text-mode test_count_target rule must anchor to the "
             "6 canonical coverage dimensions (happy_path, "
             "input_variation, edge_case, scale, domain_specific, "
-            "error_resilience) — a principled floor of ~6 — rather "
+            "error_resilience) â€” a principled floor of ~6 â€” rather "
             "than a remembered number. Named dimensions give Claude "
             "a mental model to reason from."
         )
@@ -5477,7 +5177,7 @@ class TestAgent1TestCountTargetDerivation:
             "Agent 1 prompt must require Claude to SHOW its "
             "test_count_target derivation in the notes field. "
             "Without this transparency, the rule is easy to ignore "
-            "silently — we can't verify from output whether Claude "
+            "silently â€” we can't verify from output whether Claude "
             "derived or anchored."
         )
 
@@ -5530,17 +5230,17 @@ class TestCandidateTestRunOverallScorePersisted:
     computed inline in the SSE `candidate_results_ready` event callback
     but never persisted to `CandidateTestRun`. Consequences:
 
-    1. Live UI during a run: reads SSE event → shows correct score ✓
+    1. Live UI during a run: reads SSE event â†’ shows correct score âœ“
     2. After refresh / reopen: reads agent_5_output.json or
-       evaluation_report.json → overall_score missing from
-       CandidateTestRun → `report.py::_safe_get(run, "overall_score",
-       None) or 0.0` → **every candidate shows 0.0** regardless of
+       evaluation_report.json â†’ overall_score missing from
+       CandidateTestRun â†’ `report.py::_safe_get(run, "overall_score",
+       None) or 0.0` â†’ **every candidate shows 0.0** regardless of
        actual test performance.
 
-    Universal bug — same for voice AND OCR since both flows produce
+    Universal bug â€” same for voice AND OCR since both flows produce
     CandidateTestRun through `_compute_aggregate_metrics`. Frontend
     reads `overall_score` in CandidateCard.tsx, ResultsComparison.tsx,
-    EvaluationReportCard.tsx — all broken on refresh.
+    EvaluationReportCard.tsx â€” all broken on refresh.
 
     Fix: add `overall_score: float = Field(default=0.0, ...)` to the
     schema + compute in `_compute_aggregate_metrics` + pass through
@@ -5570,7 +5270,7 @@ class TestCandidateTestRunOverallScorePersisted:
         empty = _compute_aggregate_metrics([])
         assert "overall_score" in empty
         assert empty["overall_score"] == 0.0
-        # Populated case — mock TestCaseResult-like objects
+        # Populated case â€” mock TestCaseResult-like objects
         from types import SimpleNamespace
         results = [
             SimpleNamespace(passed=True, success=True, skip_reason=None,
@@ -5595,7 +5295,7 @@ class TestCandidateTestRunOverallScorePersisted:
         `overall_score` must come from the same `metrics` dict that
         builds the persisted CandidateTestRun. If someone re-introduces
         an inline `sum(...) / len(...)` recomputation, the live and
-        persisted values could drift again — same class of bug that
+        persisted values could drift again â€” same class of bug that
         caused real run 3eb3196a to show 0.0 on refresh."""
         src = _agent5_combined_source()
         # The banned inline pattern
@@ -5626,5 +5326,5 @@ class TestCandidateTestRunOverallScorePersisted:
             "CandidateTestRun constructor in Agent 5 must pass "
             "overall_score=metrics['overall_score']. Without this, "
             "the new schema field defaults to 0.0 and the frontend "
-            "sees 0 on every refresh — same user-visible bug."
+            "sees 0 on every refresh â€” same user-visible bug."
         )

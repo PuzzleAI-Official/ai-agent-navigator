@@ -6,11 +6,11 @@ exists, is non-empty). The agent already validated compatible input
 forms with real test data during Phase 3 — this is just a sanity
 check that the file actually exists.
 
-This module is intentionally small. The Phase 4 REAL TEST PROBE work
-(per OT-013 in CLAUDE.md) will live here too: an additional check that
-the harness was actually exercised against an Agent-3-shaped payload
-before HARNESS_COMPLETE is accepted. Today's gate doesn't do that;
-the planned probe will.
+This module is intentionally focused on structural and evidence gates.
+The build loop owns smoke/live execution state and only calls this module
+when the agent signals HARNESS_COMPLETE; this module verifies the harness
+surface, forensics coverage, voice live-test contract, and reflection
+evidence that support that completion signal.
 
 The forensics-coverage gate (`verify_forensics_coverage`) is separate —
 it does AST-based semantic checks on the harness to enforce the
@@ -30,11 +30,20 @@ external callers.
 from __future__ import annotations
 
 import ast
+import json
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from puzzleeval.agents.agent5.sandbox import _read_harness_code
+from puzzleeval.config import (
+    GATE_SESSION_CONTINUITY_ENABLED,
+    GATE_STREAM_KEEPALIVE_DIAGNOSTIC_ENABLED,
+)
+from puzzleeval.agents.agent5.business_fixture import (
+    load_business_fixture,
+    validate_structured_claims_against_business_fixture,
+)
 
 if TYPE_CHECKING:
     import logging
@@ -57,9 +66,8 @@ def run_verification_checks(
     Args:
         sandbox_dir: The candidate's sandbox directory.
         candidate: The ScreenedCandidate the harness was built for.
-        credentials: Resolved credentials (currently unused by the gate;
-                     reserved for the planned Phase 4 REAL TEST PROBE
-                     which will need them).
+        credentials: Resolved credentials, accepted for call-site
+                     compatibility with the broader completion flow.
         logger: Standard logger for telemetry.
         trace_id: Run trace_id for log correlation.
 
@@ -68,18 +76,296 @@ def run_verification_checks(
         fails (caller injects this into the build loop's user message
         and asks the model to fix).
 
-    Future expansion (OT-013, planned Phase 4 REAL TEST PROBE):
-        Add a check that loads `agent_3_test_cases.json` from the
-        sandbox, picks one test case, builds the production-shape
-        payload via `derive_production_payload`, calls
-        ``harness.run(payload)``, asserts ``success=True`` with expected
-        audio shape, and writes ``phase_4_passed.txt`` on success. The
-        verification gate then requires that file's existence — the
-        bypass-verification problem documented in OT-013 becomes
-        structurally impossible.
+    Completion execution state is enforced by the build loop before it
+    accepts HARNESS_COMPLETE. This function only checks that the final
+    harness file exists and is readable enough for downstream gates.
+    Previously this docstring referenced a planned real-test probe; that
+    state now lives in the build loop's completion flow.
     """
     if not _read_harness_code(sandbox_dir):
         return "harness.py does not exist or is empty."
+    return None
+
+
+def _distinctive_objective_terms(objective_md: str) -> list[str]:
+    """Extract a small set of task-specific terms for live-test sanity checks."""
+
+    tokens = re.findall(r"[A-Za-z][A-Za-z0-9&'-]{3,}", objective_md)
+    stop = {
+        "objective", "candidate", "deliverable", "success", "criteria",
+        "harness", "python", "input", "output", "smoke", "live", "test",
+        "tests", "voice", "conversation", "provider", "agent", "system",
+        "defined", "must", "should", "with", "from", "that", "this",
+        "turn", "turns", "persistent", "runner", "forensics", "coverage",
+    }
+    seen: set[str] = set()
+    terms: list[str] = []
+    for token in tokens:
+        lower = token.lower().strip("-'")
+        if lower in stop or lower in seen or len(lower) < 4:
+            continue
+        seen.add(lower)
+        terms.append(lower)
+        if len(terms) >= 12:
+            break
+    return terms
+
+
+def _literal_dict_keys_from_python(source: str) -> set[str]:
+    """Extract literal dict keys from Python source using AST only."""
+
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return set()
+    keys: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key in node.keys:
+            if isinstance(key, ast.Constant) and isinstance(key.value, str):
+                keys.add(key.value)
+    return keys
+
+
+def _json_objects_from_text(text: str) -> list[dict[str, Any]]:
+    """Best-effort extraction of JSON objects from live-test output."""
+
+    objects: list[dict[str, Any]] = []
+    start: int | None = None
+    depth = 0
+    in_string = False
+    escape = False
+    for index, char in enumerate(text or ""):
+        if in_string:
+            if escape:
+                escape = False
+            elif char == "\\":
+                escape = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+            continue
+        if char == "{":
+            if depth == 0:
+                start = index
+            depth += 1
+        elif char == "}" and depth:
+            depth -= 1
+            if depth == 0 and start is not None:
+                try:
+                    data = json.loads(text[start:index + 1])
+                except json.JSONDecodeError:
+                    start = None
+                    continue
+                if isinstance(data, dict):
+                    objects.append(data)
+                start = None
+    return objects
+
+
+def collect_voice_live_evidence(sandbox_dir: Path) -> dict[str, Any]:
+    """Collect structured voice-live evidence without semantic source matching."""
+
+    state_dir = sandbox_dir / "_agent_state"
+    evidence_path = state_dir / "live_test_evidence.json"
+    evidence: dict[str, Any] = {
+        "manifest": None,
+        "runtime_turns": [],
+        "claims": [],
+        "last_live_test_output_present": False,
+    }
+    if evidence_path.exists():
+        try:
+            manifest = json.loads(evidence_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            manifest = None
+        if isinstance(manifest, dict):
+            evidence["manifest"] = manifest
+            turns = manifest.get("turns")
+            if isinstance(turns, list):
+                evidence["runtime_turns"].extend(
+                    item for item in turns if isinstance(item, dict)
+                )
+            claims = manifest.get("claims") or manifest.get("fixture_claims")
+            if isinstance(claims, list):
+                evidence["claims"].extend(claims)
+
+    runtime_path = state_dir / "runtime_state.json"
+    if runtime_path.exists():
+        try:
+            runtime = json.loads(runtime_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            runtime = {}
+        output = runtime.get("last_live_test_output") if isinstance(runtime, dict) else ""
+        if isinstance(output, str) and output.strip():
+            evidence["last_live_test_output_present"] = True
+            for item in _json_objects_from_text(output):
+                if "turn_index" in item or "success" in item:
+                    evidence["runtime_turns"].append(item)
+                if isinstance(item.get("transcript"), str):
+                    evidence["claims"].append({"transcript": item["transcript"]})
+    return evidence
+
+
+def _voice_review_response_text(response: Any) -> str:
+    parts: list[str] = []
+    for block in getattr(response, "content", []) or []:
+        text = getattr(block, "text", None)
+        if isinstance(text, str):
+            parts.append(text)
+        elif isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "\n".join(parts).strip()
+
+
+def _voice_review_json(text: str) -> dict[str, Any] | None:
+    match = re.search(r"\{.*\}", text or "", re.DOTALL)
+    candidates = [text.strip()] if (text or "").strip() else []
+    if match:
+        candidates.append(match.group(0))
+    for candidate in candidates:
+        try:
+            data = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _voice_semantic_review(
+    *,
+    client: Any,
+    model: str,
+    live_source: str,
+    evidence: dict[str, Any],
+) -> dict[str, Any] | None:
+    prompt = (
+        "Review whether this voice live test proves task-equivalent current-turn "
+        "voice behavior. Use the structured runtime evidence first. Source excerpt "
+        "is supporting evidence only; do not require implementation recipe phrases.\n\n"
+        "Return strict JSON: decision=pass|block|advisory, confidence=low|medium|high, "
+        "issues=array, evidence=array, rationale=one sentence.\n\n"
+        "Structured evidence:\n"
+        + json.dumps(evidence, indent=2, ensure_ascii=False, default=str)[:6000]
+        + "\n\nlive_test.py excerpt:\n"
+        + live_source[:6000]
+    )
+    response = client.messages.create(
+        model=model,
+        max_tokens=700,
+        system=(
+            "You are a general validator for production-equivalent voice live "
+            "test evidence. Block only high-confidence semantic failures."
+        ),
+        messages=[{"role": "user", "content": prompt}],
+    )
+    data = _voice_review_json(_voice_review_response_text(response))
+    if not isinstance(data, dict):
+        return None
+    decision = str(data.get("decision") or "advisory").strip().lower()
+    if decision not in {"pass", "block", "advisory"}:
+        decision = "advisory"
+    confidence = str(data.get("confidence") or "low").strip().lower()
+    if confidence not in {"low", "medium", "high"}:
+        confidence = "low"
+    return {
+        "decision": decision,
+        "confidence": confidence,
+        "issues": [str(x) for x in (data.get("issues") or []) if str(x).strip()][:5],
+        "evidence": [str(x) for x in (data.get("evidence") or []) if str(x).strip()][:5],
+        "rationale": str(data.get("rationale") or "")[:500],
+    }
+
+
+def verify_voice_live_test_contract(
+    sandbox_dir: Path,
+    *,
+    client: Any | None = None,
+    judge_model: str | None = None,
+    llm_review_enabled: bool = False,
+) -> str | None:
+    """Verify voice live_test.py is production-equivalent enough to trust.
+
+    This is a deterministic contract check, not a semantic judge. It
+    catches the real failure mode from voice runs: generic in-process live
+    tests that pass while production uses a persistent worker and
+    task-specific input_context.
+    """
+
+    live_path = sandbox_dir / "live_test.py"
+    if not live_path.exists():
+        return "live_test.py is missing."
+    try:
+        live = live_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return f"live_test.py is unreadable: {exc}"
+    missing: list[str] = []
+    literal_keys = _literal_dict_keys_from_python(live)
+    evidence = collect_voice_live_evidence(sandbox_dir)
+    runtime_turns = [
+        turn for turn in evidence.get("runtime_turns", [])
+        if isinstance(turn, dict)
+    ]
+    successful_turns = [turn for turn in runtime_turns if turn.get("success") is True]
+    audio_evidence = [
+        turn for turn in runtime_turns
+        if (turn.get("audio_path") or (isinstance(turn.get("raw_response"), dict) and turn["raw_response"].get("audio_path")))
+    ]
+
+    if "turn_index" not in literal_keys and not runtime_turns:
+        missing.append("turn_index")
+    if not {"input_context", "instructions"} <= literal_keys and not evidence.get("manifest"):
+        missing.append("input_context.instructions")
+    if "conversation_history" not in literal_keys and "history" not in literal_keys and not evidence.get("manifest"):
+        missing.append("conversation_history/history")
+    if len(runtime_turns) < 2 and not evidence.get("manifest"):
+        missing.append("structured evidence for at least two live turns")
+    if runtime_turns and len(successful_turns) < min(2, len(runtime_turns)):
+        missing.append("success=True for each recorded live turn")
+    if runtime_turns and not audio_evidence:
+        missing.append("agent audio artifact evidence in live-test output")
+
+    fixture_issues = validate_structured_claims_against_business_fixture(
+        evidence.get("claims") or [],
+        load_business_fixture(sandbox_dir),
+        source_label="live-test structured evidence",
+    )
+    if fixture_issues:
+        missing.append("business_fixture consistency: " + "; ".join(fixture_issues[:4]))
+
+    if missing:
+        return (
+            "voice live_test.py is not production-equivalent: missing or weak "
+            + "; ".join(missing)
+            + ". For persistent_worker voice providers, live_test.py must prove "
+            "the same production runtime payload, include safe "
+            "input_context.instructions, preserve conversation_history, and use "
+            "at least two task-specific turns."
+        )
+    if client is not None and llm_review_enabled and judge_model:
+        try:
+            review = _voice_semantic_review(
+                client=client,
+                model=judge_model,
+                live_source=live,
+                evidence=evidence,
+            )
+        except Exception:  # noqa: BLE001 - semantic review must not break the gate
+            review = None
+        if (
+            isinstance(review, dict)
+            and review.get("decision") == "block"
+            and review.get("confidence") == "high"
+        ):
+            details = "; ".join(review.get("issues") or []) or review.get("rationale") or "semantic live-test evidence failed"
+            return (
+                "voice live_test.py semantic evidence is not production-equivalent: "
+                + details
+            )
     return None
 
 
@@ -93,12 +379,12 @@ def run_verification_checks(
 # snippets, code excerpts). Self-attestation ("yes, handled") is
 # rejected.
 #
-# The gate is SOFT per AD-007:
-#   1. First HARNESS_COMPLETE: if reflection missing or vacuous, return
-#      a short error string; caller injects the directive + retries.
-#   2. Second HARNESS_COMPLETE: if still missing/vacuous, return None
-#      (accept) but emit ``reflection_gate_fired`` telemetry. The build
-#      proceeds; operators see the warning in the run summary.
+# The gate is evidence-first and re-runs against current files on each
+# HARNESS_COMPLETE. Missing, vacuous, invalid-citation, or unsupported
+# reflections return a short error string; the caller owns issue-specific
+# retry budgeting and final acceptance/rejection. A later valid reflection
+# can pass even if an earlier HARNESS_COMPLETE failed for a different
+# reflection issue.
 #
 # The hybrid pattern + LLM-judge check lives in
 # ``agent5/reflection_evidence_check.py``. This module owns the gate
@@ -501,7 +787,320 @@ def verify_forensics_coverage(sandbox_dir: Path) -> str | None:
     return None
 
 
+def verify_session_continuity_from_forensics(
+    sandbox_dir: Path,
+    *,
+    session_token: str | None = None,
+) -> str | None:
+    """WARN-tier runtime check for stateful conversation resets.
+
+    Harnesses should emit canonical ``session_create`` on the first turn
+    and ``session_reuse`` on later turns. A later ``session_create`` is
+    usually evidence that production is reinitializing provider state on
+    every turn. Explicit ``session_reconnect`` events are allowed because
+    reconnect after an error is a legitimate recovery path.
+    """
+    if not GATE_SESSION_CONTINUITY_ENABLED:
+        return None
+
+    log_path = sandbox_dir / "harness_forensics.jsonl"
+    if not log_path.exists():
+        return None
+
+    events: list[dict] = []
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        if session_token:
+            token = event.get("session_token") or event.get("conversation_id")
+            if token and str(token).split("-t", 1)[0] != session_token:
+                continue
+        events.append(event)
+
+    creates: set[int] = set()
+    reconnect_turns: set[int] = set()
+    reuse_turns: set[int] = set()
+    for event in events:
+        event_name = str(event.get("event") or "")
+        op_name = str(event.get("op") or "")
+        # ``traced_op("session_create", turn_index=N)`` records
+        # ``event=op_start/op_done`` and ``op=session_create``. Direct
+        # ``log("session_create", ...)`` records the lifecycle in the
+        # event field. Normalize both shapes, plus the older
+        # session_create_start/session_create_done taxonomy, so the WARN
+        # gate measures behavior instead of one logging spelling.
+        if op_name.startswith("session_"):
+            name = op_name
+        else:
+            name = event_name
+        try:
+            turn_index = int(event.get("turn_index"))
+        except (TypeError, ValueError):
+            continue
+        if name == "session_create" or name.startswith("session_create_"):
+            creates.add(turn_index)
+        elif name == "session_reconnect" or name.startswith("session_reconnect_"):
+            reconnect_turns.add(turn_index)
+        elif name == "session_reuse" or name.startswith("session_reuse_"):
+            reuse_turns.add(turn_index)
+
+    late_creates = [
+        turn for turn in creates
+        if turn > 0 and turn not in reconnect_turns
+    ]
+    if late_creates:
+        return (
+            "session continuity warning: forensics shows session_create on "
+            f"later turn(s) {late_creates}. Stateful voice/conversation "
+            "harnesses should create the provider session once at turn 0 "
+            "and emit session_reuse on later turns, unless a "
+            "session_reconnect event explains recovery after an error."
+        )
+    if creates and max(creates) == 0 and len(creates) == 1 and not reuse_turns:
+        return (
+            "session continuity warning: forensics shows a single "
+            "session_create but no session_reuse events on later turns. "
+            "Emit session_reuse when reusing the provider handle so the "
+            "operator can verify continuity."
+        )
+    return None
+
+
+_KEEPALIVE_STREAM_TYPES = frozenset({
+    "ping",
+    "pong",
+    "heartbeat",
+    "keepalive",
+    "keep_alive",
+    "metadata",
+    "metadata_only",
+    "metadata-only",
+    "rate_limits.updated",
+    "session.updated",
+    "session_update",
+})
+
+
+def _stream_event_type(event: dict) -> str:
+    """Return the provider event type recorded by the forensics shim."""
+    for key in ("type", "event_type", "provider_event", "provider_event_type"):
+        value = event.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
+    return ""
+
+
+def _event_matches_session(event: dict, session_token: str | None) -> bool:
+    if not session_token:
+        return True
+    token = event.get("session_token") or event.get("conversation_id")
+    if not token:
+        return True
+    return str(token).split("-t", 1)[0] == session_token
+
+
+def _is_timeout_like_event(event: dict) -> bool:
+    fields = (
+        event.get("event"),
+        event.get("op"),
+        event.get("error_type"),
+        event.get("error"),
+        event.get("end_reason"),
+        event.get("status"),
+    )
+    return any("timeout" in str(value).lower() for value in fields if value)
+
+
+def _is_recv_stream_event(event: dict) -> bool:
+    event_name = str(event.get("event") or "")
+    op_name = str(event.get("op") or "")
+    if event_name != "stream_event" and op_name != "stream_event":
+        return False
+    direction = str(event.get("dir") or event.get("direction") or "").lower()
+    return direction in ("recv", "receive", "in", "inbound")
+
+
+def _is_keepalive_stream_event(event: dict) -> bool:
+    typ = _stream_event_type(event)
+    if not typ:
+        return False
+    if typ in _KEEPALIVE_STREAM_TYPES:
+        return True
+    return any(token in typ for token in ("ping", "pong", "heartbeat", "keepalive"))
+
+
+def _is_output_bearing_stream_event(event: dict) -> bool:
+    typ = _stream_event_type(event)
+    if not typ or _is_keepalive_stream_event(event):
+        return False
+    # Provider event names vary, so classify positive evidence broadly
+    # but only after excluding the known transport-maintenance events.
+    return any(
+        token in typ
+        for token in (
+            "audio",
+            "text",
+            "transcript",
+            "delta",
+            "message",
+            "content",
+            "chunk",
+            "response.output",
+            "agent_response",
+        )
+    )
+
+
+def verify_stream_keepalive_only_from_forensics(
+    sandbox_dir: Path,
+    *,
+    session_token: str | None = None,
+    min_keepalive_tail: int = 3,
+) -> str | None:
+    """WARN-tier diagnostic for streams kept alive by transport events only.
+
+    A correct streaming collector resets its idle timeout on meaningful
+    output, not on ping/pong/heartbeat/metadata events. This diagnostic
+    surfaces the failure pattern where a harness receives only keepalive
+    traffic until a hard timeout.
+    """
+    if not GATE_STREAM_KEEPALIVE_DIAGNOSTIC_ENABLED:
+        return None
+
+    log_path = sandbox_dir / "harness_forensics.jsonl"
+    if not log_path.exists():
+        return None
+
+    events: list[dict] = []
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict) and _event_matches_session(event, session_token):
+            events.append(event)
+
+    if not events or not any(_is_timeout_like_event(event) for event in events):
+        return None
+
+    recv_stream_events = [
+        event for event in events
+        if _is_recv_stream_event(event)
+    ]
+    if not recv_stream_events:
+        return None
+
+    last_output_index = -1
+    for idx, event in enumerate(recv_stream_events):
+        if _is_output_bearing_stream_event(event):
+            last_output_index = idx
+
+    tail = recv_stream_events[last_output_index + 1:]
+    keepalive_tail = [event for event in tail if _is_keepalive_stream_event(event)]
+    if len(keepalive_tail) < min_keepalive_tail or len(keepalive_tail) != len(tail):
+        return None
+
+    event_types = [_stream_event_type(event) or "unknown" for event in keepalive_tail[-5:]]
+    if last_output_index >= 0:
+        return (
+            "stream keepalive warning: forensics shows output-bearing stream "
+            f"events followed by {len(keepalive_tail)} keepalive/metadata "
+            f"event(s) until timeout ({event_types}). Streaming collectors "
+            "should reset idle timers only on meaningful response output, "
+            "not ping/pong/heartbeat/metadata traffic."
+        )
+    return (
+        "stream keepalive warning: forensics shows keepalive/metadata "
+        f"stream traffic until timeout with no output-bearing event "
+        f"({event_types}). The harness may be treating transport "
+        "keepalives as response progress; reset idle timers only on "
+        "meaningful output events."
+    )
+
+
+_EXTERNAL_PROVIDER_BLOCK_PATTERNS = (
+    "quota",
+    "credit",
+    "credits",
+    "insufficient balance",
+    "billing",
+    "payment required",
+    "subscription",
+    "rate limit",
+    "too many requests",
+    "429",
+    "unauthorized",
+    "forbidden",
+    "invalid api key",
+    "invalid_api_key",
+    "authentication",
+    "permission denied",
+)
+
+
+def classify_external_provider_block_from_forensics(
+    sandbox_dir: Path,
+    *,
+    session_token: str | None = None,
+) -> dict[str, Any] | None:
+    """Return provider/account block evidence from forensics, if present.
+
+    This is deliberately provider-agnostic. It does not decide that every
+    timeout is an account problem. It only classifies high-signal evidence:
+    quota/auth/billing/rate-limit text in forensics, or the streaming
+    keepalive-only diagnostic that already requires timeout evidence.
+    """
+    log_path = sandbox_dir / "harness_forensics.jsonl"
+    if not log_path.exists():
+        return None
+
+    matched: list[dict[str, Any]] = []
+    for line in log_path.read_text(encoding="utf-8", errors="replace").splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or not _event_matches_session(event, session_token):
+            continue
+        haystack = json.dumps(event, ensure_ascii=False, default=str).lower()
+        if any(pattern in haystack for pattern in _EXTERNAL_PROVIDER_BLOCK_PATTERNS):
+            matched.append({
+                "event": event.get("event") or event.get("op") or "unknown",
+                "turn_index": event.get("turn_index"),
+                "type": event.get("type") or event.get("event_type"),
+                "preview": haystack[:500],
+            })
+            if len(matched) >= 3:
+                break
+
+    if matched:
+        return {
+            "status": "external_provider_blocked",
+            "reason": "provider/account/quota/auth evidence found in forensics",
+            "evidence": matched,
+        }
+
+    keepalive_warning = verify_stream_keepalive_only_from_forensics(
+        sandbox_dir,
+        session_token=session_token,
+    )
+    if keepalive_warning:
+        return {
+            "status": "external_provider_blocked",
+            "reason": keepalive_warning,
+            "evidence": [],
+        }
+    return None
+
+
 __all__ = [
+    "classify_external_provider_block_from_forensics",
     "run_verification_checks",
     "verify_forensics_coverage",
+    "verify_session_continuity_from_forensics",
+    "verify_stream_keepalive_only_from_forensics",
 ]

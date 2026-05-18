@@ -31,7 +31,7 @@ For each candidate, set `covers_step_ids` to the list of blueprint step IDs the 
 If the user's request has no blueprint at all (single-scope / legacy flow), leave covers_step_ids empty — downstream falls back to flat flow.
 
 ### coverage_confidence (dict of step_id → "claimed")  — Phase 4
-Set ONE entry per step_id in covers_step_ids, always with value "claimed". Agent 2 never verifies; Phase 6.5 later upgrades confirmed scopes to "verified" or removes them.
+Set ONE entry per step_id in covers_step_ids, always with value "claimed". Agent 2 never verifies; later selected-candidate screening/research upgrades confirmed scopes to "verified" or removes them.
 
 ## Field Guidelines
 
@@ -40,7 +40,7 @@ Set ONE entry per step_id in covers_step_ids, always with value "claimed". Agent
 - pricing_model: "per-token", "per-request", "per-page", "monthly", "usage-based", "free-tier", or "freemium"
 - (`relevant_subtasks` is deprecated and auto-populated by `agent4/core.py` from `covers_step_ids`. Don't emit it; the back-compat shim handles it. Reads are surfaced as a structured `deprecated_field_read` telemetry event for finding lingering downstream consumers.)
 - source: URL where the candidate was found during research
-- api_interaction_pattern_hint: a best-effort signal for HOW the API returns results to the caller. Valid values: "sync" (plain request → response, most REST endpoints), "async_polling" (submit + poll for job completion — common for OCR, transcription, batch), "sse_streaming" (Server-Sent Events over a long-lived HTTP connection — LLM token streaming, progress events), "websocket" (a wss:// WebSocket is the PRIMARY protocol — OpenAI Realtime, ElevenLabs Conversational AI, phone/voice realtime APIs; strong signal for Agent 5 to use the WebSocket harness pattern), "other" (evidence of a non-sync/non-polling pattern but too little detail to classify), "unknown" (insufficient signal). This is a HINT — Phase 6.5 reads the actual docs and can overwrite it with the richer interaction_model flags.
+- api_interaction_pattern_hint: a best-effort signal for HOW the API returns results to the caller. Valid values: "sync" (plain request → response, most REST endpoints), "async_polling" (submit + poll for job completion — common for OCR, transcription, batch), "sse_streaming" (Server-Sent Events over a long-lived HTTP connection — LLM token streaming, progress events), "websocket" (a wss:// WebSocket is the PRIMARY protocol — OpenAI Realtime, ElevenLabs Conversational AI, phone/voice realtime APIs; strong signal for Agent 5 to use the WebSocket harness pattern), "other" (evidence of a non-sync/non-polling pattern but too little detail to classify), "unknown" (insufficient signal). This is a HINT — selected-candidate screening and Agent 5 research read the actual docs and can overwrite it with richer interaction_model facts.
 
 ## Candidate-class separation
 

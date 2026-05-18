@@ -194,9 +194,9 @@ export function subscribeToEvents(
     "agent_blocked",       // Phase 2: emitted when billing gate denies an agent
     "workflow_blueprint",  // Phase 3: emitted after Agent 1 with the blueprint payload
     "selection_required",  // Phase 6: pipeline paused, awaiting user candidate picks
-    "candidate_verified",  // Phase 6.5: per-candidate deep-verify result (per scope)
-    "candidate_rejected",  // Phase 6.5: per-candidate rejection (per scope)
-    "scope_verified_complete", // Phase 6.5: per-scope summary (verified + rejected counts)
+    "candidate_verified",  // Per-candidate selected-candidate verification result (per scope)
+    "candidate_rejected",  // Per-candidate selected-candidate rejection (per scope)
+    "scope_verified_complete", // Per-scope summary (verified + rejected counts)
     "test_data_sufficiency",   // Modality-aware verdict per file-requiring scope: READY / AUGMENT / SYNTHESIZE / REQUEST_MORE / DEGRADE
     "coverage_gap",            // Backend warns when Agent 2 found 0 candidates or scopes have no coverage
     "evaluation_report",       // Final structured EvaluationReport assembled at pipeline_completed time

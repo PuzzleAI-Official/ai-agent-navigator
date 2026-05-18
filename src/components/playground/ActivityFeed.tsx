@@ -146,7 +146,7 @@ export function ActivityFeed({ entries }: Props) {
                   )}
                   {section.cost != null && (
                     <span className="text-[10px] font-mono text-white/30">
-                      {(section.cost * 20).toFixed(2)} credits
+                      ${section.cost.toFixed(2)}
                     </span>
                   )}
                 </div>

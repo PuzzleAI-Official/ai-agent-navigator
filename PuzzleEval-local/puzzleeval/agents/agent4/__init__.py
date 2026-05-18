@@ -7,7 +7,6 @@ for back-compat.
 Canonical home: ``puzzleeval.agents.agent4.core``.
 """
 
-from puzzleeval.agents.agent4.core import *  # noqa: F401,F403
 from puzzleeval.agents.agent4.core import (
     VERIFICATION_SYSTEM_PROMPT,
     STRUCTURE_SYSTEM_PROMPT,

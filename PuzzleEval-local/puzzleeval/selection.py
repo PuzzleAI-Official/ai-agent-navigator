@@ -13,12 +13,17 @@ bonus. Each scope's competition is standalone.
 Used by:
   - pipeline_runner.py: provides default per-scope picks for the
     SelectionPanel (Phase 6) and the auto-run path (--no-interactive)
-  - Phase 6.5 deep-verify: exactly the selected K candidates per scope
-    go to deep-verify
+  - selected-candidate verification: exactly the selected K candidates per
+    scope go to docs/access verification and Agent 5 research
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from puzzleeval.provider_registry import _normalize
 from puzzleeval.schemas import Candidate, ScreenedCandidate
 
 
@@ -30,6 +35,27 @@ DEFAULT_WEIGHTS = {
     "docs_quality": 0.10,
     "pricing_fit": 0.10,
 }
+
+
+@dataclass(frozen=True)
+class BuildCandidateSelection:
+    """Orchestrator-owned Agent 5 build list plus audit details."""
+
+    selected: list[ScreenedCandidate]
+    blocked_missing_docs: list[ScreenedCandidate]
+    blocked_missing_credentials: list[ScreenedCandidate]
+    dropped_by_rank: list[ScreenedCandidate]
+    audit_payload: dict[str, Any]
+
+    def event_payload(self) -> dict[str, Any]:
+        return {
+            "selected": [c.name for c in self.selected],
+            "blocked_missing_docs": [c.name for c in self.blocked_missing_docs],
+            "blocked_missing_credentials": [
+                c.name for c in self.blocked_missing_credentials
+            ],
+            "dropped_by_rank": [c.name for c in self.dropped_by_rank],
+        }
 
 
 def select_scope_candidate_pairs(
@@ -88,6 +114,144 @@ def select_scope_candidate_pairs(
         result[scope_id] = [name for _, name in scored[:cap_per_scope]]
 
     return result
+
+
+def candidate_has_build_credentials(
+    candidate: ScreenedCandidate,
+    provider_credentials: dict[str, dict[str, str]] | None,
+) -> bool:
+    """Return whether the candidate can be called in a live build."""
+
+    if (getattr(candidate, "auth_method", "") or "").lower() == "no_auth":
+        return True
+
+    norm_provider = _normalize(getattr(candidate, "provider", "") or "")
+    norm_candidate = _normalize(getattr(candidate, "name", "") or "")
+    credential_keys = {
+        _normalize(str(key))
+        for key in (provider_credentials or {}).keys()
+        if str(key or "").strip()
+    }
+    for key in credential_keys:
+        if (
+            key == norm_provider
+            or key == norm_candidate
+            or key in norm_provider
+            or norm_provider in key
+            or key in norm_candidate
+            or norm_candidate in key
+        ):
+            return True
+
+    # Direct Agent 5 tests/CLI runs can still provide explicit env vars on the
+    # candidate. The orchestrator normally resolves these into
+    # provider_credentials before Agent 5 starts.
+    import os
+
+    for var in getattr(candidate, "auth_env_vars", []) or []:
+        if os.environ.get(str(var)):
+            return True
+    return False
+
+
+def select_agent5_build_candidates(
+    validated_candidates: list[ScreenedCandidate],
+    *,
+    trace_id: str,
+    runs_root: str | Path | None,
+    provider_credentials: dict[str, dict[str, str]] | None,
+    max_candidates: int,
+) -> BuildCandidateSelection:
+    """Select the final Agent 5 build list from Agent 4 validated candidates."""
+
+    from puzzleeval.docs_entrypoint import (
+        docs_entrypoint_allows_automatic_build,
+        resolve_docs_entrypoint_for_candidate,
+    )
+    from puzzleeval.web_doc_cache import candidate_sandbox_dir
+
+    docs_ready: list[ScreenedCandidate] = []
+    blocked_missing_docs: list[ScreenedCandidate] = []
+    blocked_docs_details: list[dict[str, Any]] = []
+
+    for candidate in validated_candidates:
+        sandbox_dir = candidate_sandbox_dir(
+            trace_id,
+            candidate.name,
+            runs_root=runs_root,
+        )
+        docs_payload = resolve_docs_entrypoint_for_candidate(candidate, sandbox_dir)
+        docs_ok = docs_entrypoint_allows_automatic_build(candidate, sandbox_dir)
+        if docs_ok:
+            docs_ready.append(candidate)
+        else:
+            blocked_missing_docs.append(candidate)
+            blocked_docs_details.append({
+                "name": candidate.name,
+                "provider": candidate.provider,
+                "docs_verdict": docs_payload.get("docs_verdict"),
+                "evidence_status": docs_payload.get("evidence_status"),
+                "primary_docs_entrypoint": docs_payload.get("primary_docs_entrypoint"),
+            })
+
+    credentialed: list[ScreenedCandidate] = []
+    blocked_missing_credentials: list[ScreenedCandidate] = []
+    for candidate in docs_ready:
+        if candidate_has_build_credentials(candidate, provider_credentials):
+            credentialed.append(candidate)
+        else:
+            blocked_missing_credentials.append(candidate)
+
+    ranked = sorted(
+        credentialed,
+        key=lambda item: (
+            -float(getattr(item, "relevance_score", 0) or 0),
+            item.name,
+        ),
+    )
+    selected = ranked[: max(0, max_candidates)]
+    dropped_by_rank = ranked[max(0, max_candidates):]
+
+    audit_payload = {
+        "schema_version": 1,
+        "trace_id": trace_id,
+        "selection_owner": "orchestrator",
+        "source": "agent4_validated_candidates",
+        "max_candidates": max_candidates,
+        "input_candidates": [
+            {"name": c.name, "provider": c.provider}
+            for c in validated_candidates
+        ],
+        "selected": [
+            {
+                "name": c.name,
+                "provider": c.provider,
+                "relevance_score": c.relevance_score,
+            }
+            for c in selected
+        ],
+        "blocked_missing_docs": blocked_docs_details,
+        "blocked_missing_credentials": [
+            {"name": c.name, "provider": c.provider, "auth_method": c.auth_method}
+            for c in blocked_missing_credentials
+        ],
+        "dropped_by_rank": [
+            {
+                "name": c.name,
+                "provider": c.provider,
+                "relevance_score": c.relevance_score,
+            }
+            for c in dropped_by_rank
+        ],
+    }
+
+    return BuildCandidateSelection(
+        selected=selected,
+        blocked_missing_docs=blocked_missing_docs,
+        blocked_missing_credentials=blocked_missing_credentials,
+        dropped_by_rank=dropped_by_rank,
+        audit_payload=audit_payload,
+    )
 
 
 def _score_at_scope(

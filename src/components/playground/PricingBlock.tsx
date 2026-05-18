@@ -11,7 +11,7 @@
 //     to the cheapest tier's overage)
 //   - source URLs at the bottom so the user can verify the numbers
 //
-// Data comes from the deep-verify 4B extraction. CandidateCard only mounts
+// Data comes from selected-candidate pricing metadata/research. CandidateCard only mounts
 // this component when pricing_breakdown is non-null.
 // ============================================================================
 

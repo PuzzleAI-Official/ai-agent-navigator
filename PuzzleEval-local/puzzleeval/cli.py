@@ -80,6 +80,8 @@ from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
 from puzzleeval.agents.screening import run_screening_agent
 from puzzleeval.provider_registry import load_registry, get_all_credentials
 from puzzleeval.agents.implement_test_env import run_implement_test_env_agent
+from puzzleeval.config import AGENT5_MAX_CANDIDATES
+from puzzleeval.selection import select_agent5_build_candidates
 
 # Max conversation turns before forcing a result.
 # The agent should decide to stop earlier on its own in most cases.
@@ -94,10 +96,36 @@ def _filter_user_understanding(uo, subtasks_to_keep):
     sub-tasks and Agent 3 only the text sub-tasks. Each agent generates
     test cases scoped to its sub-tasks, then results merge.
     """
-    from puzzleeval.schemas import UserUnderstandingOutput
+    from puzzleeval.schemas import TestPlan, UserUnderstandingOutput
     keep_descs = {st.description for st in subtasks_to_keep}
     filtered_subtasks = [st for st in uo.sub_tasks if st.description in keep_descs]
-    # Keep everything else intact (summary, domain, keywords, constraints, workflow)
+    filtered_test_plan = None
+    test_plan = getattr(uo, "test_plan", None)
+    workflow = getattr(uo, "workflow", None)
+    if test_plan is not None and workflow is not None:
+        keep_caps = {
+            str(getattr(st, "capability", "")).strip().lower()
+            for st in filtered_subtasks
+        }
+        keep_scope_ids = {
+            step.id
+            for step in getattr(workflow, "steps", []) or []
+            if str(getattr(step, "capability", "")).strip().lower() in keep_caps
+        }
+        filtered_specs = [
+            spec for spec in getattr(test_plan, "scope_specs", []) or []
+            if getattr(spec, "scope_id", None) in keep_scope_ids
+        ]
+        if filtered_specs:
+            filtered_test_plan = TestPlan(
+                scope_specs=filtered_specs,
+                total_test_target=sum(
+                    int(getattr(spec, "test_count_target", 0) or 0)
+                    for spec in filtered_specs
+                ),
+                notes=getattr(test_plan, "notes", "") or "",
+            )
+    # Keep everything else intact, with TestPlan narrowed to kept workflow scopes.
     return UserUnderstandingOutput(
         summary=uo.summary,
         sub_tasks=filtered_subtasks,
@@ -107,6 +135,7 @@ def _filter_user_understanding(uo, subtasks_to_keep):
         constraints=uo.constraints,
         workflow_summary=uo.workflow_summary,
         workflow=uo.workflow,
+        test_plan=filtered_test_plan,
     )
 
 
@@ -132,6 +161,10 @@ def _merge_agent3_results(file_result, text_result):
             generation_notes=merged_notes,
             coverage_summary=merged_coverage,
             cost_usd=file_result.cost_usd + text_result.cost_usd,
+            business_fixture=(
+                getattr(text_result, "business_fixture", None)
+                or getattr(file_result, "business_fixture", None)
+            ),
         )
     elif file_result:
         return file_result
@@ -144,6 +177,7 @@ def _merge_agent3_results(file_result, text_result):
             generation_notes="No test cases generated (no sub-tasks).",
             coverage_summary={},
             cost_usd=0.0,
+            business_fixture=None,
         )
 
 
@@ -707,6 +741,13 @@ Examples:
                         print(f"  data sufficiency check skipped: {exc}", file=sys.stderr)
 
                     # ── Agent 3F: file-based sub-tasks (only when files provided) ──
+                    from puzzleeval.agents.agent5.business_fixture import (
+                        synthesize_business_fixture_from_user_understanding,
+                    )
+                    agent3_business_fixture = synthesize_business_fixture_from_user_understanding(
+                        result.result
+                    )
+
                     if test_file_paths and file_subtasks:
                         print("\n" + "=" * 60, file=sys.stderr)
                         print(f"Starting Agent 3F (File-Based Tests) for {len(file_subtasks)} file sub-task(s)...", file=sys.stderr)
@@ -721,6 +762,7 @@ Examples:
                             user_understanding=file_uo,
                             trace_id=trace_id,
                             test_file_paths=test_file_paths,
+                            business_fixture=agent3_business_fixture,
                         )
                         a3_file_result = run_file_tests_agent(a3f_input)
                         print(f"  Agent 3F: {len(a3_file_result.test_cases)} file-based test cases", file=sys.stderr)
@@ -751,6 +793,7 @@ Examples:
                         a3_input = Agent3Input(
                             user_understanding=synth_uo,
                             trace_id=trace_id,
+                            business_fixture=agent3_business_fixture,
                         )
                         a3_text_result = run_synthetic_tests_agent(a3_input)
                         print(f"  Agent 3: {len(a3_text_result.test_cases)} synthetic test cases", file=sys.stderr)
@@ -775,10 +818,13 @@ Examples:
                             user_understanding=result.result,
                             trace_id=trace_id,
                             test_file_paths=test_file_paths,
+                            business_fixture=agent3_business_fixture,
                         ), a3_result,
                         duration_ms=a3_duration, cost_usd=a3_result.cost_usd,
                     )
-                    a3_validation = validate_agent3_output(a3_result, result.result)
+                    a3_validation = validate_agent3_output(
+                        a3_result, result.result, business_fixture=agent3_business_fixture
+                    )
                     pipeline_run.save_validation("agent_3", a3_validation)
                     _print_validation("Agent 3", a3_validation, logger, trace_id)
 
@@ -811,6 +857,20 @@ Examples:
                 provider_creds = get_all_credentials(
                     registry, agent4_result.validated_candidates,
                 )
+                selection = select_agent5_build_candidates(
+                    agent4_result.validated_candidates,
+                    trace_id=trace_id,
+                    runs_root="runs",
+                    provider_credentials=provider_creds,
+                    max_candidates=AGENT5_MAX_CANDIDATES,
+                )
+                try:
+                    (pipeline_run.run_dir / "agent5_candidate_selection.json").write_text(
+                        json.dumps(selection.audit_payload, indent=2, default=str),
+                        encoding="utf-8",
+                    )
+                except OSError:
+                    pass
 
                 # Show per-candidate credential matching
                 from puzzleeval.provider_registry import get_credentials as _get_creds
@@ -835,7 +895,7 @@ Examples:
                     )
 
                 agent5_input = Agent5Input(
-                    validated_candidates=agent4_result.validated_candidates,
+                    validated_candidates=selection.selected,
                     user_understanding=result.result,
                     test_cases=agent3_result,
                     trace_id=trace_id,
@@ -941,6 +1001,12 @@ Examples:
 
             agent3_start = time.time()
             final_result = None
+            from puzzleeval.agents.agent5.business_fixture import (
+                synthesize_business_fixture_from_user_understanding,
+            )
+            agent3_business_fixture = synthesize_business_fixture_from_user_understanding(
+                result.result
+            )
 
             # ── Mixed-mode routing (same logic as --agent5 path) ──
             a3_file_result = None
@@ -958,6 +1024,7 @@ Examples:
                     user_understanding=file_uo,
                     trace_id=trace_id,
                     test_file_paths=test_file_paths,
+                    business_fixture=agent3_business_fixture,
                 )
                 a3_file_result = run_file_tests_agent(a3f_input)
 
@@ -982,6 +1049,7 @@ Examples:
                 a3_input = Agent3Input(
                     user_understanding=synth_uo,
                     trace_id=trace_id,
+                    business_fixture=agent3_business_fixture,
                 )
                 a3_text_result = run_synthetic_tests_agent(a3_input)
 
@@ -1008,10 +1076,13 @@ Examples:
                     user_understanding=result.result,
                     trace_id=trace_id,
                     test_file_paths=test_file_paths,
+                    business_fixture=agent3_business_fixture,
                 ), final_result, duration_ms=agent3_duration,
                 cost_usd=final_result.cost_usd,
             )
-            agent3_validation = validate_agent3_output(final_result, result.result)
+            agent3_validation = validate_agent3_output(
+                final_result, result.result, business_fixture=agent3_business_fixture
+            )
             pipeline_run.save_validation(agent_label, agent3_validation)
             _print_validation("Agent 3", agent3_validation, logger, trace_id)
 

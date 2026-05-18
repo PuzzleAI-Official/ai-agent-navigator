@@ -32,7 +32,7 @@ _PASS_REFLECTION = """# Reflection: pre-HARNESS_COMPLETE
 
 ## SUCCESS CRITERIA evidence walk-through
 
-- smoke_test.py passes: smoke_test.py:42 runs five scenarios; output shows
+- offline smoke check passes: smoke_test.py:42 runs five mocked scenarios; output shows
   `5/5 passed`.
 - live_test.py passes: live_test.py:18 invokes harness.run() against the
   production payload shape and prints `success=True`.
@@ -145,6 +145,49 @@ class TestComputeEvidenceVerdicts:
         assert ev.sections_with_evidence == 5
         assert len(ev.missing_section_headers) == 0
 
+    def test_alias_headings_pass_when_evidence_is_strong(self):
+        reflection = """# Reflection: pre-HARNESS_COMPLETE
+
+## 1. DELIVERABLE coverage
+
+The harness satisfies the objective because smoke_test.py:42 runs the
+production-shaped request, live_test.py:18 exercises the real live path, and
+harness.py:120 returns the standardized output contract. Forensics coverage is
+present because harness.py:1 imports _forensics and harness.py:55-78 wraps the
+provider call with traced_op for request_start/request_done events.
+
+## Probe robustness decisions
+
+empty_input is handled at harness.py:32 by returning success=False without a
+network call. max_input is bounded at harness.py:42. malformed_input is caught
+at harness.py:52. idempotency and repeat_call use per-call local objects at
+harness.py:60-65, while concurrency avoids shared module-level state at
+harness.py:70-78.
+
+## Blueprint sub-task evidence
+
+The user's first sub-task is answered through harness.py:100-110, which calls
+the provider and returns the useful result in output. The second sub-task is
+handled at harness.py:115 by preserving the structured request fields used by
+the test cases.
+
+## Cleanup and error-path audit
+
+Auth setup is isolated in harness.py:20-30, transport in harness.py:35-50, and
+business logic in harness.py:60-110. Exceptions at harness.py:35, harness.py:52,
+and harness.py:75 include traced_op("op_error") before returning a structured
+failure. Resources are closed in harness.py:130 through a finally block.
+
+## Remaining risk
+
+With one more turn I would replace the hard-coded input cap in harness.py:42
+with an environment-configured value, but the current value is safe for the
+max_input probe and does not affect correctness.
+"""
+        ev = rec.compute_evidence(reflection)
+        assert ev.verdict == rec.ReflectionVerdict.PASS, ev.reason
+        assert len(ev.missing_section_headers) == 0
+
     def test_canonical_fail_reflection(self):
         ev = rec.compute_evidence(_FAIL_REFLECTION)
         assert ev.verdict == rec.ReflectionVerdict.FAIL, ev.reason
@@ -169,6 +212,16 @@ class TestComputeEvidenceMetrics:
         )
         ev = rec.compute_evidence(text)
         assert ev.total_file_refs >= 5
+
+    def test_file_ref_count_picks_up_agent_state_research_artifacts(self):
+        text = (
+            "_agent_state/research_synthesis.json:12 and "
+            "_agent_state/implementation_plan.json:4 and "
+            "_agent_state/research_findings/task_auth.json:1 support "
+            "the selected harness route."
+        )
+        ev = rec.compute_evidence(text)
+        assert ev.total_file_refs == 3
 
     def test_code_block_counter(self):
         text = (
@@ -201,6 +254,20 @@ class TestComputeEvidenceMetrics:
             harness_code="line 1\nline 2\n",
         )
         assert any("exceeds file length" in err for err in errors)
+
+    def test_validate_citation_targets_accepts_agent_state_artifacts(self, tmp_path):
+        state = tmp_path / "_agent_state"
+        state.mkdir()
+        (state / "research_synthesis.json").write_text('{"facts":[]}\n', encoding="utf-8")
+        (state / "implementation_plan.json").write_text('{"steps":[]}\n', encoding="utf-8")
+
+        errors = rec.validate_citation_targets(
+            "The plan cites _agent_state/research_synthesis.json:1 and "
+            "_agent_state/implementation_plan.json:1.",
+            sandbox_dir=tmp_path,
+        )
+
+        assert errors == []
 
 
 class TestSectionSplit:
@@ -252,6 +319,52 @@ class TestEvaluatePatternOnly:
         assert judge_reason == ""
         client.messages.create.assert_not_called()
 
+    def test_strong_borderline_reflection_passes_without_judge(self):
+        harness_code = "\n".join(f"# harness line {i}" for i in range(1, 240))
+        cited_refs = " ".join(f"harness.py:{i}" for i in range(20, 38))
+        reflection = f"""# Reflection: pre-HARNESS_COMPLETE
+
+## 1. DELIVERABLE coverage
+
+The live and smoke paths are grounded in specific implementation evidence:
+{cited_refs}. The code paths show request validation, normalized success and
+failure returns, and the same run(input_data) contract the objective requires.
+This paragraph is intentionally substantive enough to represent a real audit,
+not a label-only checklist.
+
+## Probe robustness decisions
+
+empty_input, max_input, malformed_input, idempotency, concurrency, and repeat
+calls are all tied to cited lines: {cited_refs}. The implementation constructs
+per-call state, validates input before network use, and returns structured
+failure dictionaries on error paths instead of swallowing exceptions.
+
+## Blueprint sub-task evidence
+
+The user-facing task path is cited with concrete lines: {cited_refs}. The
+harness maps the caller payload into provider requests and returns the useful
+assistant output in the standardized result object. It also preserves relevant
+business context across turns.
+
+## Cleanup and error-path audit
+
+Resource cleanup, exception logging, and transport separation are cited here:
+{cited_refs}. The implementation records forensics events and closes resources
+in all success and failure paths.
+"""
+        client = MagicMock()
+        verdict, evidence, judge_reason = rec.evaluate(
+            reflection_md=reflection,
+            objective_md="(objective)",
+            harness_code=harness_code,
+            client=client,
+            llm_judge_enabled=True,
+        )
+        assert evidence.verdict == rec.ReflectionVerdict.BORDERLINE
+        assert verdict == rec.ReflectionVerdict.PASS
+        assert judge_reason == "deterministic_strong_evidence"
+        client.messages.create.assert_not_called()
+
 
 class TestEvaluateJudgeFallback:
     """Borderline pattern verdict → judge fallback drives the final call."""
@@ -278,6 +391,24 @@ class TestEvaluateJudgeFallback:
         assert verdict == rec.ReflectionVerdict.PASS
         assert judge_reason.startswith("judge_pass:")
         client.messages.create.assert_called_once()
+
+    def test_judge_receives_cited_line_windows(self):
+        client = self._make_judge_client("pass", "evidence checks out")
+        harness_code = "\n".join(f"# harness line {i}" for i in range(1, 90))
+        verdict, evidence, judge_reason = rec.evaluate(
+            reflection_md=_BORDERLINE_REFLECTION,
+            objective_md="(objective)",
+            harness_code=harness_code,
+            client=client,
+            llm_judge_enabled=True,
+            logger=_LOGGER,
+        )
+        assert verdict == rec.ReflectionVerdict.PASS
+        user_message = client.messages.create.call_args.kwargs["messages"][0]["content"]
+        assert "# CITED HARNESS.PY LINE WINDOWS" in user_message
+        assert "harness.py:26-34" in user_message
+        assert "55: # harness line 55" in user_message
+        assert "# harness line 89" not in user_message
 
     def test_judge_fail_promotes_to_fail(self):
         client = self._make_judge_client("fail", "claims unsupported")

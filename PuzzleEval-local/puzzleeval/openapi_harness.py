@@ -1,8 +1,8 @@
 """Mechanical harness generator from OpenAPI / Swagger specs.
 
-When the Provider Atlas (or Phase 6.5 deep-verify) discovers an
+When selected-candidate docs metadata or Agent 5 research discovers an
 ``openapi.json`` URL for a candidate, we don't need an LLM build turn
-to produce a working harness skeleton — the spec defines the operation,
+to produce a working harness skeleton - the spec defines the operation,
 the auth, and the parameter shapes precisely. We can generate the
 harness mechanically, then optionally let the LLM polish edge cases.
 

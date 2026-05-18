@@ -1,24 +1,4 @@
-"""Regression guards for the ask_research Phase-1 gate.
-
-Real-run trace f9de380b-69c0 (2026-04-22): ElevenLabs build called
-ask_research TWICE before api_spec.txt was written. Both calls returned
-text but the sub-agent had NO context to inherit (no spec excerpt, no
-harness code, no prior errors) — so the "research" was generic API
-discovery that defeats the whole context-inheritance design.
-
-Architectural principle: ask_research is for FILLING GAPS in an
-existing api_spec.txt during Phase 2+ debugging. Primary discovery
-must be done by the builder itself via web_search + web_fetch so it
-develops its own mental model of the API. The sub-agent's value is
-targeted help WITH context; without context it has nothing to offer
-that web_search wouldn't offer more cheaply.
-
-AD-007: this is a safety-critical architectural contract, so
-enforcement lives in deterministic code (the dispatch block refuses
-the call), not just in prompt rules. This file locks both layers:
-  - Deterministic: ask_research dispatch checks api_spec.txt exists
-  - Prompt: ASK_RESEARCH_TOOL.description warns of the Phase-1 block
-"""
+﻿"""Regression guards for the scoped ask_research knowledge-gap gate.`r`n`r`nask_research is for declared planned research tasks, failure-packet gaps,`r`nand concrete FIELD NEEDED / WHY debug gaps. Broad provider discovery is`r`nblocked because it wastes turns and bypasses durable synthesis.`r`n`r`nAD-007: this is a safety-critical architecture contract, so enforcement`r`nlives in deterministic code and the tool description teaches the shape at`r`ntool-selection time.`r`n"""
 
 from __future__ import annotations
 
@@ -29,12 +9,12 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class TestAskResearchToolDescriptionTeachesPhaseGate:
+class TestAskResearchToolDescriptionTeachesScopeGate:
     """The tool description seen by Claude must explicitly warn that
-    the tool refuses to run until api_spec.txt exists. Making the
+    the tool refuses broad discovery. Making the
     contract visible at tool-selection time is as important as
-    enforcing it at dispatch time — if the model picks the tool in
-    Phase 1 and gets refused, the refusal tokens were still wasted."""
+    enforcing it at dispatch time â€” if the model picks the tool in
+    wrong shape and gets refused, the refusal tokens were still wasted."""
 
     def _tool(self) -> dict:
         from puzzleeval.agents.implement_test_env import ASK_RESEARCH_TOOL
@@ -42,11 +22,14 @@ class TestAskResearchToolDescriptionTeachesPhaseGate:
 
     def test_description_states_phase_gate(self):
         desc = self._tool()["description"]
-        assert "PHASE-1 BLOCKED" in desc or "Phase 2+" in desc, (
-            "Tool description must surface the Phase-1 gate at "
+        assert "DEFAULT KNOWLEDGE-GAP GATE" in desc, (
+            "Tool description must surface the knowledge-gap gate at "
             "tool-selection time, not just at dispatch time."
         )
-        assert "api_spec.txt" in desc
+        assert "_agent_state/research_plan.json" in desc
+        assert "FIELD NEEDED" in desc
+        assert "WHY" in desc
+        assert "task_id" in desc
 
     def test_description_explains_why(self):
         desc = self._tool()["description"]
@@ -55,14 +38,14 @@ class TestAskResearchToolDescriptionTeachesPhaseGate:
 
     def test_description_gives_phase_1_alternative(self):
         desc = self._tool()["description"]
-        # Tell Claude what to do instead in Phase 1
-        assert "web_search" in desc and "web_fetch" in desc
-        assert "Phase 1 pattern" in desc or "initial" in desc.lower()
+        # Tell Claude what to do instead for multi-gap research.
+        assert "research_tasks" in desc and "official docs entrypoint" in desc
+        assert "Planned research pattern" in desc or "planned" in desc.lower()
 
 
 class TestDispatchDeterministicBlock:
     """Source-grep guards: the dispatch block in implement_test_env.py
-    must check api_spec.txt existence BEFORE enriching or invoking the
+    must check research_plan.json existence BEFORE enriching or invoking the
     sub-agent. Safety contract enforced in code (AD-007), not prompts."""
 
     def _source(self) -> str:
@@ -77,52 +60,52 @@ class TestDispatchDeterministicBlock:
         ).read_text(encoding="utf-8")
         return impl + "\n# === build_loop.py ===\n" + build_loop
 
-    def test_dispatch_checks_spec_exists_before_calling_sub_agent(self):
+    def test_dispatch_checks_research_plan_exists_before_calling_sub_agent(self):
         src = self._source()
         # The gate must exist near the ask_research dispatch.
         # We look for the sentinel phrase that identifies the refusal path.
-        assert "ask_research REFUSED" in src, (
-            "Dispatch must contain a Phase-1 refusal branch. Without "
+        assert "ask_research BLOCKED" in src, (
+            "Dispatch must contain a scoped refusal branch. Without "
             "deterministic enforcement, Claude can still invoke "
-            "ask_research in Phase 1 even with the prompt warning."
+            "ask_research before planning even with the prompt warning."
         )
-        # Must be tied to api_spec.txt existence check
-        assert 'spec_path.exists()' in src
+        assert "RESEARCH_WORKERS_ENABLED" in src
+        assert "validate_ask_research_scope" in src
+        assert "FIELD NEEDED" in src
 
-    def test_dispatch_logs_phase1_block_as_warning(self):
+    def test_dispatch_logs_plan_block_as_warning(self):
         src = self._source()
         # Observability: the block should log so ops can grep for it
-        assert '"operation": "ask_research_phase1_gate"' in src
+        assert "ask_research_scope_gate" in src
 
-    def test_refusal_message_points_to_web_search_fetch(self):
+    def test_refusal_message_points_to_research_plan(self):
         src = self._source()
         # The refusal text must tell the builder what to do INSTEAD
-        assert "WHAT TO DO INSTEAD" in src or "Phase 1 research pattern" in src
-        assert "web_search" in src and "web_fetch" in src
+        assert "research_plan.json" in src
+        assert "FIELD NEEDED" in src
+        assert "debug gap" in src
 
     def test_refusal_returns_tool_result_not_raises(self):
         """The gate must return a tool_result (so Claude sees the
         refusal + can adjust) rather than crashing the run."""
         src = self._source()
         # Look for the continue statement after appending the refusal
-        # — this is how the gate gracefully declines without tearing
+        # â€” this is how the gate gracefully declines without tearing
         # down the build loop.
-        block_start = src.find("ask_research REFUSED")
+        block_start = src.find("ask_research BLOCKED")
         assert block_start != -1
         # Within the next ~3000 chars (the refusal block), there must
         # be a `continue` to break out of the tool-dispatch branch.
         refusal_block = src[block_start:block_start + 3500]
         assert "continue" in refusal_block, (
-            "Phase-1 refusal must `continue` (tool_result appended) "
-            "rather than raise — the build loop keeps going with the "
+                "Scoped refusal must `continue` (tool_result appended) "
+            "rather than raise â€” the build loop keeps going with the "
             "refusal as the tool's output."
         )
 
 
-class TestPhase1GateDoesNotRegressPhase2Behavior:
-    """The gate must only fire when api_spec.txt is MISSING. Phase 2
-    callers (with spec on disk) must proceed through normal enrichment
-    exactly as before."""
+class TestAskResearchGateKeepsScopedBehavior:
+    """The default gate blocks broad discovery and keeps scoped research available."""
 
     def _source(self) -> str:
         """Combined source: implement_test_env.py + dispatch_helpers.py
@@ -149,12 +132,12 @@ class TestPhase1GateDoesNotRegressPhase2Behavior:
             + "\n# === build_loop.py ===\n" + build_loop
         )
 
-    # Phase 8: deleted source-grep test `test_enrichment_path_still_runs_post_spec`.
+    # Enrichment behavior is covered directly by TestEnrichResearchQuestion.
     # Behavior covered by: tests/test_dispatch_helpers.py::TestEnrichResearchQuestion
 
     def test_ask_research_tool_still_registered(self):
         """Despite the gate, ask_research must still be in the tool
-        list — builders that pass Phase 1 correctly still need it."""
+        list - builders with scoped gaps still need it."""
         from puzzleeval.agents.implement_test_env import (
             ASK_RESEARCH_TOOL, CUSTOM_TOOL_NAMES,
         )
@@ -162,9 +145,9 @@ class TestPhase1GateDoesNotRegressPhase2Behavior:
         assert "ask_research" in CUSTOM_TOOL_NAMES
 
 
-class TestPhase1GateAppliesUniformlyAcrossProviders:
+class TestAskResearchGateAppliesUniformlyAcrossProviders:
     """Generality check: the gate is provider-agnostic. It fires
-    based on api_spec.txt existence, not on candidate name. Nothing
+    based on research_plan.json existence by default, not on candidate name. Nothing
     in the dispatch block hardcodes ElevenLabs / OpenAI / voice /
     any specific modality."""
 
@@ -177,13 +160,13 @@ class TestPhase1GateAppliesUniformlyAcrossProviders:
             ROOT / "puzzleeval" / "agents" / "agent5" / "build_loop.py"
         ).read_text(encoding="utf-8")
         src = impl + "\n# === build_loop.py ===\n" + build_loop
-        # Pull the Phase-1 refusal block (bounded by the REFUSED
-        # sentinel and the `continue` statement that ends it)
-        start = src.find("ask_research REFUSED")
+        # Pull the planned-research refusal block (bounded by the BLOCKED
+        # sentinel and the `continue` statement that ends it).
+        start = src.find("ask_research BLOCKED")
         assert start != -1
         # Look ~2500 chars ahead for the `continue` statement
         block = src[start:start + 2500]
-        # Must not mention specific provider names — language is
+        # Must not mention specific provider names â€” language is
         # provider-agnostic
         forbidden_hardcodes = (
             "ElevenLabs", "OpenAI", "Mindee", "Veryfi", "Anthropic",
@@ -191,6 +174,7 @@ class TestPhase1GateAppliesUniformlyAcrossProviders:
         )
         for name in forbidden_hardcodes:
             assert name not in block, (
-                f"Phase-1 refusal block mentions specific provider/modality "
-                f"{name!r} — the gate must be provider/modality-agnostic."
+                f"ask_research refusal block mentions specific provider/modality "
+                f"{name!r} â€” the gate must be provider/modality-agnostic."
             )
+

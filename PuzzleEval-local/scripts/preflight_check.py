@@ -346,7 +346,6 @@ def check_schema_roundtrip():
             rate_limit_info="100 req/min",
             data_format_notes="JSON body",
             screening_notes="deep_verify (preflight)",
-            api_spec_path=None,
             covers_step_ids=["step_1"],
             coverage_confidence={"step_1": "verified"},
             pricing_breakdown=None,
@@ -412,12 +411,13 @@ def check_disk():
 def check_ports():
     section("9. Plugin port availability (best-effort)")
     default_ports = {
-        "voice_realtime /audio": int(os.environ.get("PUZZLEEVAL_VOICE_PORT", "8768")),
         "webhook_receiver": int(os.environ.get("PUZZLEEVAL_WEBHOOK_PORT", "8765")),
         "outbound SMTP": int(os.environ.get("PUZZLEEVAL_SMTP_PORT", "2525")),
         "outbound Slack mock": int(os.environ.get("PUZZLEEVAL_SLACK_MOCK_PORT", "8766")),
         "outbound SMS mock": int(os.environ.get("PUZZLEEVAL_SMS_MOCK_PORT", "8767")),
     }
+    if os.environ.get("PUZZLEEVAL_VOICE_PORT"):
+        default_ports["voice_realtime /audio"] = int(os.environ["PUZZLEEVAL_VOICE_PORT"])
     for label, port in default_ports.items():
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(0.2)

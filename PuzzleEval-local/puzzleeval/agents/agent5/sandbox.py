@@ -28,6 +28,7 @@ Critical invariants (R2 from the plan's risk register):
 from __future__ import annotations
 
 import os
+import json
 import re
 import subprocess
 import sys
@@ -252,6 +253,7 @@ def log(event, **kw):
 
     Use canonical event names from the OBSERVABILITY CONTRACT:
       - harness_start, harness_exit
+      - session_create/reuse/reconnect/close
       - session_create_start/done/error
       - request_start/done/error
       - stream_start/event/done/error
@@ -535,29 +537,32 @@ def _install_websockets_hook():
             targets.append(_New)
         except Exception:
             pass
+        def _make_traced_send(orig_send):
+            async def traced_send(self, message, *a, **k):
+                try:
+                    msg_type = "?"
+                    if isinstance(message, str):
+                        try:
+                            msg_type = json.loads(message).get("type", "?")
+                        except Exception:
+                            pass
+                    elif isinstance(message, (bytes, bytearray)):
+                        msg_type = "binary"
+                    _emit({"kind": "ws", "event": "stream_event",
+                           "dir": "send", "type": msg_type,
+                           "bytes": len(message) if message else 0})
+                except Exception:
+                    pass
+                return await orig_send(self, message, *a, **k)
+            traced_send._puzzleeval_traced = True
+            return traced_send
+
         for cls in targets:
             try:
                 orig_send = cls.send
                 if getattr(orig_send, "_puzzleeval_traced", False):
                     continue
-                async def traced_send(self, message, *a, **k):
-                    try:
-                        msg_type = "?"
-                        if isinstance(message, str):
-                            try:
-                                msg_type = json.loads(message).get("type", "?")
-                            except Exception:
-                                pass
-                        elif isinstance(message, (bytes, bytearray)):
-                            msg_type = "binary"
-                        _emit({"kind": "ws", "event": "stream_event",
-                               "dir": "send", "type": msg_type,
-                               "bytes": len(message) if message else 0})
-                    except Exception:
-                        pass
-                    return await orig_send(self, message, *a, **k)
-                traced_send._puzzleeval_traced = True
-                cls.send = traced_send
+                cls.send = _make_traced_send(orig_send)
             except Exception:
                 pass
     except Exception:
@@ -714,16 +719,15 @@ def stage_agent_state(
         effective_max_turns: Per-build turn cap (after voice bump).
         effective_max_budget_usd: Per-build dollar cap.
         platform: One of "windows", "linux", "macos".
-        initial_model: The model used for turn 0 (typically Sonnet).
+        initial_model: The Agent 5 lead model used from turn 0.
     """
     # Lazy imports to avoid a sandbox → objective_synthesis → schemas
     # import-time chain that would risk cycles. These modules are stable
     # peers under agent5/ and import quickly.
     from puzzleeval.agents.agent5 import objective_synthesis
     from puzzleeval.agents.agent5 import runtime_state as rt_state
-    from puzzleeval.agents.agent5.autonomy_directives import (
-        initial_build_plan_content,
-    )
+    from puzzleeval.agents.agent5.business_fixture import stage_business_fixture
+    from puzzleeval import config as cfg
 
     state_dir = sandbox_dir / "_agent_state"
     try:
@@ -741,22 +745,48 @@ def stage_agent_state(
             effective_max_budget_usd=effective_max_budget_usd,
             platform=platform,
         )
+        audit = objective_synthesis.audit_objective_source_consistency(
+            objective_md,
+            candidate=candidate,
+            input_data=input_data,
+            modality_playbook_ids=modality_playbook_ids,
+            platform=platform,
+        )
+        if not audit.ok:
+            try:
+                with (state_dir / "build_progress.jsonl").open("a", encoding="utf-8") as fh:
+                    fh.write(
+                        json.dumps({
+                            "event": "objective_source_audit_failed",
+                            "issues": audit.issues,
+                        }, ensure_ascii=False, default=str)
+                        + "\n"
+                    )
+            except OSError:
+                pass
+            return False
         (state_dir / "objective.md").write_text(objective_md, encoding="utf-8")
     except OSError:
         return False
 
-    # Seed build_plan.md so fast-path/pre-rendered api_spec builds have a
-    # planning artifact before scaffold writes. This file is intentionally
-    # agent-writable; the agent patches/replaces it at trigger points.
-    try:
-        build_plan_path = state_dir / "build_plan.md"
-        if not build_plan_path.exists():
-            build_plan_path.write_text(
-                initial_build_plan_content(candidate.name),
-                encoding="utf-8",
+    # build_plan.md is a deprecated/experimental diagnostic aid. Do not seed
+    # it on the default path: otherwise every build carries an extra artifact
+    # the prompt tells the agent to ignore. Keep the legacy experiment usable
+    # only when the explicit directive flag is enabled.
+    if cfg.AUTONOMY_BUILD_PLAN_DIRECTIVES_ENABLED:
+        try:
+            from puzzleeval.agents.agent5.autonomy_directives import (
+                initial_build_plan_content,
             )
-    except OSError:
-        return False
+
+            build_plan_path = state_dir / "build_plan.md"
+            if not build_plan_path.exists():
+                build_plan_path.write_text(
+                    initial_build_plan_content(candidate.name),
+                    encoding="utf-8",
+                )
+        except OSError:
+            return False
 
     # Write the initial runtime_state.json.
     try:
@@ -770,6 +800,25 @@ def stage_agent_state(
         )
     except OSError:
         return False
+
+    # Write a canonical business fixture when the request/test plan depends on
+    # concrete domain facts (menu, pricing, hours, service area, policies).
+    # This is advisory context for Agent 5 and report/debug consumers; failure
+    # should not block legacy builds.
+    try:
+        stage_business_fixture(sandbox_dir, input_data)
+    except OSError:
+        pass
+
+    # Write a compact manifest of the actual Agent 3 test cases. Agent 5 uses
+    # this to plan against real input families, and the representative probe
+    # gate uses the selected cases as production-equivalence checks.
+    try:
+        from puzzleeval.agents.agent5.test_case_manifest import stage_test_case_manifest
+
+        stage_test_case_manifest(sandbox_dir, input_data)
+    except OSError:
+        pass
 
     return True
 
@@ -827,6 +876,94 @@ def venv_python_path(venv_dir: Path) -> Path:
     return venv_dir / "bin" / "python"
 
 
+def _ensure_venv_pip(
+    *,
+    vpython: Path,
+    logger,
+    trace_id: str,
+    candidate_name: str,
+    reason: str,
+) -> bool:
+    """Verify pip inside a venv, repairing partial venvs with ensurepip."""
+    if not vpython.exists():
+        return False
+    try:
+        pip_check = subprocess.run(
+            [str(vpython), "-m", "pip", "--version"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if pip_check.returncode == 0:
+            return True
+
+        logger.warning(
+            f"Venv for {candidate_name} has python but pip is missing; "
+            "bootstrapping via ensurepip",
+            extra={
+                "operation": "venv_pip_missing_ensurepip",
+                "trace_id": trace_id,
+                "candidate_name": candidate_name,
+                "reason": reason,
+                "pip_check_stderr": (pip_check.stderr or "")[:300],
+            },
+        )
+        ensure = subprocess.run(
+            [str(vpython), "-m", "ensurepip", "--upgrade", "--default-pip"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if ensure.returncode != 0:
+            logger.warning(
+                f"ensurepip failed for {candidate_name}: {(ensure.stderr or '')[:500]}",
+                extra={
+                    "operation": "venv_ensurepip_failed",
+                    "trace_id": trace_id,
+                    "candidate_name": candidate_name,
+                    "reason": reason,
+                    "stderr": (ensure.stderr or "")[:500],
+                },
+            )
+            return False
+
+        pip_recheck = subprocess.run(
+            [str(vpython), "-m", "pip", "--version"],
+            capture_output=True, text=True, timeout=15,
+        )
+        if pip_recheck.returncode == 0:
+            logger.info(
+                f"ensurepip repaired venv for {candidate_name}",
+                extra={
+                    "operation": "venv_ensurepip_repaired",
+                    "trace_id": trace_id,
+                    "candidate_name": candidate_name,
+                    "reason": reason,
+                },
+            )
+            return True
+
+        logger.warning(
+            f"pip still missing after ensurepip for {candidate_name}",
+            extra={
+                "operation": "venv_pip_missing_after_ensurepip",
+                "trace_id": trace_id,
+                "candidate_name": candidate_name,
+                "reason": reason,
+                "pip_check_stderr": (pip_recheck.stderr or "")[:300],
+            },
+        )
+        return False
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning(
+            f"pip repair check failed for {candidate_name}: {exc}",
+            extra={
+                "operation": "venv_pip_repair_error",
+                "trace_id": trace_id,
+                "candidate_name": candidate_name,
+                "reason": reason,
+                "error": str(exc),
+            },
+        )
+        return False
+
+
 def create_venv(
     sandbox_dir: Path,
     logger,
@@ -867,6 +1004,13 @@ def create_venv(
             # before this change OR cases where the shim got deleted).
             if not (sandbox_dir / "_forensics.py").exists():
                 stage_forensics_shim(sandbox_dir)
+            _ensure_venv_pip(
+                vpython=vpython,
+                logger=logger,
+                trace_id=trace_id,
+                candidate_name=candidate_name,
+                reason="venv_create_short_circuit",
+            )
             return True
         try:
             # `python -m venv .venv` includes pip by default. On
@@ -928,6 +1072,38 @@ def create_venv(
                     preinstall_venv_deps(venv_dir, logger, trace_id, candidate_name)
                 return True
             else:
+                if _ensure_venv_pip(
+                    vpython=vpython,
+                    logger=logger,
+                    trace_id=trace_id,
+                    candidate_name=candidate_name,
+                    reason="venv_create_returned_nonzero",
+                ):
+                    logger.warning(
+                        f"Venv command returned non-zero for {candidate_name}, "
+                        "but partial venv was repaired and will be used",
+                        extra={
+                            "operation": "venv_partial_repaired",
+                            "trace_id": trace_id,
+                            "candidate_name": candidate_name,
+                            "venv_dir": str(venv_dir),
+                            "stderr": (result.stderr or "")[:500],
+                        },
+                    )
+                    shim_ok = stage_forensics_shim(sandbox_dir)
+                    if not shim_ok:
+                        logger.warning(
+                            f"forensics shim staging failed for {candidate_name} "
+                            f"(harness will run without observability)",
+                            extra={
+                                "operation": "forensics_stage_failed",
+                                "trace_id": trace_id,
+                                "candidate_name": candidate_name,
+                            },
+                        )
+                    if os.environ.get("PUZZLEEVAL_VENV_PREINSTALL", "1") != "0":
+                        preinstall_venv_deps(venv_dir, logger, trace_id, candidate_name)
+                    return True
                 logger.warning(
                     f"Venv creation failed for {candidate_name}: {result.stderr[:500]}",
                     extra={
@@ -1126,8 +1302,10 @@ def resolve_credentials(
     if not credentials:
         possible_vars = [f"{provider_slug}_API_KEY"]
         # Also try to extract from any existing harness code
+        runs_root = getattr(input_data, "runs_root", None)
         sandbox_path = (
-            Path("runs") / input_data.trace_id
+            (Path(runs_root) if runs_root else Path("runs"))
+            / input_data.trace_id
             / "harnesses" / candidate_slug(candidate.name)
         )
         harness_code = _read_harness_code(sandbox_path)

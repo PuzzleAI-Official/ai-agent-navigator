@@ -91,6 +91,16 @@ function makeActivity(
   };
 }
 
+function activityDedupeKey(entry: Pick<ActivityEntry, "agentId" | "type" | "summary" | "candidateName" | "status">): string {
+  return [
+    entry.agentId,
+    entry.type,
+    entry.candidateName ?? "",
+    entry.status ?? "",
+    entry.summary,
+  ].join("::");
+}
+
 export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
   const [stage, setStage] = useState<Stage>("conversation");
   const [runId, setRunId] = useState<string | null>(null);
@@ -139,7 +149,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
   >({});
   const [isSelectionSubmitting, setIsSelectionSubmitting] = useState(false);
 
-  // Per-candidate rejection entries from the Phase 6.5 deep-verify pass.
+  // Per-candidate rejection entries from selected-candidate verification.
   // Populated by `candidate_rejected` SSE events; consumed by the
   // null-safe RejectionSummary component. Empty until 6.5 ships.
   const [rejections, setRejections] = useState<RejectionEntry[]>([]);
@@ -155,7 +165,18 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
 
   const addActivity = useCallback(
     (agentId: string, type: ActivityEntry["type"], summary: string, extra?: Partial<ActivityEntry>) => {
-      setActivityEntries((prev) => [...prev, makeActivity(agentId, type, summary, extra)]);
+      const next = makeActivity(agentId, type, summary, extra);
+      const nextKey = activityDedupeKey(next);
+      setActivityEntries((prev) => {
+        const last = prev[prev.length - 1];
+        if (last && activityDedupeKey(last) === nextKey) {
+          return [
+            ...prev.slice(0, -1),
+            { ...last, timestamp: Date.now(), detail: next.detail ?? last.detail },
+          ];
+        }
+        return [...prev, next];
+      });
     },
     []
   );
@@ -222,7 +243,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
         }
 
         case "scope_verified_complete": {
-          // Per-scope aggregate from Agent 4's deep-verify loop.
+          // Per-scope aggregate from selected-candidate verification.
           const scopeId = (data.scope_id as string) || "scope";
           const v = (data.verified_count as number) ?? 0;
           const r = (data.rejected_count as number) ?? 0;
@@ -236,7 +257,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
         }
 
         case "candidate_rejected": {
-          // Per-candidate rejection from the deep-verify pass.
+          // Per-candidate rejection from selected-candidate verification.
           const rName = data.candidate_name as string;
           const rScopeId = data.scope_id as string;
           const rReason = data.reason as RejectionEntry["reason"];
@@ -446,7 +467,13 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
             setCandidates((prev) =>
               prev.map((c) =>
                 c.name === candidateName
-                  ? { ...c, buildLog: [...c.buildLog, message] }
+                  ? {
+                      ...c,
+                      buildLog:
+                        c.buildLog[c.buildLog.length - 1] === message
+                          ? c.buildLog
+                          : [...c.buildLog, message],
+                    }
                   : c
               )
             );
@@ -487,7 +514,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
                 coverageConfidence[sid] = val === "verified" ? "verified" : "claimed";
               }
               // pricing_breakdown is null here — Agent 2 never populates it.
-              // The Phase 6.5 deep-verify emits a `candidate_verified` event
+              // Selected-candidate verification emits a `candidate_verified` event
               // with the real pricing, and PricingBlock stays hidden until
               // that fires.
               return {
@@ -515,11 +542,11 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
           const validated = data.validated as Array<Record<string, unknown>>;
           const rejected = data.rejected as string[];
           setCandidates((prev) => {
-            let updated = prev.filter((c) => !rejected.includes(c.name));
+            const updated = prev.filter((c) => !rejected.includes(c.name));
             return updated.map((c) => {
               const match = validated.find((v) => v.name === c.name);
               if (!match) return c;
-              // pricing_breakdown travels on this SSE payload when Phase 6.5's
+              // pricing_breakdown travels on this SSE payload when selected-candidate
               // 4B extraction filled it in. Parse null-safely in case the
               // field is absent (e.g. mock-mode runs or legacy artifacts).
               const maybePricing = match.pricing_breakdown;
@@ -542,7 +569,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
 
         case "candidate_verified": {
           // Phase 5 + 6.5: per-candidate verification event emitted during
-          // Phase 6.5's directed 4A→4B→4C→4D loop. Carries pricing_breakdown
+          // Selected-candidate verification/research loop. Carries pricing_breakdown
           // populated by 4B extraction. Null-safe here — when 6.5 hasn't
           // shipped this event never fires and candidates keep the default
           // null pricing.
@@ -816,7 +843,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
 
         setMessages((prev) => [
           ...prev,
-          { id: Date.now() + 1, role: "assistant", content: assistantContent },
+          { id: nextMessageId(), role: "assistant", content: assistantContent },
         ]);
 
         if (response.pipeline_started) {
@@ -915,7 +942,7 @@ export function usePipelineRun(agentModes: AgentModes = DEFAULT_MODES) {
     defaultPicks, // Phase 7 top-K pre-checked in SelectionPanel
     isSelectionSubmitting,
     submitSelection,
-    // Rejection entries from the deep-verify pass
+    // Rejection entries from selected-candidate verification
     rejections,
     // Robustness pass: SSE status + heartbeat + final report
     sseStatus,

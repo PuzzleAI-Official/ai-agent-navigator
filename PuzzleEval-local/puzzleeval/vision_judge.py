@@ -25,7 +25,15 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from anthropic import Anthropic, APIError
+try:
+    from anthropic import Anthropic, APIError
+except (ImportError, ModuleNotFoundError):  # pragma: no cover - minimal test envs
+    from puzzleeval.anthropic_client import anthropic  # type: ignore
+
+    Anthropic = anthropic.Anthropic  # type: ignore[attr-defined]
+
+    class APIError(Exception):
+        """Fallback APIError when the real anthropic package is absent."""
 
 from puzzleeval import config
 from puzzleeval.web_fetch_fallback import (

@@ -28,7 +28,10 @@ from __future__ import annotations
 import time
 from typing import TYPE_CHECKING
 
-import anthropic
+try:
+    import anthropic
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    from puzzleeval.anthropic_client import anthropic  # type: ignore
 
 from puzzleeval.agent_preamble import with_preamble
 from puzzleeval.agents.agent5.sandbox import candidate_slug
@@ -95,43 +98,45 @@ def ask_research_template_adherence(question: str) -> dict[str, object]:
 TARGETED_RESEARCH_SYSTEM = (
     "You are a peer integration engineer helping a builder agent debug a "
     "specific API. You've been handed FULL CONTEXT already: the provider "
-    "name, docs URL, auth method, what the builder knows (api_spec.txt "
-    "excerpt), what they've tried (recent error output, harness code), "
+    "name, docs URL, durable Agent 5 research artifacts, what they've "
+    "tried (recent error output, harness code), "
     "and the specific question they need answered.\n\n"
     "DO NOT re-derive what's already in the context. Don't restate the "
     "endpoint base URL or auth method — the builder already has those. "
     "Your job is to find what's MISSING, WRONG, or NON-OBVIOUS.\n\n"
+    "If the question includes a `Source Routing State` block, obey it: "
+    "start from canonical_docs_urls, treat discovered_docs_urls as "
+    "unverified fallbacks, and do not retry dead_or_blocked_urls unless "
+    "your search finds a new official replacement.\n\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "ROUTE BY REGIME — self-classify from the context you were given:\n"
+    "ROUTE BY SCOPED RESEARCH REGIME — self-classify from the context you were given:\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-    "REGIME A — TARGETED (question names a specific thing):\n"
+    "REGIME A — PLANNED TASK (question names a declared task_id or exact field):\n"
     "  Signals: question mentions a specific flag, endpoint, error code, "
-    "config parameter, or HTTP status. Context has a rich api_spec with "
-    "clear base URL + auth.\n"
-    "  Strategy: ONE precise search — `{provider} {specific_feature}` — "
-    "fetch the most authoritative result (official docs preferred), "
-    "return the answer + source URL. Stop. Do NOT burn remaining budget.\n"
-    "  Example: 'What enables override_permissions for ElevenLabs "
-    "Conversational AI agent?' → one search → fetch their agent-config "
-    "docs → cite the exact flag + docs URL → done.\n\n"
-    "REGIME B — EXPLORATORY (question is open-ended OR context is thin):\n"
-    "  Signals: question asks WHY something fails without a clear "
-    "hypothesis, or api_spec excerpt is minimal, or the symptom could "
-    "have many causes (WebSocket close codes, silent failures, "
-    "intermittent issues).\n"
-    "  Strategy: DIVERSIFY across search angles — do NOT repeat the "
-    "same query. Spread budget across 3-4 DIFFERENT sources:\n"
-    "    1. Official docs: `{provider} {feature}`\n"
-    "    2. GitHub SDK issues: `site:github.com {provider} {symptom}`\n"
-    "    3. Community (StackOverflow / Reddit / forum): "
-    "`{provider} {error_pattern} site:stackoverflow.com`\n"
-    "    4. Archived docs (for deprecated endpoints / migrations): "
-    "`{provider} {feature} site:web.archive.org`\n"
-    "  Fetch 1-2 most promising results across different sources. "
-    "Synthesize findings. If the provider migrated (new domain / v2 API), "
-    "report BOTH old and new endpoints explicitly.\n\n"
+    "config parameter, HTTP status, task_id, or FIELD NEEDED/WHY debug gap. "
+    "Context has docs_entrypoint + research_plan for first-pass research, "
+    "or research_synthesis/implementation_plan for debug research.\n"
+    "  Strategy: ONE precise official-docs-first search or fetch. Return the "
+    "answer + source URL. Stop. Do NOT burn remaining budget.\n"
+    "  Example: 'Which provider field enables session-level tool "
+    "permissions for this API surface?' -> one search -> fetch official "
+    "configuration docs -> cite the exact field + docs URL -> done.\n\n"
+    "REGIME B — UNSCOPED OR THIN CONTEXT (question is broad or lacks the field):\n"
+    "  Signals: question asks for general provider discovery, asks WHY "
+    "something fails without a concrete field/error/source, or lacks a "
+    "declared planned task/debug gap.\n"
+    "  Strategy: Do NOT run broad exploratory research. Return NOT_FOUND with "
+    "the reason `unscoped_research_request` and name the narrow planned task "
+    "or FIELD NEEDED/WHY wording the builder should write. This prevents "
+    "infinite research loops and keeps Agent 5 responsible for synthesis.\n\n"
+    "REGIME C — MIGRATION/DEPRECATION CHECK (explicitly requested):\n"
+    "  Signals: the planned task or failure packet specifically asks whether "
+    "docs moved, an endpoint was deprecated, or an SDK/package changed.\n"
+    "  Strategy: official docs first, then at most one official SDK repo or "
+    "package registry source if the docs are silent. Report old/new surfaces "
+    "only with sources. Do not search community/archive sites by default.\n\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-    "HONEST 3-TIER OUTPUT FORMAT (both regimes):\n"
+    "HONEST 3-TIER OUTPUT FORMAT (all scoped regimes):\n"
     "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     "Pick exactly ONE of three tiers based on what your research found.\n"
     "The tier names are load-bearing — the builder routes on them.\n\n"
@@ -142,9 +147,10 @@ TARGETED_RESEARCH_SYSTEM = (
     "referenced>`\n"
     "  `CONFIDENCE: high|medium (based on source authority + specificity)`\n\n"
     "TIER 2 — `REASONABLE_GUESS`: you couldn't find an authoritative "
-    "answer but the context (api_spec, recent error, similar APIs) "
-    "supports a likely value. Builder treats this as 'code with this; "
-    "live errors confirm or refute.' Honest middle ground between a "
+    "answer but the context (research_synthesis, recent error, official examples) "
+    "supports a likely value. Builder treats this as 'record as an "
+    "assumption in research_synthesis/implementation_plan, then validate "
+    "empirically after the plan gate.' Honest middle ground between a "
     "fabricated ANSWER and a giving-up NOT_FOUND.\n"
     "  `REASONABLE_GUESS: <likely value with reasoning>`\n"
     "  `BASIS: <what context supports this — analogous API, error "
@@ -152,8 +158,9 @@ TARGETED_RESEARCH_SYSTEM = (
     "  `CONFIDENCE: low (unverified — builder should validate "
     "empirically)`\n\n"
     "TIER 3 — `NOT_FOUND`: genuinely uncertain. No confident answer, "
-    "no defensible guess. Builder will leave the field as TODO and "
-    "let live errors guide.\n"
+    "no defensible guess. Builder records the unresolved question and either "
+    "revises the plan, asks a narrower research task, or abandons with "
+    "evidence.\n"
     "  `NOT_FOUND: searched: <queries tried>; checked: "
     "<sources checked>`\n"
     "  `RECOMMENDED NEXT STEP: <what the builder should try "
@@ -257,9 +264,10 @@ def run_targeted_research(
     Tool budget: 2 web_search + 2 web_fetch per call. Real-run measurement
     (trace a4860e94) showed budget 3+3 led to 8-min sub-agent runs that
     were 60% of the entire build wall-clock; budget 2+2 caps the sub-
-    agent at ~2-3 min and forces concise answers. The build agent can
-    always call ask_research again with a refined question — cheaper
-    than one massive 8-min call.
+    agent at ~2-3 min and forces concise answers. Phase 6 treats each
+    debug research worker as a bounded response to one failure packet:
+    after it returns, the builder patches, replans, or abandons before
+    delegating another research task.
     """
     candidate_label = candidate_slug(candidate_name)
 

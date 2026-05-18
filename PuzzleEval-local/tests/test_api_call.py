@@ -223,7 +223,9 @@ class TestContextManagementEdits:
         clear_edit = next(e for e in edits if e["type"] == "clear_tool_uses_20250919")
         # write_file/patch_file/advisor must NEVER be cleared — Claude
         # needs to see its edit history + advisor verdicts are rare.
-        for tool in ("write_file", "patch_file", "advisor"):
+        from puzzleeval.agents.agent5.tools import CUSTOM_TOOL_NAMES
+
+        for tool in sorted(set(CUSTOM_TOOL_NAMES) | {"advisor"}):
             assert tool in clear_edit["exclude_tools"], (
                 f"{tool} must be excluded from clear_tool_uses (high-value)"
             )
@@ -257,6 +259,7 @@ class TestSuccessPath:
         assert kw["primary_model"] == "claude-sonnet-4-6"
         assert kw["trace_id"] == "test-trace-001"
         assert "TestCand" in kw["operation_label"]
+        assert kw["allow_fallbacks"] is False
 
 
 class TestMessageSanitizer:
@@ -297,6 +300,68 @@ class TestMessageSanitizer:
         assert block["tool_use_id"] == "toolu_1"
         assert "tool returned no content" in block["content"]
         assert block["is_error"] is True
+
+    def test_synthesizes_missing_tool_result_after_tool_use(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "id": "toolu_missing",
+                        "name": "read_file",
+                        "input": {"filename": "harness.py"},
+                    }
+                ],
+            },
+            {"role": "assistant", "content": "continuing after failed dispatch"},
+        ]
+        logger = MagicMock()
+        repaired = sanitize_messages_for_anthropic(
+            messages,
+            logger=logger,
+            trace_id="trace",
+            candidate_name="Candidate",
+        )
+        assert repaired == 1
+        assert messages[1]["role"] == "user"
+        block = messages[1]["content"][0]
+        assert block["type"] == "tool_result"
+        assert block["tool_use_id"] == "toolu_missing"
+        assert block["is_error"] is True
+        assert "tool result was missing" in block["content"]
+        assert messages[2]["role"] == "assistant"
+        assert logger.warning.call_args.kwargs["extra"]["tool_pairing_repairs"] == 1
+
+    def test_appends_missing_tool_result_to_next_user_message(self):
+        messages = [
+            {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "toolu_1", "name": "read_file", "input": {}},
+                    {"type": "tool_use", "id": "toolu_2", "name": "read_file", "input": {}},
+                ],
+            },
+            {
+                "role": "user",
+                "content": [
+                    {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok"},
+                ],
+            },
+        ]
+        repaired = sanitize_messages_for_anthropic(
+            messages,
+            logger=MagicMock(),
+            trace_id="trace",
+            candidate_name="Candidate",
+        )
+        assert repaired == 1
+        result_ids = {
+            block["tool_use_id"]
+            for block in messages[1]["content"]
+            if block.get("type") == "tool_result"
+        }
+        assert result_ids == {"toolu_1", "toolu_2"}
 
 
 # ---------------------------------------------------------------------------

@@ -1,16 +1,16 @@
-"""Regression tests for Agent 5 write_file gates B1, B2, B3.
+﻿"""Regression tests for Agent 5 write_file gates B1, B2, B3.
 
 Each gate has the four-test discipline from the Phase B plan:
 
-  1. **Violation triggers gate** — the gate fires on a clear violation.
-  2. **Near-miss does NOT trigger** — the gate does NOT fire on a
+  1. **Violation triggers gate** â€” the gate fires on a clear violation.
+  2. **Near-miss does NOT trigger** â€” the gate does NOT fire on a
      legitimate boundary case (so future modalities aren't blocked).
-  3. **Env-var bypass works** — when the corresponding flag is set to
+  3. **Env-var bypass works** â€” when the corresponding flag is set to
      "0", the gate is silent and the call proceeds normally.
-  4. **Structured logging fires** — `gate_fired` log line is emitted on
+  4. **Structured logging fires** â€” `gate_fired` log line is emitted on
      trigger, with the documented JSON-shaped extras.
 
-Gate B4 (pre-spec research budget) lives in build_loop.py and is wired
+Gate B4 (pre-build research budget) lives in build_loop.py and is wired
 to the API response loop; it's covered separately by an integration
 test in `test_build_loop_behavior.py`.
 """
@@ -39,7 +39,9 @@ class TestForbiddenMetaFilenamePredicate:
 
     def test_canonical_files_pass(self):
         for name in [
-            "api_spec.txt",
+            "_agent_state/research_plan.json",
+            "_agent_state/research_synthesis.json",
+            "_agent_state/implementation_plan.json",
             "harness.py",
             "smoke_test.py",
             "live_test.py",
@@ -67,37 +69,37 @@ class TestIntrospectionScriptNamePredicate:
             assert not dispatch_helpers.is_introspection_script_name(name), name
 
     def test_non_py_with_introspection_prefix_does_not_match(self):
-        # The pattern is .py-only — a docs file named inspect_notes.txt
+        # The pattern is .py-only â€” a docs file named inspect_notes.txt
         # is somebody's notes file, not a probe script.
         assert not dispatch_helpers.is_introspection_script_name("inspect_notes.txt")
 
 
 class TestPhase1ScaffoldViolationPredicate:
-    def test_scaffold_block_during_phase1(self):
+    def test_scaffold_block_before_build_gate(self):
         for name in ["harness.py", "smoke_test.py", "live_test.py", "requirements.txt"]:
             assert dispatch_helpers.is_phase1_scaffold_violation(
-                name, api_spec_written=False
+                name, build_gate_accepted=False
             ), name
 
-    def test_scaffold_allowed_after_spec_written(self):
-        # After api_spec_written flips True, the model has switched to Opus
-        # and scaffold writes are exactly what's expected.
+    def test_scaffold_allowed_after_build_gate(self):
+        # After implementation_plan.json is accepted, scaffold writes are
+        # exactly what's expected.
         for name in ["harness.py", "smoke_test.py", "live_test.py", "requirements.txt"]:
             assert not dispatch_helpers.is_phase1_scaffold_violation(
-                name, api_spec_written=True
+                name, build_gate_accepted=True
             ), name
 
-    def test_api_spec_itself_is_not_a_scaffold_file(self):
-        # Writing api_spec.txt is the ONE allowed Phase-1 write. Don't gate it.
+    def test_implementation_plan_itself_is_not_a_scaffold_file(self):
+        # Writing the build-gate artifact is not a scaffold write.
         assert not dispatch_helpers.is_phase1_scaffold_violation(
-            "api_spec.txt", api_spec_written=False
+            "_agent_state/implementation_plan.json", build_gate_accepted=False
         )
 
-    def test_unrelated_filename_not_blocked_in_phase1(self):
+    def test_unrelated_filename_not_blocked_before_build_gate(self):
         # If a future modality writes (say) `voice_seed.wav`, the gate
-        # must not block it — this gate is narrowly the 4 scaffold names.
+        # must not block it â€” this gate is narrowly the 4 scaffold names.
         assert not dispatch_helpers.is_phase1_scaffold_violation(
-            "voice_seed.wav", api_spec_written=False
+            "voice_seed.wav", build_gate_accepted=False
         )
 
 
@@ -117,9 +119,10 @@ def _reset_config_flags(monkeypatch):
     importlib.reload(cfg)
 
 
-def _phase_state(api_spec_written: bool, slug: str = "test-cand") -> dict:
+def _phase_state(implementation_plan_accepted: bool, slug: str = "test-cand") -> dict:
     return {
-        "api_spec_written": api_spec_written,
+        "implementation_plan_accepted": implementation_plan_accepted,
+        "build_gate_accepted": implementation_plan_accepted,
         "candidate_slug": slug,
         "trace_id": "test-trace",
     }
@@ -132,7 +135,7 @@ class TestGateB1ForbiddenFilenames:
         result = tools.write_file(
             {"filename": "STATUS.txt", "content": "ok"},
             tmp_path,
-            phase_state=_phase_state(api_spec_written=True),
+            phase_state=_phase_state(implementation_plan_accepted=True),
         )
         assert result.startswith("Error:"), result
         assert "meta/state-tracking" in result
@@ -140,12 +143,12 @@ class TestGateB1ForbiddenFilenames:
 
     def test_near_miss_canonical_file_allowed(self, tmp_path: Path):
         result = tools.write_file(
-            {"filename": "api_spec.txt", "content": "BASE_URL: https://example.com\n"},
+            {"filename": "build_plan.md", "content": "Build notes\n"},
             tmp_path,
-            phase_state=_phase_state(api_spec_written=False),
+            phase_state=_phase_state(implementation_plan_accepted=False),
         )
         assert not result.startswith("Error:"), result
-        assert (tmp_path / "api_spec.txt").exists()
+        assert (tmp_path / "build_plan.md").exists()
 
     def test_env_bypass_allows_write(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv("PUZZLEEVAL_GATE_FORBIDDEN_FILENAMES", "0")
@@ -155,7 +158,7 @@ class TestGateB1ForbiddenFilenames:
         result = tools.write_file(
             {"filename": "notes.txt", "content": "operator override"},
             tmp_path,
-            phase_state=_phase_state(api_spec_written=True),
+            phase_state=_phase_state(implementation_plan_accepted=True),
         )
         assert not result.startswith("Error:"), result
         assert (tmp_path / "notes.txt").exists()
@@ -163,12 +166,12 @@ class TestGateB1ForbiddenFilenames:
     def test_md_filename_blocked_by_b1_when_in_forbidden_set(self, tmp_path: Path):
         # ``.md`` is now an ALLOWED extension (autonomy artifacts like
         # build_plan.md need it). Forbidden meta-files like NOTES.md are
-        # still rejected — but by B1 (forbidden-meta-filename), not by the
+        # still rejected â€” but by B1 (forbidden-meta-filename), not by the
         # extension allowlist. Defense in depth via filename, not via type.
         result = tools.write_file(
             {"filename": "NOTES.md", "content": "x"},
             tmp_path,
-            phase_state=_phase_state(api_spec_written=True),
+            phase_state=_phase_state(implementation_plan_accepted=True),
         )
         assert result.startswith("Error:"), result
         assert "meta/state-tracking" in result, (
@@ -180,7 +183,7 @@ class TestGateB1ForbiddenFilenames:
             tools.write_file(
                 {"filename": "STATUS.txt", "content": "x"},
                 tmp_path,
-                phase_state=_phase_state(api_spec_written=True),
+                phase_state=_phase_state(implementation_plan_accepted=True),
             )
         records = [r for r in caplog.records if getattr(r, "operation", "") == "gate_fired"]
         assert any(
@@ -189,23 +192,23 @@ class TestGateB1ForbiddenFilenames:
 
 
 class TestGateB3Phase1ScaffoldBlock:
-    def test_violation_rejects_in_phase1(self, tmp_path: Path):
+    def test_violation_rejects_before_build_gate(self, tmp_path: Path):
         result = tools.write_file(
             {"filename": "harness.py", "content": "def run(x): ..."},
             tmp_path,
-            phase_state=_phase_state(api_spec_written=False),
+            phase_state=_phase_state(implementation_plan_accepted=False),
         )
         assert result.startswith("Error:"), result
-        assert "Phase 1" in result
+        assert "implementation_plan.json" in result
         assert not (tmp_path / "harness.py").exists()
 
-    def test_near_miss_after_spec_written_allowed(self, tmp_path: Path):
-        # Once api_spec_written flips True (model switched to Opus), scaffold
-        # writes are exactly what's expected.
+    def test_near_miss_after_build_gate_allowed(self, tmp_path: Path):
+        # Once implementation_plan.json is accepted, scaffold writes are
+        # exactly what's expected.
         result = tools.write_file(
             {"filename": "harness.py", "content": "def run(x): return {}"},
             tmp_path,
-            phase_state=_phase_state(api_spec_written=True),
+            phase_state=_phase_state(implementation_plan_accepted=True),
         )
         assert not result.startswith("Error:"), result
         assert (tmp_path / "harness.py").exists()
@@ -219,7 +222,7 @@ class TestGateB3Phase1ScaffoldBlock:
         assert not result.startswith("Error:"), result
         assert (tmp_path / "harness.py").exists()
 
-    def test_env_bypass_allows_phase1_scaffold(self, tmp_path: Path, monkeypatch):
+    def test_env_bypass_allows_prebuild_scaffold(self, tmp_path: Path, monkeypatch):
         monkeypatch.setenv("PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK", "0")
         import puzzleeval.config as cfg
         importlib.reload(cfg)
@@ -227,7 +230,7 @@ class TestGateB3Phase1ScaffoldBlock:
         result = tools.write_file(
             {"filename": "harness.py", "content": "def run(x): ..."},
             tmp_path,
-            phase_state=_phase_state(api_spec_written=False),
+            phase_state=_phase_state(implementation_plan_accepted=False),
         )
         assert not result.startswith("Error:"), result
         assert (tmp_path / "harness.py").exists()
@@ -240,7 +243,7 @@ class TestGateB2IntrospectionWarn:
         result = tools.write_file(
             {"filename": "inspect_sdk.py", "content": "import some_sdk"},
             tmp_path,
-            phase_state=_phase_state(api_spec_written=True),
+            phase_state=_phase_state(implementation_plan_accepted=True),
         )
         assert not result.startswith("Error:"), result
         assert (tmp_path / "inspect_sdk.py").exists()
@@ -253,7 +256,7 @@ class TestGateB2IntrospectionWarn:
             result = tools.write_file(
                 {"filename": "probe_response.py", "content": "import harness"},
                 tmp_path,
-                phase_state=_phase_state(api_spec_written=True),
+                phase_state=_phase_state(implementation_plan_accepted=True),
             )
         assert not result.startswith("Error:"), result
         introspection_warns = [
@@ -269,7 +272,7 @@ class TestGateB2IntrospectionWarn:
             tools.write_file(
                 {"filename": "explore_api.py", "content": "x = 1"},
                 tmp_path,
-                phase_state=_phase_state(api_spec_written=True),
+                phase_state=_phase_state(implementation_plan_accepted=True),
             )
         warns = [
             r for r in caplog.records
@@ -288,7 +291,7 @@ class TestGateB2IntrospectionWarn:
             tools.write_file(
                 {"filename": "inspect_data.py", "content": "x = 1"},
                 tmp_path,
-                phase_state=_phase_state(api_spec_written=True),
+                phase_state=_phase_state(implementation_plan_accepted=True),
             )
         warns = [
             r for r in caplog.records
@@ -299,7 +302,7 @@ class TestGateB2IntrospectionWarn:
 
 
 # ---------------------------------------------------------------------------
-# Gate B4 (pre-spec research budget) — predicate-level tests
+# Gate B4 (pre-build research budget) â€” predicate-level tests
 # ---------------------------------------------------------------------------
 
 
@@ -323,45 +326,44 @@ class _StubBlock:
         self.name = name
 
 
-class TestPrespecResearchTurnDetection:
+class TestPrebuildResearchTurnDetection:
     def test_web_search_via_usage_counts(self):
         usage = _StubUsage(server_tool_use=_StubServerToolUse(web_search_requests=1))
-        assert dispatch_helpers.turn_used_prespec_research(
-            [], usage, api_spec_exists=False,
+        assert dispatch_helpers.turn_used_prebuild_research(
+            [], usage, build_gate_artifact_exists=False,
         ) is True
 
     def test_web_fetch_block_counts(self):
         content = [_StubBlock("server_tool_use", "web_fetch")]
-        assert dispatch_helpers.turn_used_prespec_research(
-            content, _StubUsage(), api_spec_exists=False,
+        assert dispatch_helpers.turn_used_prebuild_research(
+            content, _StubUsage(), build_gate_artifact_exists=False,
         ) is True
 
-    def test_ask_research_counts_only_when_spec_exists(self):
+    def test_ask_research_counts_in_planned_research_flow_before_build_gate(self):
         content = [_StubBlock("tool_use", "ask_research")]
-        # Pre-render case: spec on disk, ask_research allowed → counts.
-        assert dispatch_helpers.turn_used_prespec_research(
-            content, _StubUsage(), api_spec_exists=True,
+        # Artifact present path: ask_research still counts as a research turn.
+        assert dispatch_helpers.turn_used_prebuild_research(
+            content, _StubUsage(), build_gate_artifact_exists=True,
         ) is True
-        # Fresh-spec case: no spec on disk, ask_research is blocked by
-        # the existing Phase-1 gate before it executes → MUST NOT count
-        # (otherwise builders pay for a refused call against budget).
-        assert dispatch_helpers.turn_used_prespec_research(
-            content, _StubUsage(), api_spec_exists=False,
-        ) is False
+        # Current planned-research flow: ask_research before build gate
+        # still counts toward the pre-build research budget.
+        assert dispatch_helpers.turn_used_prebuild_research(
+            content, _StubUsage(), build_gate_artifact_exists=False,
+        ) is True
 
     def test_text_only_turn_does_not_count(self):
         content = [_StubBlock("text")]
-        assert dispatch_helpers.turn_used_prespec_research(
-            content, _StubUsage(), api_spec_exists=True,
+        assert dispatch_helpers.turn_used_prebuild_research(
+            content, _StubUsage(), build_gate_artifact_exists=True,
         ) is False
 
     def test_advisor_block_does_not_count(self):
         # The advisor is a separate server tool used for tier-up
         # consultation, not for primary research. It should NOT count
-        # against the pre-spec research budget.
+        # against the pre-build research budget.
         content = [_StubBlock("server_tool_use", "advisor")]
-        assert dispatch_helpers.turn_used_prespec_research(
-            content, _StubUsage(), api_spec_exists=False,
+        assert dispatch_helpers.turn_used_prebuild_research(
+            content, _StubUsage(), build_gate_artifact_exists=False,
         ) is False
 
 
@@ -376,7 +378,7 @@ class TestGateConfigRoundTrip:
             "PUZZLEEVAL_GATE_FORBIDDEN_FILENAMES",
             "PUZZLEEVAL_GATE_INTROSPECTION_WARN",
             "PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK",
-            "PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET",
+            "PUZZLEEVAL_GATE_PREBUILD_RESEARCH_BUDGET",
         ):
             monkeypatch.delenv(flag, raising=False)
         import puzzleeval.config as cfg
@@ -384,15 +386,15 @@ class TestGateConfigRoundTrip:
         assert cfg.GATE_FORBIDDEN_FILENAMES_ENABLED is True
         assert cfg.GATE_INTROSPECTION_WARN_ENABLED is True
         assert cfg.GATE_PHASE1_SCAFFOLD_BLOCK_ENABLED is True
-        assert cfg.GATE_PRESPEC_RESEARCH_BUDGET_ENABLED is True
-        assert cfg.GATE_PRESPEC_RESEARCH_BUDGET == 2
+        assert cfg.GATE_PREBUILD_RESEARCH_BUDGET_ENABLED is True
+        assert cfg.GATE_PREBUILD_RESEARCH_BUDGET == 2
 
     def test_flags_can_be_disabled(self, monkeypatch):
         for flag in (
             "PUZZLEEVAL_GATE_FORBIDDEN_FILENAMES",
             "PUZZLEEVAL_GATE_INTROSPECTION_WARN",
             "PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK",
-            "PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET",
+            "PUZZLEEVAL_GATE_PREBUILD_RESEARCH_BUDGET",
         ):
             monkeypatch.setenv(flag, "0")
         import puzzleeval.config as cfg
@@ -400,10 +402,11 @@ class TestGateConfigRoundTrip:
         assert cfg.GATE_FORBIDDEN_FILENAMES_ENABLED is False
         assert cfg.GATE_INTROSPECTION_WARN_ENABLED is False
         assert cfg.GATE_PHASE1_SCAFFOLD_BLOCK_ENABLED is False
-        assert cfg.GATE_PRESPEC_RESEARCH_BUDGET_ENABLED is False
+        assert cfg.GATE_PREBUILD_RESEARCH_BUDGET_ENABLED is False
 
     def test_research_budget_count_is_configurable(self, monkeypatch):
-        monkeypatch.setenv("PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET_COUNT", "5")
+        monkeypatch.setenv("PUZZLEEVAL_GATE_PREBUILD_RESEARCH_BUDGET_COUNT", "5")
         import puzzleeval.config as cfg
         importlib.reload(cfg)
-        assert cfg.GATE_PRESPEC_RESEARCH_BUDGET == 5
+        assert cfg.GATE_PREBUILD_RESEARCH_BUDGET == 5
+

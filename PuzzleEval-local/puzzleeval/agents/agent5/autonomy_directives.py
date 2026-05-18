@@ -1,19 +1,18 @@
 """Directive constants for the autonomy artifact layer.
 
-The orchestrator injects these as user messages at specific trigger
-points to teach the agent to maintain ``_agent_state/build_plan.md``,
-``_agent_state/agent_observations.json``, and (at HARNESS_COMPLETE)
-``_agent_state/reflection_phase_3.md``.
+The orchestrator can inject these as user messages at specific trigger
+points. Build-plan directives are legacy/experimental and disabled by
+default; reflection directives remain load-bearing when the completion gate
+needs evidence in ``_agent_state/reflection_phase_3.md``.
 
 Per AD-007, the directives are deterministic Python-side enforcement
 of contracts that prompt-only teaching can't reliably enforce. The
 constants live in this module so they're greppable + testable + reused
 across the build_loop, dispatch_helpers, and tests.
 
-PR 1 scope: directives fire and the artifacts are written. The
-reflection-evidence gate that REJECTS HARNESS_COMPLETE on missing or
-vacuous reflection is PR 2 work — keep this module's exports tight to
-"what fires" and let verification.py own "what gates."
+This module owns message wording only. Whether a directive fires is governed
+by config flags in ``config.py`` and gate logic in ``build_loop.py``;
+``verification.py`` owns acceptance semantics.
 
 These strings are LOAD-BEARING product behavior — changing them
 materially alters Agent 5's behavior. Tests pin the exact wording.
@@ -27,29 +26,33 @@ from __future__ import annotations
 # ============================================================================
 
 BUILD_PLAN_INIT_DIRECTIVE = (
-    "You're at turn 1. Before any research or scaffolding, write "
-    "`_agent_state/build_plan.md` — your living todo list for this build. "
+    "Optional diagnostic planning is enabled for this run. Before any "
+    "scaffolding, write `_agent_state/build_plan.md` as a compact operator "
+    "todo list. This file is not build authority; objective.md, "
+    "runtime_state.json, research_synthesis.json, and "
+    "implementation_plan.json remain the action sources. "
     "Use this exact structure:\n"
     "\n"
     "```markdown\n"
     "# Build plan for <candidate>\n"
     "\n"
-    "## Phase 1 - Research [status: in_progress]\n"
+    "## Research synthesis [status: in_progress]\n"
     "- [ ] Fetch primary docs: <url from objective.md CONSTRAINTS>\n"
-    "- [ ] Identify auth method + endpoints + payload shapes\n"
-    "- [ ] Write or patch api_spec.txt (this triggers Phase 2 model switch)\n"
+    "- [ ] Write `_agent_state/research_plan.json` for unresolved build-critical gaps\n"
+    "- [ ] Consolidate findings in `_agent_state/research_synthesis.json`\n"
+    "- [ ] Write `_agent_state/implementation_plan.json` for build-gate validation\n"
     "\n"
-    "## Phase 2 - Build [status: not_started]\n"
+    "## Build [status: not_started]\n"
     "- [ ] requirements.txt with pinned versions\n"
     "- [ ] harness.py implementing run(input_data) -> dict\n"
-    "- [ ] smoke_test.py exercising every input shape from objective.md SUCCESS CRITERIA\n"
+    "- [ ] optional smoke_test.py only if useful for offline mechanical checks\n"
     "- [ ] _forensics.py imports + traced_op wrapping per AD-011\n"
     "\n"
-    "## Phase 3 - Verify [status: not_started]\n"
+    "## Verify [status: not_started]\n"
     "- [ ] live_test.py with production payload shape\n"
     "- [ ] Live test passes for each modality in test cases\n"
     "\n"
-    "## Phase 4 - Deliver [status: not_started]\n"
+    "## Deliver [status: not_started]\n"
     "- [ ] All SUCCESS CRITERIA evidenced in reflection_phase_3.md\n"
     "- [ ] HARNESS_COMPLETE\n"
     "\n"
@@ -60,12 +63,14 @@ BUILD_PLAN_INIT_DIRECTIVE = (
     "Read `_agent_state/objective.md` first so the plan reflects your "
     "actual SUCCESS CRITERIA + CONSTRAINTS for THIS candidate. The plan is "
     "a LIVING document — update it at these trigger points (NOT every turn): "
-    "after api_spec.txt is written or patched; after scaffold writes; after "
-    "a failed smoke or live test; after a pivot; before HARNESS_COMPLETE. "
+    "after implementation_plan.json is accepted; after scaffold writes; after "
+    "a failed check/probe or live test; after a pivot; before HARNESS_COMPLETE. "
     "Use `patch_file('_agent_state/build_plan.md', ...)` for updates so the "
     "decisions log accumulates context across turns.\n"
     "\n"
-    "Write build_plan.md FIRST. Then proceed with normal Phase 1 research."
+    "Because this optional build-plan directive is enabled, create the plan "
+    "once, then continue with the normal research-plan -> synthesis -> "
+    "implementation-plan flow."
 )
 
 
@@ -73,27 +78,28 @@ def initial_build_plan_content(candidate_name: str) -> str:
     """Return the seed build plan staged before turn 0.
 
     The file is agent-writable; this seed guarantees fast-path builds
-    have a plan artifact before scaffold writes. Agent 5 should patch or
-    replace it when the turn-1 directive or a trigger point asks for an
-    update.
+    have a plan artifact before scaffold writes. Agent 5 should treat it as
+    optional orientation unless build-plan directives are explicitly enabled.
     """
     return (
         f"# Build plan for {candidate_name}\n\n"
         "> Orchestrator-seeded before turn 0 so fast-path builds have a "
-        "planning artifact before scaffold writes. Agent 5 owns updates.\n\n"
-        "## Phase 1 - Research [status: in_progress]\n"
+        "planning artifact before scaffold writes. Read only if useful; "
+        "do not maintain unless explicitly directed.\n\n"
+        "## Research synthesis [status: in_progress]\n"
         "- [ ] Read _agent_state/objective.md\n"
-        "- [ ] Confirm or write api_spec.txt\n\n"
-        "## Phase 2 - Build [status: not_started]\n"
+        "- [ ] Write research_plan.json for unresolved build-critical gaps\n"
+        "- [ ] Write research_synthesis.json and implementation_plan.json\n\n"
+        "## Build [status: not_started]\n"
         "- [ ] requirements.txt with pinned versions\n"
         "- [ ] harness.py implementing run(input_data) -> dict\n"
-        "- [ ] smoke_test.py covering success + error shapes\n"
+        "- [ ] optional smoke_test.py for offline mechanical checks\n"
         "- [ ] live_test.py using production payload shape\n"
         "- [ ] forensics instrumentation per AD-011\n\n"
-        "## Phase 3 - Verify [status: not_started]\n"
-        "- [ ] smoke_test.py passes\n"
+        "## Verify [status: not_started]\n"
+        "- [ ] final harness passes representative probe or records a genuine external block\n"
         "- [ ] live_test.py passes or failure is explained with evidence\n\n"
-        "## Phase 4 - Deliver [status: not_started]\n"
+        "## Deliver [status: not_started]\n"
         "- [ ] reflection_phase_3.md cites evidence for objective.md\n"
         "- [ ] HARNESS_COMPLETE\n\n"
         "## Decisions log\n"
@@ -104,17 +110,17 @@ def initial_build_plan_content(candidate_name: str) -> str:
 # ============================================================================
 # Trigger-based nudge — build_plan.md staleness
 # ============================================================================
-# Fires when a meaningful state-change trigger has occurred but the agent
-# hasn't updated build_plan.md since. Soft nudge — does NOT block the
-# build. PR 2 may upgrade to a harder check based on telemetry data.
+# Fires only when ``PUZZLEEVAL_AUTONOMY_BUILD_PLAN_DIRECTIVES`` is enabled.
+# Soft nudge — does NOT block the build. Disabled by default because recent
+# real runs showed plan-maintenance turn cost without behavior improvement.
 
 BUILD_PLAN_STALENESS_NUDGE = (
     "Heads up: a trigger event just occurred ({trigger}) and "
     "`_agent_state/build_plan.md` hasn't been updated since the last "
-    "trigger. Take 10 seconds before your next significant action: "
-    "patch_file build_plan.md with checked-off todos and any new ones "
-    "the trigger surfaced. Then continue. This keeps your plan operational "
-    "rather than ornamental."
+    "trigger. Because optional diagnostic planning is enabled, patch "
+    "build_plan.md briefly if the trigger changed your todo list; otherwise "
+    "continue with the first-class artifact or code action. Do not treat "
+    "build_plan.md as build authority."
 )
 
 
@@ -125,9 +131,8 @@ BUILD_PLAN_STALENESS_NUDGE = (
 # reflection_phase_3.md exists yet. The agent is asked to write the
 # reflection BEFORE the orchestrator accepts the signal.
 #
-# In PR 1 the directive fires + telemetry records what the agent writes,
-# but the verifier does NOT reject HARNESS_COMPLETE on missing/vacuous
-# reflection. PR 2 ships the actual gate.
+# The verifier now rejects HARNESS_COMPLETE on missing/vacuous/unsupported
+# reflection evidence until the issue-specific retry policy is exhausted.
 
 REFLECTION_PHASE_3_DIRECTIVE = (
     "You signaled HARNESS_COMPLETE. Before that's accepted, write "
@@ -177,8 +182,8 @@ REFLECTION_PHASE_3_DIRECTIVE = (
     "```\n"
     "\n"
     "After writing the reflection, repeat HARNESS_COMPLETE in your next "
-    "message and the build will accept (PR 1: always; PR 2 onward: only "
-    "if the reflection passes evidence checks)."
+    "message. The completion gate will accept it only if the reflection "
+    "passes evidence checks."
 )
 
 
@@ -186,7 +191,6 @@ REFLECTION_PHASE_3_DIRECTIVE = (
 # Trigger labels — used for telemetry + the staleness nudge format string
 # ============================================================================
 
-TRIGGER_API_SPEC_WRITTEN = "api_spec.txt written"
 TRIGGER_SCAFFOLD_WRITTEN = "scaffold files written"
 TRIGGER_SMOKE_PASSED = "smoke test passed"
 TRIGGER_SMOKE_FAILED = "smoke test failed"
@@ -216,7 +220,6 @@ __all__ = [
     "initial_build_plan_content",
     "BUILD_PLAN_STALENESS_NUDGE",
     "REFLECTION_PHASE_3_DIRECTIVE",
-    "TRIGGER_API_SPEC_WRITTEN",
     "TRIGGER_SCAFFOLD_WRITTEN",
     "TRIGGER_SMOKE_PASSED",
     "TRIGGER_SMOKE_FAILED",

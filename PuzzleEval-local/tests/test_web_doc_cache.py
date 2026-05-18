@@ -1,6 +1,6 @@
-"""Regression guards for puzzleeval.web_doc_cache.
+﻿"""Regression guards for puzzleeval.web_doc_cache.
 
-This module is the Agent 4 → Agent 5 doc handoff. Tests cover:
+This module is the Agent 4 â†’ Agent 5 doc handoff. Tests cover:
   - The slug / path contract both agents depend on (drift here =
     Agent 4 writes to one place, Agent 5 reads from another, handoff
     silently broken).
@@ -58,10 +58,10 @@ class TestCandidateSlugIsCanonical:
 
     def test_unicode_non_ascii_stripped(self):
         # Unicode letters outside ASCII get collapsed; this matches the
-        # old `_candidate_slug` behavior. Change here would cascade —
+        # old `_candidate_slug` behavior. Change here would cascade â€”
         # any existing runs with emoji-named candidates would lose their
         # handoff.
-        assert candidate_slug("Resumé Café") == "resum_caf"
+        assert candidate_slug("ResumÃ© CafÃ©") == "resum_caf"
 
 
 class TestCandidateSandboxDir:
@@ -89,15 +89,14 @@ class TestCandidateSandboxDir:
         )
 
     def test_default_runs_root_is_runs_dir(self):
-        # Production callers don't pass runs_root — the default must be
-        # the CWD's "runs" dir, matching Agent 5's
-        # `Path("runs") / trace_id / "harnesses"`.
+        # CLI/local callers may omit runs_root â€” the default must remain
+        # the CWD's "runs" dir, matching Agent 5's local fallback.
         d = candidate_sandbox_dir("trace-1", "X")
         assert "runs" in str(d).lower()
 
 
 # ============================================================================
-# save_web_fetches_to_sandbox — the real handoff mechanism
+# save_web_fetches_to_sandbox â€” the real handoff mechanism
 # ============================================================================
 
 
@@ -143,26 +142,26 @@ class TestSaveWebFetchesRoundTrip:
 
     def test_existing_count_shifts_filename_index(self, tmp_path):
         # Agent 4 writes fetched_docs_0, then Agent 5's first web_fetch
-        # should start at fetched_docs_1 — NOT overwrite 0.
-        resp = _mock_fetch_response("https://a.com/", "first")
+        # should start at fetched_docs_1 â€” NOT overwrite 0.
+        resp = _mock_fetch_response("https://a.com/docs", "GET /v1/a\nAuthorization: Bearer\nJSON response")
         saved_a = save_web_fetches_to_sandbox(resp, tmp_path, existing_count=0)
         assert saved_a == ["fetched_docs_0.txt"]
 
-        resp2 = _mock_fetch_response("https://b.com/", "second")
+        resp2 = _mock_fetch_response("https://b.com/docs", "POST /v1/b\nAuthorization: Bearer\nJSON response")
         saved_b = save_web_fetches_to_sandbox(resp2, tmp_path, existing_count=1)
         assert saved_b == ["fetched_docs_1.txt"]
         # Both files must still exist; the second call didn't stomp the first
         assert (tmp_path / "fetched_docs_0.txt").exists()
         assert (tmp_path / "fetched_docs_1.txt").exists()
-        assert "first" in (tmp_path / "fetched_docs_0.txt").read_text(encoding="utf-8")
-        assert "second" in (tmp_path / "fetched_docs_1.txt").read_text(encoding="utf-8")
+        assert "GET /v1/a" in (tmp_path / "fetched_docs_0.txt").read_text(encoding="utf-8")
+        assert "POST /v1/b" in (tmp_path / "fetched_docs_1.txt").read_text(encoding="utf-8")
 
     def test_mkdirs_sandbox_if_missing(self, tmp_path):
         # Agent 4 runs before Agent 5 creates the sandbox; the helper
         # must create the dir on demand.
         target = tmp_path / "nonexistent" / "sandbox"
         assert not target.exists()
-        resp = _mock_fetch_response("https://x.com/", "content")
+        resp = _mock_fetch_response("https://x.com/docs", "GET /v1/x\nAuthorization: Bearer\nJSON response")
         save_web_fetches_to_sandbox(resp, target)
         assert target.exists()
         assert (target / "fetched_docs_0.txt").exists()
@@ -178,7 +177,7 @@ class TestSaveWebFetchesRoundTrip:
     def test_swallows_malformed_blocks(self, tmp_path):
         # Partial/malformed blocks (missing .source, missing .content)
         # are a real production case when web_fetch returns an error
-        # shape. Helper must skip silently — screening.py's try/except
+        # shape. Helper must skip silently â€” screening.py's try/except
         # wraps the call anyway, but robustness here prevents the
         # outer catch from ever firing on partial success.
         bad_block = SimpleNamespace(
@@ -186,49 +185,48 @@ class TestSaveWebFetchesRoundTrip:
             content=SimpleNamespace(url="https://broken"),  # no .content
         )
         good_block = _mock_fetch_response(
-            "https://good.com/", "real content"
+            "https://good.com/docs", "GET /v1/good\nAuthorization: Bearer\nJSON response"
         ).content[0]
         resp = SimpleNamespace(content=[bad_block, good_block])
         saved = save_web_fetches_to_sandbox(resp, tmp_path)
-        # Good block saved, bad block skipped — partial success is the
+        # Good block saved, bad block skipped â€” partial success is the
         # right behavior for a best-effort handoff.
         assert saved == ["fetched_docs_0.txt"]
 
     def test_caps_page_at_max_saved_chars(self, tmp_path):
-        huge = "x" * (MAX_SAVED_PAGE_CHARS + 1000)
-        resp = _mock_fetch_response("https://huge.com/", huge)
+        huge = "GET /v1/huge\nAuthorization: Bearer\nJSON response\n" + "x" * (MAX_SAVED_PAGE_CHARS + 1000)
+        resp = _mock_fetch_response("https://huge.com/docs", huge)
         save_web_fetches_to_sandbox(resp, tmp_path)
         content = (tmp_path / "fetched_docs_0.txt").read_text(encoding="utf-8")
         # Content + header; header is small, so total content length
         # minus header length should be at most MAX_SAVED_PAGE_CHARS.
-        body_len = len(content) - len("# Fetched from: https://huge.com/\n# Saved for reference during build phase\n\n")
+        body_len = len(content) - len("# Fetched from: https://huge.com/docs\n# Evidence status: fetched_current_api_docs\n# Saved for Agent 5 build context\n\n")
         assert body_len <= MAX_SAVED_PAGE_CHARS
 
-    def test_saves_search_results_separately(self, tmp_path):
+    def test_search_results_are_audit_only_not_agent5_context(self, tmp_path):
         resp = _mock_search_response([
             ("Docs Home", "https://ex.com/docs", "Overview of the API"),
             ("Auth Guide", "https://ex.com/docs/auth", "Use Bearer tokens"),
         ])
         saved = save_web_fetches_to_sandbox(resp, tmp_path)
-        assert saved == ["fetched_docs_0.txt"]
-        content = (tmp_path / "fetched_docs_0.txt").read_text(encoding="utf-8")
-        assert "Docs Home" in content
-        assert "Auth Guide" in content
+        assert saved == []
+        assert not (tmp_path / "fetched_docs_0.txt").exists()
+        content = (
+            tmp_path / "_agent_state" / "excluded_docs_discovery.json"
+        ).read_text(encoding="utf-8")
+        assert "search_result_discovery_only" in content
         assert "https://ex.com/docs/auth" in content
 
-    def test_caps_search_at_max_saved_search_chars(self, tmp_path):
-        # One giant snippet
+    def test_search_result_snippet_size_does_not_create_agent5_context(self, tmp_path):
         resp = _mock_search_response([
             ("T", "https://x.com/", "s" * (MAX_SAVED_SEARCH_CHARS + 5000)),
         ])
-        save_web_fetches_to_sandbox(resp, tmp_path)
-        content = (tmp_path / "fetched_docs_0.txt").read_text(encoding="utf-8")
-        body_len = len(content) - len("# Search results — saved for reference during build phase\n\n")
-        assert body_len <= MAX_SAVED_SEARCH_CHARS
+        assert save_web_fetches_to_sandbox(resp, tmp_path) == []
+        assert not (tmp_path / "fetched_docs_0.txt").exists()
 
 
 # ============================================================================
-# count_existing_fetched_docs — used by Agent 5 to seed its counter
+# count_existing_fetched_docs â€” used by Agent 5 to seed its counter
 # ============================================================================
 
 
@@ -252,7 +250,7 @@ class TestCountExistingFetchedDocs:
         (tmp_path / "fetched_docs_0.txt").write_text("a")
         subdir = tmp_path / "nested"
         subdir.mkdir()
-        (subdir / "fetched_docs_99.txt").write_text("nested — not counted")
+        (subdir / "fetched_docs_99.txt").write_text("nested â€” not counted")
         assert count_existing_fetched_docs(tmp_path) == 1
 
 
@@ -272,8 +270,13 @@ class TestAgent5BackCompatShim:
 
     def test_shim_round_trips_to_shared_helper(self, tmp_path):
         from puzzleeval.agents.implement_test_env import _extract_and_save_web_content
-        resp = _mock_fetch_response("https://back-compat.com/", "shim works")
+        resp = _mock_fetch_response(
+            "https://back-compat.com/docs/api",
+            "shim works API key authentication endpoint request response curl",
+        )
         saved = _extract_and_save_web_content(resp, tmp_path, existing_count=5)
         assert saved == ["fetched_docs_5.txt"]
         content = (tmp_path / "fetched_docs_5.txt").read_text(encoding="utf-8")
         assert "shim works" in content
+
+

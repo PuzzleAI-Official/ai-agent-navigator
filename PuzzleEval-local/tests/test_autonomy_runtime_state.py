@@ -73,7 +73,12 @@ class _FakeState:
     def __init__(self, **kw):
         self.turn = kw.get("turn", 0)
         self.accumulated_cost = kw.get("accumulated_cost", 0.0)
-        self.api_spec_written = kw.get("api_spec_written", False)
+        accepted = kw.get(
+            "implementation_plan_accepted",
+            kw.get("build_gate_accepted", False),
+        )
+        self.implementation_plan_accepted = accepted
+        self.build_gate_accepted = accepted
         self.verification_attempts = kw.get("verification_attempts", 0)
         self.verification_passed = kw.get("verification_passed", False)
         self.smoke_ever_passed = kw.get("smoke_ever_passed", False)
@@ -95,7 +100,7 @@ class TestInitRuntimeState:
             input_data=_make_input(),
             effective_max_turns=40,
             effective_max_budget_usd=3.0,
-            initial_model="claude-sonnet-4-6",
+            initial_model="claude-opus-4-7",
         )
         assert (tmp_path / "_agent_state").is_dir()
         assert (tmp_path / "_agent_state" / "runtime_state.json").is_file()
@@ -107,22 +112,31 @@ class TestInitRuntimeState:
             input_data=_make_input(),
             effective_max_turns=40,
             effective_max_budget_usd=3.0,
-            initial_model="claude-sonnet-4-6",
+            initial_model="claude-opus-4-7",
         )
         data = json.loads((tmp_path / "_agent_state" / "runtime_state.json").read_text())
         assert data["candidate_name"] == "TestSvc"
         assert data["trace_id"] == "trace-runtime"
         assert data["current_phase"] == "phase_1_research"
         assert data["current_turn"] == 0
-        assert data["current_model"] == "claude-sonnet-4-6"
+        assert data["current_model"] == "claude-opus-4-7"
         assert data["effective_max_turns"] == 40
         assert data["effective_max_budget_usd"] == 3.0
         assert data["smoke_test_status"] == "not_run"
+        assert data["migration_flags"]["PUZZLEEVAL_OBJECTIVE_VALIDATOR_ENABLED"] is True
+        assert data["migration_flags"]["PUZZLEEVAL_RESEARCH_WORKERS_ENABLED"] is True
+        assert data["migration_flags"]["PUZZLEEVAL_PERSISTENT_WORKER_RUNTIME_ENABLED"] is True
+        assert data["migration_flags"]["PUZZLEEVAL_FAILURE_PACKET_DEBUG_ENABLED"] is True
+        assert data["migration_flags"]["PUZZLEEVAL_ABANDON_CANDIDATE_ENABLED"] is True
+        assert data["migration_flags"]["PUZZLEEVAL_EFFICIENCY_SUMMARY_ENABLED"] is True
+        assert data["implementation_plan_accepted"] is False
         assert data["live_test_status"] == "not_run"
         assert data["files_present"] == []
-        # The 5 canonical scaffold files should all be pending in a fresh sandbox
+        # Default architecture tracks research/plan artifacts plus scaffold files.
         assert "harness.py" in data["files_pending"]
-        assert "api_spec.txt" in data["files_pending"]
+        assert "_agent_state/research_plan.json" in data["files_pending"]
+        assert "_agent_state/research_synthesis.json" in data["files_pending"]
+        assert "_agent_state/implementation_plan.json" in data["files_pending"]
 
 
 # ---------------------------------------------------------------------------
@@ -131,23 +145,29 @@ class TestInitRuntimeState:
 
 
 class TestDeriveCurrentPhase:
-    def test_phase_1_when_api_spec_absent(self, tmp_path: Path):
-        state = _FakeState(api_spec_written=False)
+    def test_phase_1_before_implementation_plan_acceptance(self, tmp_path: Path):
+        state = _FakeState(implementation_plan_accepted=False)
         assert rt.derive_current_phase(tmp_path, state) == "phase_1_research"
 
-    def test_phase_2_when_api_spec_written_but_no_harness(self, tmp_path: Path):
-        (tmp_path / "api_spec.txt").write_text("spec")
-        state = _FakeState(api_spec_written=True)
+    def test_phase_1_when_plan_file_exists_but_not_accepted(self, tmp_path: Path):
+        state_dir = tmp_path / "_agent_state"
+        state_dir.mkdir()
+        (state_dir / "implementation_plan.json").write_text("{}", encoding="utf-8")
+        state = _FakeState(implementation_plan_accepted=False)
+        assert rt.derive_current_phase(tmp_path, state) == "phase_1_research"
+
+    def test_phase_2_when_implementation_plan_accepted(self, tmp_path: Path):
+        state = _FakeState(implementation_plan_accepted=True)
         assert rt.derive_current_phase(tmp_path, state) == "phase_2_build"
 
     def test_phase_3_when_harness_exists_but_smoke_not_passed(self, tmp_path: Path):
         (tmp_path / "harness.py").write_text("pass")
-        state = _FakeState(api_spec_written=True, smoke_ever_passed=False)
+        state = _FakeState(implementation_plan_accepted=True, smoke_ever_passed=False)
         assert rt.derive_current_phase(tmp_path, state) == "phase_3_verify"
 
     def test_phase_4_when_smoke_passed(self, tmp_path: Path):
         (tmp_path / "harness.py").write_text("pass")
-        state = _FakeState(api_spec_written=True, smoke_ever_passed=True)
+        state = _FakeState(implementation_plan_accepted=True, smoke_ever_passed=True)
         assert rt.derive_current_phase(tmp_path, state) == "phase_4_deliver"
 
 
@@ -164,13 +184,13 @@ class TestUpdateRuntimeState:
             input_data=_make_input(),
             effective_max_turns=40,
             effective_max_budget_usd=3.0,
-            initial_model="claude-sonnet-4-6",
+            initial_model="claude-opus-4-7",
         )
         state = _FakeState(turn=5, accumulated_cost=0.42)
         rt.update_runtime_state(
             sandbox_dir=tmp_path,
             state=state,
-            current_model="claude-sonnet-4-6",
+            current_model="claude-opus-4-7",
         )
         data = rt.read_runtime_state(tmp_path)
         assert data is not None
@@ -184,23 +204,22 @@ class TestUpdateRuntimeState:
             input_data=_make_input(),
             effective_max_turns=40,
             effective_max_budget_usd=3.0,
-            initial_model="claude-sonnet-4-6",
+            initial_model="claude-opus-4-7",
         )
         # First update at turn 3, still in phase 1
         rt.update_runtime_state(
             sandbox_dir=tmp_path,
-            state=_FakeState(turn=3, api_spec_written=False),
-            current_model="claude-sonnet-4-6",
+            state=_FakeState(turn=3, implementation_plan_accepted=False),
+            current_model="claude-opus-4-7",
         )
         a = rt.read_runtime_state(tmp_path)
         assert a["current_phase"] == "phase_1_research"
         assert a["phase_entered_at_turn"] == 0  # No transition yet
 
-        # Now write api_spec.txt and update at turn 5
-        (tmp_path / "api_spec.txt").write_text("spec")
+        # Now accept the implementation plan and update at turn 5.
         rt.update_runtime_state(
             sandbox_dir=tmp_path,
-            state=_FakeState(turn=5, api_spec_written=True),
+            state=_FakeState(turn=5, implementation_plan_accepted=True),
             current_model="claude-opus-4-7",
         )
         b = rt.read_runtime_state(tmp_path)
@@ -214,13 +233,13 @@ class TestUpdateRuntimeState:
             input_data=_make_input(),
             effective_max_turns=40,
             effective_max_budget_usd=3.0,
-            initial_model="claude-sonnet-4-6",
+            initial_model="claude-opus-4-7",
         )
         rt.update_runtime_state(
             sandbox_dir=tmp_path,
             state=_FakeState(
                 turn=9,
-                api_spec_written=True,
+                implementation_plan_accepted=True,
                 smoke_ever_passed=True,
                 smoke_passed_at_turn=8,
                 verification_passed=True,
@@ -231,6 +250,39 @@ class TestUpdateRuntimeState:
         assert data["smoke_test_status"] == "passing"
         assert data["live_test_status"] == "passing"
 
+    def test_live_status_can_pass_while_completion_gate_fails(self, tmp_path: Path):
+        rt.init_runtime_state(
+            sandbox_dir=tmp_path,
+            candidate=_make_candidate(),
+            input_data=_make_input(),
+            effective_max_turns=40,
+            effective_max_budget_usd=3.0,
+            initial_model="claude-opus-4-7",
+        )
+        rt.update_runtime_state(
+            sandbox_dir=tmp_path,
+            state=_FakeState(
+                turn=14,
+                implementation_plan_accepted=True,
+                smoke_ever_passed=True,
+                smoke_passed_at_turn=8,
+                verification_passed=False,
+            ),
+            current_model="claude-opus-4-7",
+            live_test_status="passing",
+            live_passed_at_turn=13,
+            last_live_test_output="LIVE TEST PASSED\nsuccess=True",
+            completion_gate_status="failed",
+            completion_gate_issues=["reflection_missing"],
+        )
+        data = rt.read_runtime_state(tmp_path)
+        assert data["live_test_status"] == "passing"
+        assert data["live_passed_at_turn"] == 13
+        assert "LIVE TEST PASSED" in data["last_live_test_output"]
+        assert data["completion_gate_status"] == "failed"
+        assert data["completion_gate_issues"] == ["reflection_missing"]
+        assert data["verification_passed"] is False
+
     def test_errors_history_accumulates_and_caps(self, tmp_path: Path):
         rt.init_runtime_state(
             sandbox_dir=tmp_path,
@@ -238,14 +290,14 @@ class TestUpdateRuntimeState:
             input_data=_make_input(),
             effective_max_turns=40,
             effective_max_budget_usd=3.0,
-            initial_model="claude-sonnet-4-6",
+            initial_model="claude-opus-4-7",
         )
         # Push 60 errors; history should cap at 50
         for i in range(60):
             rt.update_runtime_state(
                 sandbox_dir=tmp_path,
                 state=_FakeState(turn=i),
-                current_model="claude-sonnet-4-6",
+                current_model="claude-opus-4-7",
                 errors_encountered_this_turn=[
                     {"category": "auth", "message": f"err {i}"},
                 ],
@@ -262,17 +314,28 @@ class TestUpdateRuntimeState:
             input_data=_make_input(),
             effective_max_turns=40,
             effective_max_budget_usd=3.0,
-            initial_model="claude-sonnet-4-6",
+            initial_model="claude-opus-4-7",
         )
         for i in range(25):
             rt.update_runtime_state(
                 sandbox_dir=tmp_path,
                 state=_FakeState(turn=i),
-                current_model="claude-sonnet-4-6",
-                directive_fired={"directive": "PHASE2_DIRECTIVE", "reason": "test"},
+                current_model="claude-opus-4-7",
+                directive_fired={"directive": "build_gate_compaction", "reason": "test"},
             )
         data = rt.read_runtime_state(tmp_path)
         assert len(data["directives_fired"]) == 20  # capped
+
+
+class TestRuntimeSnapshot:
+    def test_snapshot_records_active_tool_contract(self, tmp_path: Path):
+        snapshot = rt.write_runtime_snapshot(tmp_path)
+        path = tmp_path / "_agent_state" / "runtime_snapshot.json"
+        assert path.is_file()
+        assert ".md" in snapshot["allowed_extensions"]
+        assert "_agent_state/runtime_state.json" in snapshot["orchestrator_owned_artifacts"]
+        assert "tools_module_path" in snapshot
+        assert "gate_flags" in snapshot
 
 
 class TestReadRuntimeState:

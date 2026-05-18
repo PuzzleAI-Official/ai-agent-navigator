@@ -61,7 +61,7 @@ export function PipelineNode({ node }: Props) {
       {/* Cost */}
       {isCompleted && node.cost != null && (
         <motion.span initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="text-[10px] font-mono text-white/30">
-          {(node.cost * 20).toFixed(2)} credits
+          ${node.cost.toFixed(2)}
         </motion.span>
       )}
     </div>

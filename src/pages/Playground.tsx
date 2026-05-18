@@ -30,7 +30,9 @@ function useNow(intervalMs: number = 5_000): number {
 
 const Playground = () => {
   const location = useLocation();
-  const initialMessage = (location.state as any)?.initialMessage || "";
+  const routeState = location.state as { initialMessage?: unknown } | null;
+  const initialMessage =
+    typeof routeState?.initialMessage === "string" ? routeState.initialMessage : "";
 
   const {
     stage,
@@ -50,7 +52,7 @@ const Playground = () => {
     defaultPicks, // Phase 7 smart-default pre-check set
     isSelectionSubmitting,
     submitSelection,
-    // Rejection entries from the deep-verify pass
+    // Rejection entries from selected-candidate verification
     rejections,
     // Robustness pass: SSE status + heartbeat + structured final report
     sseStatus,
@@ -221,8 +223,8 @@ const Playground = () => {
                 <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.2" />
                 <path d="M8 4.5v7M5.5 6.5h5" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
               </svg>
-              <span className="text-[11px] font-mono text-white/50">{(costAccumulator * 20).toFixed(2)}</span>
-              <span className="text-[9px] font-grotesk text-white/25 uppercase tracking-[0.04em]">credits used</span>
+              <span className="text-[11px] font-mono text-white/50">${costAccumulator.toFixed(2)}</span>
+              <span className="text-[9px] font-grotesk text-white/25 uppercase tracking-[0.04em]">run cost</span>
             </div>
           )}
           <button className="text-[11px] font-grotesk font-medium uppercase tracking-[0.06em] text-white/25 hover:text-white/50 transition-colors px-3 py-1.5">
@@ -528,7 +530,7 @@ const Playground = () => {
                   when candidates.length === 0 so all-rejected runs still
                   show the rejection summary + any advisories in the report.
                   Previously gated on candidates.length > 0 → blank pane
-                  when Agent 2 returned zero or Phase 6.5 rejected everyone.
+                  when Agent 2 returned zero or selected-candidate verification rejected everyone.
                   Each sub-component null-guards its own empty inputs. */}
               {stage === "results" && (
                 <motion.div
@@ -543,7 +545,7 @@ const Playground = () => {
                     <div className="rounded border border-amber-800/60 bg-amber-950/20 p-3 text-xs text-amber-200">
                       No candidates were tested. This usually means Agent 2
                       found zero matches or every verified candidate was
-                      rejected at deep-verify. Try broadening your
+                      rejected during selected-candidate verification. Try broadening your
                       description, or add a custom provider in the selection
                       panel next time.
                     </div>

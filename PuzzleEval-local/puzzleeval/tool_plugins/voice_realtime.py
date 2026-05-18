@@ -1,8 +1,8 @@
-"""Voice real-time plugin — local audio loopback for voice/phone agents.
+﻿"""Voice real-time plugin â€” local audio loopback for voice/phone agents.
 
 Real-world voice agents speak the WebRTC / SIP / Twilio Voice / Vonage
 Voice protocols. End-to-end testing of those flows needs a publicly-
-reachable phone number, a SIP endpoint, or a TURN server — those belong
+reachable phone number, a SIP endpoint, or a TURN server â€” those belong
 in the cloud-deferred bucket. **What we CAN do locally** is the next
 best thing: an audio-loopback harness that mimics a one-turn voice
 exchange entirely on 127.0.0.1.
@@ -30,7 +30,7 @@ Limitations called out clearly:
     Without those we still capture the audio blob and report ``unscored``;
     the LLM judge can take over with a fallback advisory.
 
-Public URL handling: same pattern as ``webhook_receiver`` — when
+Public URL handling: same pattern as ``webhook_receiver`` â€” when
 ``PUZZLEEVAL_TUNNEL_URL`` is set, the served URLs use the public host so
 candidates running offsite can fetch recordings. Default is 127.0.0.1.
 """
@@ -49,16 +49,20 @@ from collections import deque
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from puzzleeval.tool_plugins import (
     EvaluationResult,
+    HARNESS_EXECUTION_PERSISTENT_WORKER,
     PluginCapabilities,
     SynthesisResult,
     ToolPlugin,
     register_plugin,
 )
+
+if TYPE_CHECKING:
+    from puzzleeval.schemas import Persona, RubricCriterion
 
 logger = logging.getLogger(__name__)
 
@@ -67,7 +71,9 @@ logger = logging.getLogger(__name__)
 # Config
 # ---------------------------------------------------------------------------
 
-VOICE_PORT = int(os.environ.get("PUZZLEEVAL_VOICE_PORT", "8768"))
+_VOICE_PORT_ENV = os.environ.get("PUZZLEEVAL_VOICE_PORT")
+VOICE_PORT = int(_VOICE_PORT_ENV) if _VOICE_PORT_ENV else 0
+VOICE_PORT_EXPLICIT = _VOICE_PORT_ENV is not None
 VOICE_BIND = os.environ.get("PUZZLEEVAL_VOICE_BIND", "127.0.0.1")
 TUNNEL_URL = os.environ.get("PUZZLEEVAL_TUNNEL_URL", "").rstrip("/")
 MAX_AUDIO_BYTES = int(os.environ.get("PUZZLEEVAL_VOICE_MAX_AUDIO", str(25 * 1024 * 1024)))  # 25 MiB
@@ -100,15 +106,15 @@ class CapturedVoiceTurn:
 
 
 # ---------------------------------------------------------------------------
-# HTTP handler — serves audio + receives responses
+# HTTP handler â€” serves audio + receives responses
 # ---------------------------------------------------------------------------
 
 
 class _VoiceHandler(BaseHTTPRequestHandler):
     """Routes:
-      - GET  /audio/<token>            → serve synthesized caller audio
-      - POST /voice/<token>            → receive candidate's response
-      - POST /voice/<token>/recording  → receive audio blob from candidate
+      - GET  /audio/<token>            â†’ serve synthesized caller audio
+      - POST /voice/<token>            â†’ receive candidate's response
+      - POST /voice/<token>/recording  â†’ receive audio blob from candidate
     """
 
     def log_message(self, fmt: str, *args: Any) -> None:
@@ -222,9 +228,10 @@ def _guess_audio_content_type(path: str) -> str:
 
 
 class _ThreadedHTTPServer(HTTPServer):
-    # Allow port re-bind across restarts so harnesses with hardcoded
-    # voice URLs survive uvicorn --reload / production redeploys.
-    allow_reuse_address = True
+    # Do not share a fixed loopback port by default. On Windows,
+    # SO_REUSEADDR can allow two local servers to bind the same port,
+    # which lets one run's voice loopback answer another run's tokens.
+    allow_reuse_address = False
     plugin: VoiceRealtimePlugin
 
 
@@ -244,7 +251,7 @@ class _ServerHandle:
 # ---------------------------------------------------------------------------
 # Background audio-merge executor
 # ---------------------------------------------------------------------------
-# Module-level daemon thread pool — lazy-initialized on first submit so
+# Module-level daemon thread pool â€” lazy-initialized on first submit so
 # tests / CLI probes that don't trigger merges pay zero cost. Daemon=True
 # so the process can exit cleanly without waiting on hung pydub.
 #
@@ -285,7 +292,7 @@ def _reset_merge_executor_for_tests() -> None:
 
     Pytest fixtures that exercise the merge path call this between tests
     so a leaked future from one test can't poison another. Production
-    code never calls this — the executor lives for the process lifetime
+    code never calls this â€” the executor lives for the process lifetime
     and exits cleanly on interpreter shutdown via daemon threads.
     """
     global _MERGE_EXECUTOR
@@ -307,12 +314,12 @@ class VoiceRealtimePlugin(ToolPlugin):
         self._server_handle: _ServerHandle | None = None
         self._server_lock = threading.Lock()
         # Default session dir is %TEMP% (safe fallback when the plugin
-        # is imported in isolation — tests, CLI probes, etc.). Agent 5
+        # is imported in isolation â€” tests, CLI probes, etc.). Agent 5
         # overrides via ``set_session_dir()`` before executing tests so
         # audio artifacts land in ``runs/<trace_id>/harnesses/<slug>/voice/``
         # alongside harness.py / conversation_log.json / fetched_docs_*.
         # The cloud-scale seam: swap the Path for a StorageBackend protocol
-        # (S3/GCS/Azure-Blob) without touching any call sites — every read
+        # (S3/GCS/Azure-Blob) without touching any call sites â€” every read
         # + write goes through the resolved session_dir.
         self._default_session_dir = (
             Path(tempfile.gettempdir()) / "puzzleeval_voice"
@@ -322,7 +329,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         # parallel (one ThreadPoolExecutor worker per candidate), and
         # each worker calls set_session_dir() with its own per-candidate
         # path. Without thread-local isolation the LAST set_session_dir
-        # call wins for both workers → both candidates' audio lands in
+        # call wins for both workers â†’ both candidates' audio lands in
         # one folder. Real-run signal (voice_dual_6 + voice_dual_7):
         # OpenAI's audio paths showed `elevenlabs_voice_stack/voice/`
         # because ElevenLabs's worker happened to set_session_dir
@@ -330,16 +337,16 @@ class VoiceRealtimePlugin(ToolPlugin):
         self._tl = threading.local()
         # Track which audio paths belong to which token so the evaluator
         # can surface them in the TestCaseResult. Keyed by token; each
-        # entry is a list of (role, path) pairs — role = "caller" | "agent"
+        # entry is a list of (role, path) pairs â€” role = "caller" | "agent"
         # so the UI can render them in order.
         self._token_to_artifacts: dict[str, list[tuple[str, str]]] = {}
-        # ─────────────────────────────────────────────────────────────
+        # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Background audio-merge infrastructure.
-        # ─────────────────────────────────────────────────────────────
+        # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
         # Audio merge (decode N MP3s + sample-rate normalize + concat +
         # re-encode via pydub) takes 50-72s per test in real runs. With
-        # parallelism=6 default and ≥7 tests, batch 1's per-worker sync
-        # merge gates batch 2's start by ~70s — workers don't free until
+        # parallelism=6 default and â‰¥7 tests, batch 1's per-worker sync
+        # merge gates batch 2's start by ~70s â€” workers don't free until
         # `conv + merge` per test. Submitting the merge to a daemon pool
         # frees workers at `conv` only, letting batch 2's conversations
         # start ~70s sooner.
@@ -418,7 +425,7 @@ class VoiceRealtimePlugin(ToolPlugin):
 
     def capabilities(self) -> PluginCapabilities:
         return PluginCapabilities(
-            # NOTE: deliberately omit `audio_content` from input_types — that
+            # NOTE: deliberately omit `audio_content` from input_types â€” that
             # modality is owned by the TTS plugin's synthesis path. We declare
             # only voice_turn (single turn) + voice_conversation (multi-turn
             # script) so we don't shadow TTS for ordinary voice-input tests.
@@ -430,9 +437,10 @@ class VoiceRealtimePlugin(ToolPlugin):
             # Multi-turn (voice_conversation) drives the harness per turn
             # via harness_runner. Single-turn (voice_turn) doesn't need it
             # but the capability flag is plugin-level, not per-test. Agent 5
-            # passes a runner whenever it's available — the plugin ignores
+            # passes a runner whenever it's available â€” the plugin ignores
             # it for single-turn tests. Same pattern as conversation_simulator.
             requires_harness_runner=True,
+            harness_execution_mode=HARNESS_EXECUTION_PERSISTENT_WORKER,
             # Voice harnesses provision a billable provider session per
             # call (ElevenLabs ConvAI agent, OpenAI Realtime session,
             # Twilio call, etc.). The adversarial verifier reads this
@@ -458,7 +466,8 @@ class VoiceRealtimePlugin(ToolPlugin):
             if self._server_handle is not None:
                 return self._server_handle
             last_err: Exception | None = None
-            for try_port in (VOICE_PORT, 0):
+            candidate_ports = (VOICE_PORT,) if VOICE_PORT_EXPLICIT else (0,)
+            for try_port in candidate_ports:
                 try:
                     server = _ThreadedHTTPServer((VOICE_BIND, try_port), _VoiceHandler)
                     break
@@ -498,9 +507,9 @@ class VoiceRealtimePlugin(ToolPlugin):
                 logger.warning("voice shutdown error: %s", exc)
             self._server_handle = None
 
-    # ─────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     # Background audio merge
-    # ─────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     def submit_merge_in_background(
         self,
@@ -512,7 +521,7 @@ class VoiceRealtimePlugin(ToolPlugin):
 
         Returns the Future immediately so the test worker thread can free
         up while the merge runs concurrently. Workers no longer block on
-        the 50-72s pydub decode + concat + re-encode — they return after
+        the 50-72s pydub decode + concat + re-encode â€” they return after
         the conversation completes.
 
         The returned future is also tracked in `self._pending_merges`
@@ -524,6 +533,11 @@ class VoiceRealtimePlugin(ToolPlugin):
         per-thread session_dir, not the bg thread's (which would fall
         back to the global default and write merges to %TEMP%).
         """
+        with self._pending_merges_lock:
+            existing = self._pending_merges.get(session_token)
+            if existing is not None:
+                return existing
+
         # Capture submitting worker's per-thread session_dir; restore
         # inside the background thread before _merge_conversation_audio
         # reads `self._session_dir`.
@@ -533,14 +547,14 @@ class VoiceRealtimePlugin(ToolPlugin):
             # Restore the caller's per-thread session_dir on this bg thread.
             try:
                 self._tl.session_dir = captured_session_dir
-            except Exception:  # noqa: BLE001 — never crash the bg task
+            except Exception:  # noqa: BLE001 â€” never crash the bg task
                 pass
             try:
                 return self._merge_conversation_audio(
                     session_token=session_token,
                     turns=turns,
                 )
-            except Exception as exc:  # noqa: BLE001 — bg task never raises
+            except Exception as exc:  # noqa: BLE001 â€” bg task never raises
                 logger.info(
                     "background conversation merge failed (non-fatal): %s",
                     exc,
@@ -569,7 +583,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         still on disk, so the UI degrades gracefully to playing them
         individually).
 
-        Returns a dict mapping session_token → merged_audio_path (or None
+        Returns a dict mapping session_token â†’ merged_audio_path (or None
         when the merge failed / timed out / returned no path). Callers
         patch the merged_path back into the corresponding TestCaseResult
         before persisting the run.
@@ -593,13 +607,13 @@ class VoiceRealtimePlugin(ToolPlugin):
         for token, future in pending.items():
             try:
                 results[token] = future.result(timeout=timeout)
-            except Exception as exc:  # noqa: BLE001 — TimeoutError + any
+            except Exception as exc:  # noqa: BLE001 â€” TimeoutError + any
                 # Merge timed out OR raised. Either way the per-turn
                 # files are on disk; the UI can still play them. Log and
                 # record None so the caller knows there's no merged path.
                 logger.warning(
                     "background merge for %s did not complete within %ss "
-                    "(%s) — leaving per-turn audio in place",
+                    "(%s) â€” leaving per-turn audio in place",
                     token, timeout, type(exc).__name__,
                     extra={
                         "operation": "voice_merge_timeout_bg",
@@ -608,7 +622,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                     },
                 )
                 results[token] = None
-                # Don't try to cancel — pydub may be holding C-level
+                # Don't try to cancel â€” pydub may be holding C-level
                 # subprocess handles. Leave the future to complete or
                 # die on its own; daemon thread keeps the process exit
                 # clean.
@@ -638,6 +652,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         with self._lock:
             self._buffer.clear()
             self._token_to_audio.clear()
+            self._token_to_artifacts.clear()
 
     # -- Audio mgmt --------------------------------------------------------
 
@@ -685,7 +700,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         agent_responder,
         scope_role: str = "voice_agent",
         shape: str = "generic",
-        # Agentic-mode kwargs (optional — preserves back-compat).
+        # Agentic-mode kwargs (optional â€” preserves back-compat).
         # When populated AND evaluation_mode resolves to 'agentic',
         # drive_conversation uses user_simulator + rubric_judge instead of
         # the script iterator. See puzzleeval.user_simulator /
@@ -699,21 +714,21 @@ class VoiceRealtimePlugin(ToolPlugin):
         anthropic_client=None,
         trace_id: str = "no-trace",
         agent_system_prompt: str | None = None,
+        semantic_review_required: bool = False,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        release_harness_session: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         """Drive a multi-turn voice conversation (scripted OR agentic).
 
         This is the core multi-turn primitive. The PLUGIN owns the turn
-        state machine — the caller (Agent 5's harness template OR a
+        state machine â€” the caller (Agent 5's harness template OR a
         direct Python driver) only needs to supply a callable that takes
         one caller audio URL + session context and returns the agent's
         response (audio bytes, TwiML, NCCO, or JSON). The plugin handles
         TTS, serving, capturing, STT, per-turn scoring, artifact tracking.
 
         Two modes:
-            **Scripted** (default, back-compat): iterate `script` list,
-            substring-match agent response against `expected_agent_contains`.
-            This is today's behavior and fires when no persona+goal+rubric
-            is provided OR evaluation_mode='scripted'.
+            **Scripted**: iterate `script` list, record deterministic evidence signals, and apply semantic review when the production evaluator requires it. Fires when no persona+goal+rubric is provided OR evaluation_mode='scripted'.
 
             **Agentic** (new): replace the script iterator with a
             user_simulator that generates each user turn reactively based
@@ -725,15 +740,15 @@ class VoiceRealtimePlugin(ToolPlugin):
           1. Global override via PUZZLEEVAL_CONVERSATION_EVAL_MODE takes
              precedence if set to a non-'auto' value
           2. Otherwise the caller's `evaluation_mode` arg is consulted
-          3. 'auto' + persona/goal/rubric all present → agentic
-          4. 'auto' + any of persona/goal/rubric missing → scripted
-          5. Explicit 'agentic' without all three → falls back to scripted
+          3. 'auto' + persona/goal/rubric all present â†’ agentic
+          4. 'auto' + any of persona/goal/rubric missing â†’ scripted
+          5. Explicit 'agentic' without all three â†’ falls back to scripted
              with a warning log (never crashes)
 
         Cloud-scale seam: replace the in-process HTTP server with a
         service (same routes) and swap local tempfile for S3 via
         ``set_session_dir()``. The contract for ``agent_responder`` does
-        not change — cloud harnesses and local harnesses call this the
+        not change â€” cloud harnesses and local harnesses call this the
         same way.
 
         Args:
@@ -751,9 +766,9 @@ class VoiceRealtimePlugin(ToolPlugin):
                 dict with at least one of: ``audio_bytes``,
                 ``audio_content_type``, ``text``, ``twiml``, ``json``.
             scope_role: passed through to TTS for caller voice selection.
-            shape: 'twilio' | 'vonage' | 'generic' — affects callback
+            shape: 'twilio' | 'vonage' | 'generic' â€” affects callback
                 instructions, mirrors single-turn synthesize_input.
-            persona: Persona for agentic mode — see user_simulator.
+            persona: Persona for agentic mode â€” see user_simulator.
             goal: what the simulated user wants.
             constraints: simulator-side behavior rules.
             rubric: RubricCriterion list for post-conversation judging.
@@ -763,55 +778,55 @@ class VoiceRealtimePlugin(ToolPlugin):
             trace_id: correlation ID for structured logs.
 
         Returns a dict with:
-            ``session_token`` — grouping key for all turns' artifacts
-            ``turns`` — per-turn results (same shape as scripted mode)
-            ``overall_passed`` — True iff every turn passed (scripted) OR
+            ``session_token`` â€” grouping key for all turns' artifacts
+            ``turns`` â€” per-turn results (same shape as scripted mode)
+            ``overall_passed`` â€” True iff every turn passed (scripted) OR
                 rubric_verdict.passed (agentic)
-            ``overall_score`` — mean per-turn (scripted) OR overall_score
+            ``overall_score`` â€” mean per-turn (scripted) OR overall_score
                 from rubric_verdict (agentic)
-            ``audio_paths`` — all caller + agent artifacts
-            ``merged_audio_path`` — merged conversation file if available
-            ``evaluation_mode`` — which mode actually ran ('agentic' |
+            ``audio_paths`` â€” all caller + agent artifacts
+            ``merged_audio_path`` â€” merged conversation file if available
+            ``evaluation_mode`` â€” which mode actually ran ('agentic' |
                 'scripted')
-            ``rubric_verdict`` (agentic only) — RubricVerdict as dict
-            ``transcript`` (agentic only) — list[ConversationTurn as dict]
-            ``simulator_cost_usd`` (agentic only) — sum of simulator calls
-            ``judge_cost_usd`` (agentic only) — single judge call cost
-            ``sim_end_reason`` (agentic only) — 'goal_achieved' | etc.
+            ``rubric_verdict`` (agentic only) â€” RubricVerdict as dict
+            ``transcript`` (agentic only) â€” list[ConversationTurn as dict]
+            ``simulator_cost_usd`` (agentic only) â€” sum of simulator calls
+            ``judge_cost_usd`` (agentic only) â€” single judge call cost
+            ``sim_end_reason`` (agentic only) â€” 'goal_achieved' | etc.
         """
-        # Global mode override — PUZZLEEVAL_CONVERSATION_EVAL_MODE wins
+        # Global mode override â€” PUZZLEEVAL_CONVERSATION_EVAL_MODE wins
         # when set to a non-'auto' value. Lets operators force a mode
         # across an entire run for diagnostic A/B comparison without
         # touching per-test TestCase fields.
         try:
             from puzzleeval.config import CONVERSATION_EVAL_MODE as _GLOBAL_MODE
-        except Exception:  # pragma: no cover — config edge
+        except Exception:  # pragma: no cover â€” config edge
             _GLOBAL_MODE = "auto"
         effective_mode = _GLOBAL_MODE if _GLOBAL_MODE != "auto" else evaluation_mode
 
-        # Auto-detect: if persona+goal+rubric all present → agentic; else scripted.
+        # Auto-detect: if persona+goal+rubric all present â†’ agentic; else scripted.
         if effective_mode == "auto":
             if persona is not None and goal and rubric:
                 effective_mode = "agentic"
             else:
                 effective_mode = "scripted"
 
-        # Explicit agentic without full kit → fall back to scripted
-        # with a warning. Prevents a missing field from crashing — tests
+        # Explicit agentic without full kit â†’ fall back to scripted
+        # with a warning. Prevents a missing field from crashing â€” tests
         # may intentionally leave one out to exercise the fallback.
         if effective_mode == "agentic" and not (
             persona is not None and goal and rubric
         ):
             logger.warning(
                 "drive_conversation: evaluation_mode='agentic' requested "
-                "but persona/goal/rubric incomplete — falling back to "
+                "but persona/goal/rubric incomplete â€” falling back to "
                 "scripted.",
                 extra={"operation": "agentic_mode_fallback",
                        "trace_id": trace_id},
             )
             effective_mode = "scripted"
 
-        # ── Dispatch to agentic path when selected ──
+        # â”€â”€ Dispatch to agentic path when selected â”€â”€
         if effective_mode == "agentic":
             return self._drive_conversation_agentic(
                 persona=persona,                   # type: ignore[arg-type]
@@ -826,9 +841,12 @@ class VoiceRealtimePlugin(ToolPlugin):
                 anthropic_client=anthropic_client,
                 trace_id=trace_id,
                 agent_system_prompt=agent_system_prompt,
+                progress_callback=progress_callback,
+                release_harness_session=release_harness_session,
             )
 
-        # ── Scripted path (legacy behavior — unchanged) ──
+        # Scripted path: deterministic checks collect evidence; production
+        # evaluator calls also run semantic review before accepting pass/fail.
         session_token = secrets.token_hex(16)
         session_state: dict[str, Any] = {
             "shape": shape,
@@ -857,11 +875,16 @@ class VoiceRealtimePlugin(ToolPlugin):
             with self._lock:
                 self._token_to_audio[turn_token] = caller_path
             caller_url = self.public_url_for_audio(turn_token)
+            session_state.setdefault("conversation_history", []).append({
+                "role": "user",
+                "content": user_text,
+                "turn_index": idx,
+            })
 
             # 2. Invoke the harness's agent_responder for THIS turn. It
             # reads session_state (conversation_id etc.) and mutates it
             # on return so the next turn has continuity. The plugin does
-            # not interpret state — the harness template knows its API.
+            # not interpret state â€” the harness template knows its API.
             try:
                 resp = agent_responder(idx, caller_url, session_state) or {}
             except Exception as exc:  # noqa: BLE001
@@ -888,9 +911,10 @@ class VoiceRealtimePlugin(ToolPlugin):
                 resp, turn_token,
             )
 
-            # 4. Score this turn. Substring match on expected_contains is
-            # the standard cheap check; callers wanting semantic matching
-            # can post-process per_turn with the LLM judge.
+            # 4. Score this turn into evidence signals. These cheap checks
+            # help explain what happened, but production callers set
+            # semantic_review_required so an evidence-grounded judge owns
+            # final scripted conversation pass/fail.
             expected_contains = str(turn.get("expected_agent_contains") or "").lower().strip()
             expected_exact = str(turn.get("expected_agent_text") or "").lower().strip()
             reply_lower = agent_text.lower()
@@ -908,7 +932,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                 score = 1.0
                 reasoning = "response exactly matches expected text"
             elif expected_contains:
-                # Partial credit when SOME words match — helps rank
+                # Partial credit when SOME words match â€” helps rank
                 # candidates that are close but not perfect.
                 hit_words = [
                     w for w in expected_contains.split()
@@ -920,10 +944,10 @@ class VoiceRealtimePlugin(ToolPlugin):
                 else:
                     reasoning = f"response did not contain '{expected_contains}'"
             else:
-                # No expected text given — presence of any reply is pass.
+                # No expected text given â€” presence of any reply is pass.
                 passed = True
                 score = 0.7
-                reasoning = "no expected_agent_contains — treating presence as pass"
+                reasoning = "no expected_agent_contains â€” treating presence as pass"
 
             per_turn.append({
                 "turn_index": idx,
@@ -937,8 +961,58 @@ class VoiceRealtimePlugin(ToolPlugin):
                 "expected_contains": expected_contains,
             })
             all_scores.append(score)
+            session_state.setdefault("conversation_history", []).append({
+                "role": "assistant",
+                "content": agent_text[:2000],
+                "turn_index": idx,
+            })
             if not passed:
                 all_passed = False
+
+        semantic_review = None
+        if semantic_review_required and per_turn:
+            from puzzleeval.semantic_review import review_scripted_conversation_semantics
+
+            transcript: list[dict[str, Any]] = []
+            assertions: list[dict[str, Any]] = []
+            for turn in per_turn:
+                idx = int(turn.get("turn_index") or 0)
+                caller_text = str(turn.get("caller_text") or "")
+                agent_text = str(turn.get("agent_text") or "")
+                if caller_text:
+                    transcript.append({
+                        "turn_index": len(transcript),
+                        "role": "user",
+                        "text": caller_text,
+                        "meta": {"script_turn_index": idx},
+                    })
+                if agent_text:
+                    transcript.append({
+                        "turn_index": len(transcript),
+                        "role": "agent",
+                        "text": agent_text,
+                        "meta": {"script_turn_index": idx},
+                    })
+                expected = str(turn.get("expected_contains") or "").strip()
+                if expected:
+                    assertions.append({
+                        "turn_index": idx,
+                        "check_type": "contains",
+                        "value": expected,
+                        "weight": 1.0,
+                    })
+            if assertions:
+                semantic_review = review_scripted_conversation_semantics(
+                    transcript=transcript,
+                    assertions=assertions,
+                    candidate_role=scope_role,
+                    agent_system_prompt=agent_system_prompt or "",
+                    client=anthropic_client,
+                    trace_id=trace_id,
+                )
+                if semantic_review.get("available"):
+                    all_passed = bool(semantic_review.get("passed"))
+                    all_scores = [float(semantic_review.get("score") or 0.0)]
 
         overall_score = sum(all_scores) / len(all_scores) if all_scores else 0.0
         artifacts = self.artifacts_for_token_prefix(session_token)
@@ -958,7 +1032,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                 session_token=session_token,
                 turns=per_turn,
             )
-        except Exception as exc:  # noqa: BLE001 — submit must never crash
+        except Exception as exc:  # noqa: BLE001 â€” submit must never crash
             logger.info(
                 "conversation merge submit failed (non-fatal): %s", exc,
                 extra={"operation": "voice_merge_submit_failed",
@@ -974,10 +1048,11 @@ class VoiceRealtimePlugin(ToolPlugin):
             "audio_paths": artifacts,
             "merged_audio_path": merged_path,
             "evaluation_mode": "scripted",
+            "semantic_review": semantic_review,
         }
 
     # ------------------------------------------------------------------
-    # Agentic drive loop — simulator-driven turns + rubric-judged outcome
+    # Agentic drive loop â€” simulator-driven turns + rubric-judged outcome
     # ------------------------------------------------------------------
     def _drive_conversation_agentic(
         self,
@@ -994,17 +1069,19 @@ class VoiceRealtimePlugin(ToolPlugin):
         anthropic_client,
         trace_id: str,
         agent_system_prompt: str | None = None,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        release_harness_session: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
-        """Internal agentic driver — called from drive_conversation when
+        """Internal agentic driver â€” called from drive_conversation when
         effective_mode resolves to 'agentic'.
 
         Turn-by-turn flow:
           1. user_simulator.generate_next_user_turn(history, persona, goal, ...)
-             → returns SimulatorTurn with text + end_conversation + end_reason
+             â†’ returns SimulatorTurn with text + end_conversation + end_reason
           2. If end_conversation: append final user turn, break loop
           3. Synthesize caller audio from user text (existing TTS path)
           4. agent_responder(turn_index, caller_url, session_state)
-             → returns AgentResponse dict
+             â†’ returns AgentResponse dict
           5. Extract agent text from response (shared helper with scripted)
           6. Append ConversationTurn(role='agent') to history
           7. Loop until end_conversation OR max_turns
@@ -1014,13 +1091,16 @@ class VoiceRealtimePlugin(ToolPlugin):
 
         Max-turn resolution: min(test.max_turns, CONVERSATION_MAX_TURNS_CEILING).
         """
-        from puzzleeval.config import CONVERSATION_MAX_TURNS_CEILING
+        from puzzleeval.config import (
+            CONVERSATION_DEFAULT_MAX_TURNS,
+            CONVERSATION_MAX_TURNS_CEILING,
+        )
         from puzzleeval.user_simulator import generate_next_user_turn
         from puzzleeval.rubric_judge import judge_conversation
         from puzzleeval.schemas import ConversationTurn
 
         resolved_max = min(
-            max_turns if max_turns is not None else 6,
+            max_turns if max_turns is not None else CONVERSATION_DEFAULT_MAX_TURNS,
             CONVERSATION_MAX_TURNS_CEILING,
         )
         session_token = secrets.token_hex(16)
@@ -1033,6 +1113,34 @@ class VoiceRealtimePlugin(ToolPlugin):
         transcript: list[ConversationTurn] = []
         simulator_cost = 0.0
         sim_end_reason: str = "ongoing"
+        drive_started_at = time.monotonic()
+
+        def _emit_progress(event_type: str, **payload: Any) -> None:
+            event_payload = {
+                "trace_id": trace_id,
+                "session_token": session_token,
+                "evaluation_mode": evaluation_mode,
+                "persona_name": persona.name,
+                "max_turns": resolved_max,
+            }
+            event_payload.update(payload)
+            if progress_callback is not None:
+                try:
+                    progress_callback(event_type, event_payload)
+                except Exception:  # noqa: BLE001
+                    logger.debug(
+                        "voice progress callback failed",
+                        extra={
+                            "operation": "voice_progress_callback_failed",
+                            "trace_id": trace_id,
+                            "event_type": event_type,
+                        },
+                    )
+            logger.info(
+                "voice evaluation progress: %s",
+                event_type,
+                extra={"operation": event_type, **event_payload},
+            )
 
         logger.info(
             "agentic drive_conversation starting",
@@ -1047,8 +1155,9 @@ class VoiceRealtimePlugin(ToolPlugin):
 
         turn_idx = 0
         while turn_idx < resolved_max:
-            # ── 1. Generate the next user turn via simulator ──
+            # â”€â”€ 1. Generate the next user turn via simulator â”€â”€
             try:
+                _emit_progress("simulator_turn_started", turn_index=turn_idx)
                 sim_turn = generate_next_user_turn(
                     history=transcript,
                     persona=persona,
@@ -1065,12 +1174,20 @@ class VoiceRealtimePlugin(ToolPlugin):
                     extra={"operation": "simulator_crash",
                            "trace_id": trace_id},
                 )
-                # Treat simulator crash as abandonment — break cleanly so
+                # Treat simulator crash as abandonment â€” break cleanly so
                 # the judge can still score whatever transcript we have.
                 sim_end_reason = "abandoned"
                 break
 
             simulator_cost += sim_turn.cost_usd
+            _emit_progress(
+                "simulator_turn_completed",
+                turn_index=turn_idx,
+                end_conversation=bool(sim_turn.end_conversation),
+                end_reason=sim_turn.end_reason,
+                text_chars=len(sim_turn.text or ""),
+                cost_usd=round(sim_turn.cost_usd, 6),
+            )
 
             # Append the simulator's utterance to the transcript. Even
             # when end_conversation=True with empty text, we append an
@@ -1100,21 +1217,27 @@ class VoiceRealtimePlugin(ToolPlugin):
                 )
                 break
 
-            # User text empty but not end_conversation → can't feed empty
+            # User text empty but not end_conversation â†’ can't feed empty
             # to TTS. Treat as abandonment.
             if not user_text:
                 sim_end_reason = "abandoned"
                 break
 
-            # ── 2. Synthesize caller audio + serve ──
+            # â”€â”€ 2. Synthesize caller audio + serve â”€â”€
             turn_token = f"{session_token}-t{turn_idx}"
             caller_path = self._synthesize_caller_audio(user_text, turn_token)
             with self._lock:
                 self._token_to_audio[turn_token] = caller_path
             caller_url = self.public_url_for_audio(turn_token)
 
-            # ── 3. Invoke the agent responder ──
+            # â”€â”€ 3. Invoke the agent responder â”€â”€
+            session_state.setdefault("conversation_history", []).append({
+                "role": "user",
+                "content": user_text,
+                "turn_index": turn_idx,
+            })
             try:
+                provider_started = time.monotonic()
                 resp = agent_responder(turn_idx, caller_url, session_state) or {}
             except Exception as exc:  # noqa: BLE001
                 logger.warning(
@@ -1124,7 +1247,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                            "trace_id": trace_id},
                 )
                 # Append a synthetic agent turn recording the failure so
-                # the judge sees the agent failed — this should tank
+                # the judge sees the agent failed â€” this should tank
                 # accuracy/goal_completion criteria appropriately.
                 transcript.append(ConversationTurn(
                     turn_index=turn_idx * 2 + 1,
@@ -1135,9 +1258,17 @@ class VoiceRealtimePlugin(ToolPlugin):
                 sim_end_reason = "agent_failed"
                 break
 
-            # ── 4. Extract agent text + path ──
+            # â”€â”€ 4. Extract agent text + path â”€â”€
             agent_text, agent_path = self._extract_agent_text_and_path(
                 resp, turn_token,
+            )
+            _emit_progress(
+                "provider_turn_completed",
+                turn_index=turn_idx,
+                latency_ms=round((time.monotonic() - provider_started) * 1000, 1),
+                has_audio=bool(agent_path),
+                has_text=bool(agent_text),
+                agent_text_chars=len(agent_text or ""),
             )
 
             # Append agent turn to transcript
@@ -1147,6 +1278,11 @@ class VoiceRealtimePlugin(ToolPlugin):
                 text=agent_text[:2000] if agent_text else "",  # cap to avoid prompt bloat
                 meta={"agent_path": agent_path} if agent_path else {},
             ))
+            session_state.setdefault("conversation_history", []).append({
+                "role": "assistant",
+                "content": agent_text[:2000] if agent_text else "",
+                "turn_index": turn_idx,
+            })
 
             # Track per-turn artifacts for return (parallels scripted path)
             per_turn_artifacts.append({
@@ -1163,10 +1299,49 @@ class VoiceRealtimePlugin(ToolPlugin):
         if sim_end_reason == "ongoing" and turn_idx >= resolved_max:
             sim_end_reason = "max_turns"
 
-        # ── 5. Judge the full transcript ──
+        # Conversation capture is complete. Submit the merge and release
+        # any persistent provider worker before the rubric judge starts so
+        # playback and provider cleanup are not blocked by LLM latency.
+        artifacts = self.artifacts_for_token_prefix(session_token)
+        try:
+            self.submit_merge_in_background(
+                session_token=session_token,
+                turns=per_turn_artifacts,
+            )
+            _emit_progress(
+                "merge_submitted",
+                turn_count=len(per_turn_artifacts),
+                artifact_count=len(artifacts),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.info(
+                "conversation merge submit failed (non-fatal): %s", exc,
+                extra={"operation": "voice_merge_submit_failed",
+                       "session_token": session_token},
+            )
+        if release_harness_session is not None:
+            try:
+                release_harness_session()
+                _emit_progress("provider_session_released")
+            except Exception as exc:  # noqa: BLE001
+                logger.info(
+                    "persistent harness release failed after transcript capture: %s",
+                    exc,
+                    extra={"operation": "persistent_harness_release_failed",
+                           "trace_id": trace_id,
+                           "session_token": session_token},
+                )
+
+        # â”€â”€ 5. Judge the full transcript â”€â”€
         judge_cost = 0.0
         rubric_verdict = None
+        judge_failed = False
+        judge_failure_reason: str | None = None
         try:
+            _emit_progress(
+                "rubric_judge_started",
+                transcript_turn_count=len(transcript),
+            )
             rubric_verdict = judge_conversation(
                 transcript=transcript,
                 persona=persona,
@@ -1174,49 +1349,44 @@ class VoiceRealtimePlugin(ToolPlugin):
                 rubric=rubric,
                 candidate_role=scope_role,
                 agent_system_prompt=agent_system_prompt,
-                client=anthropic_client,
+                # Use rubric_judge's bounded client policy instead of the
+                # broader simulator/research client. The provider session has
+                # already been released; a slow judge should fail this test,
+                # not occupy a worker with the general SDK timeout budget.
+                client=None,
                 trace_id=trace_id,
             )
             judge_cost = rubric_verdict.cost_usd
+            _emit_progress(
+                "rubric_judge_completed",
+                passed=bool(rubric_verdict.passed),
+                overall_score=float(rubric_verdict.overall_score),
+                cost_usd=round(judge_cost, 6),
+            )
         except Exception as exc:  # noqa: BLE001
+            judge_failed = True
+            judge_failure_reason = f"{type(exc).__name__}: {exc}"
+            _emit_progress(
+                "rubric_judge_completed",
+                passed=False,
+                judge_failed=True,
+                error_type=type(exc).__name__,
+            )
             logger.warning(
                 "rubric_judge crashed: %s", exc,
                 extra={"operation": "rubric_judge_crash",
                        "trace_id": trace_id},
             )
-
-        # ── 6. Submit conversation merge to background daemon pool ──
-        # The merge takes 50-72s of pydub work per test; running it
-        # synchronously here
-        # would block the worker thread until merge completes, gating
-        # the next test batch by `merge_time` per worker. Submitting to
-        # the background pool frees the worker at conversation-end so
-        # the next batch can start immediately. The merged_audio_path
-        # is patched into the result later by
-        # `voice_plugin.wait_for_pending_merges()` which Agent 5 calls
-        # after `_execute_all_tests` returns.
-        artifacts = self.artifacts_for_token_prefix(session_token)
-        try:
-            self.submit_merge_in_background(
-                session_token=session_token,
-                turns=per_turn_artifacts,
-            )
-        except Exception as exc:  # noqa: BLE001 — submit must never crash
-            logger.info(
-                "conversation merge submit failed (non-fatal): %s", exc,
-                extra={"operation": "voice_merge_submit_failed",
-                       "session_token": session_token},
-            )
-        # `merged_audio_path` and the role='conversation' artifact entry
-        # are populated retroactively by Agent 5's
-        # `voice_plugin.wait_for_pending_merges()` call after all tests
-        # finish. Until then, callers see audio_paths with per-turn
-        # entries only and `merged_audio_path=None`.
+        # `merged_audio_path` and the role='conversation' artifact entry are
+        # populated retroactively by Agent 5's `wait_for_pending_merges()`
+        # call after all tests finish. The merge was submitted immediately
+        # after transcript capture, before judge_conversation, so playback is
+        # not blocked by LLM judge latency.
         merged_path: str | None = None
 
-        # ── 7. Assemble return dict ──
+        # â”€â”€ 6. Assemble return dict â”€â”€
         # The agentic path's per_turn entries intentionally lack passed/
-        # score/reasoning fields — those are rubric-judge-scope, not
+        # score/reasoning fields â€” those are rubric-judge-scope, not
         # per-turn. Callers that need per-turn pass/fail should read
         # rubric_verdict.criterion_scores with their evidence_turn_indices.
         overall_score = (
@@ -1235,9 +1405,12 @@ class VoiceRealtimePlugin(ToolPlugin):
             "merged_audio_path": merged_path,
             "evaluation_mode": evaluation_mode,
             "rubric_verdict": rubric_verdict.model_dump() if rubric_verdict else None,
+            "judge_failed": judge_failed,
+            "judge_failure_reason": judge_failure_reason,
             "transcript": [t.model_dump() for t in transcript],
             "simulator_cost_usd": round(simulator_cost, 6),
             "judge_cost_usd": round(judge_cost, 6),
+            "total_duration_s": round(time.monotonic() - drive_started_at, 3),
             "sim_end_reason": sim_end_reason,
         }
 
@@ -1254,7 +1427,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         * **pydub path (preferred when pydub + ffmpeg are available):**
           decode every per-turn file into an ``AudioSegment``,
           resample/rechannel to a uniform format (the first segment's
-          frame rate + channels — usually the caller TTS), concatenate,
+          frame rate + channels â€” usually the caller TTS), concatenate,
           and export. Produces a uniformly-encoded output that browsers
           and players handle correctly even when caller and agent files
           had different sample rates.
@@ -1262,15 +1435,15 @@ class VoiceRealtimePlugin(ToolPlugin):
         * **Byte-concat fallback (when pydub/ffmpeg unavailable):** the
           historical pure-Python path. Strips ID3 tags so MP3 frames
           stitch reasonably, but does NOT reconcile sample-rate
-          differences — players that strict-decode based on the first
+          differences â€” players that strict-decode based on the first
           frame's sample rate will glitch at boundaries.
 
         Real-run signal (trace 28cb2648): caller TTS produced MP3 at
-        44.1 kHz, OpenAI Realtime → pydub MP3 produced agent files at
+        44.1 kHz, OpenAI Realtime â†’ pydub MP3 produced agent files at
         24 kHz, byte-concat resulted in a file that played the first
         segment correctly then paused at the first sample-rate
         transition. The pydub path resamples both to 44.1 kHz before
-        concat — playback is now uniform.
+        concat â€” playback is now uniform.
 
         Output written to ``<session_dir>/conversation_<token>.<ext>``
         alongside the per-turn files so the RunState-scoped path
@@ -1296,7 +1469,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         existing = [p for p in ordered_paths if p.exists()]
         if len(existing) < 2:
             return None
-        # Write next to the first file — keeps the run-dir containment
+        # Write next to the first file â€” keeps the run-dir containment
         # guarantee the backend audio streamer relies on.
         out_dir = existing[0].parent
         out_path = out_dir / f"conversation_{session_token[:16]}{ext}"
@@ -1320,7 +1493,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                 for i, p in enumerate(existing):
                     body = p.read_bytes()
                     # ID3-tag-aware concat. Pure byte-concat of MP3s
-                    # produces a file the OS sees as N×file_size bytes
+                    # produces a file the OS sees as NÃ—file_size bytes
                     # but most players honor the FIRST file's ID3v2
                     # duration tag and stop after the first segment.
                     # Strip ID3v2 from segments 2..N (keep the first's
@@ -1351,7 +1524,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         concat) or when any decode/export step raises.
 
         Normalization target: the FIRST segment's frame rate + channel
-        count. Caller TTS is usually segment 0 — preserving its sample
+        count. Caller TTS is usually segment 0 â€” preserving its sample
         rate keeps speech intelligibility intact while bringing the
         agent's lower-rate audio up to match. Equally fine to pick a
         fixed target (e.g., 44100 mono); the first-segment heuristic
@@ -1386,10 +1559,10 @@ class VoiceRealtimePlugin(ToolPlugin):
             combined.export(str(out_path), format=export_format)
             return True
         except Exception as exc:  # noqa: BLE001
-            # Any decode/encode failure → fall back. Logged at info
+            # Any decode/encode failure â†’ fall back. Logged at info
             # because the byte-concat path still produces something.
             logger.info(
-                "pydub merge failed (%s) — falling back to byte-concat",
+                "pydub merge failed (%s) â€” falling back to byte-concat",
                 exc,
                 extra={"operation": "voice_merge_pydub_failed"},
             )
@@ -1401,19 +1574,22 @@ class VoiceRealtimePlugin(ToolPlugin):
         script: list[dict[str, Any]],
         expected: dict[str, Any],
         harness_runner,
-        # ── Agentic conversational eval (new) ──
+        # â”€â”€ Agentic conversational eval (new) â”€â”€
         # When persona/goal/rubric are populated, drive_conversation
         # routes to the simulator-driven path. When empty and a
         # `script` is provided, drive_conversation uses the legacy
         # scripted path. Both routes converge back through
-        # drive_conversation → ``EvaluationResult`` with the same shape.
+        # drive_conversation â†’ ``EvaluationResult`` with the same shape.
         persona: Any = None,
         goal: str | None = None,
         constraints: list[str] | None = None,
         rubric: list | None = None,
-        max_turns: int = 6,
+        max_turns: int = 4,
         evaluation_mode: str = "auto",
         trace_id: str = "no-trace",
+        semantic_review_required: bool = False,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        release_harness_session: Callable[[], None] | None = None,
     ) -> EvaluationResult:
         """Multi-turn path for evaluate_output (agentic OR scripted).
 
@@ -1425,9 +1601,9 @@ class VoiceRealtimePlugin(ToolPlugin):
 
         This is the bridge that lets the plugin OWN multi-turn
         orchestration while the harness stays single-turn. No new
-        harness template branch, no new Agent 4 atlas field.
+        harness template branch, no new Agent 4 authority field.
 
-        Agentic kwargs are forwarded to drive_conversation — when
+        Agentic kwargs are forwarded to drive_conversation â€” when
         populated, drive_conversation swaps the static script
         iterator for user_simulator + rubric_judge. When absent,
         drive_conversation uses the legacy scripted path unchanged.
@@ -1449,7 +1625,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         # as ground truth for scope/policy scoring. Alias list mirrors
         # the harness-side fallback order from AD-007:
         #   instructions / system_prompt / system / brief / agent_prompt
-        # Returns empty string when none is found — judge falls back to
+        # Returns empty string when none is found â€” judge falls back to
         # general-plausibility scoring.
         agent_system_prompt: str = ""
         if isinstance(expected, dict):
@@ -1475,7 +1651,7 @@ class VoiceRealtimePlugin(ToolPlugin):
             # single-turn: takes an audio URL + optional session state,
             # returns {success, output, raw_response, ...}. Carrying
             # ``session_state`` through is how multi-turn state (cookie,
-            # conversation_id, session token) flows — the harness
+            # conversation_id, session token) flows â€” the harness
             # template reads + writes it without knowing the plugin
             # owns the outer loop.
             payload = {
@@ -1483,6 +1659,8 @@ class VoiceRealtimePlugin(ToolPlugin):
                 "caller_audio_url": user_audio_url,
                 "turn_index": turn_idx,
                 "session_state": state,
+                "input_context": expected.get("input_context") if isinstance(expected, dict) else {},
+                "conversation_history": list(state.get("conversation_history") or []),
             }
             try:
                 turn_result = harness_runner(payload) or {}
@@ -1501,15 +1679,15 @@ class VoiceRealtimePlugin(ToolPlugin):
             # common shapes without hardcoding any provider.
             if isinstance(raw, dict):
                 if raw.get("audio_bytes"):
-                    # content_type priority: explicit field → derive from
-                    # `audio_format` → fall through to None.
-                    # For RAW PCM (pcm16 / pcm_s16le / etc — no container
+                    # content_type priority: explicit field â†’ derive from
+                    # `audio_format` â†’ fall through to None.
+                    # For RAW PCM (pcm16 / pcm_s16le / etc â€” no container
                     # header), wrap the bytes in a WAV/RIFF header here so
                     # the saved file is actually playable. Browsers and
                     # `<audio>` tags can't decode raw PCM; they need the
                     # container. Real-run signal (OpenAI Realtime): the
                     # harness returned audio_format="pcm16" at 24kHz mono,
-                    # and the saved `.wav` files had NO header — so click-
+                    # and the saved `.wav` files had NO header â€” so click-
                     # to-play did nothing AND the merger couldn't stitch
                     # them (mixed .mp3 caller + .wav agent = merge rejects).
                     fmt = (raw.get("audio_format") or "").lower().strip()
@@ -1523,7 +1701,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                     # pydub's AudioSegment accepts a string at construction
                     # time, THEN fails deep inside `.export()` with
                     # "memoryview: a bytes-like object is required, not
-                    # 'str'" — the exception gets caught by the `try:`
+                    # 'str'" â€” the exception gets caught by the `try:`
                     # wrappers below, `encoded` comes back None, and
                     # `_wrap_pcm16_as_wav` throws the same TypeError. The
                     # net result: the saved agent audio drops entirely
@@ -1531,7 +1709,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                     # `agent_text` stays empty, every turn scores 0.
                     # Decoding ONCE here covers both _encode_pcm16_to_mp3
                     # AND the wrap-as-wav fallback AND the downstream
-                    # `_extract_agent_text_and_path` call — the pipeline
+                    # `_extract_agent_text_and_path` call â€” the pipeline
                     # no longer has a string-flavored PCM branch.
                     if isinstance(audio_bytes_out, str) and len(audio_bytes_out) >= 100:
                         try:
@@ -1547,7 +1725,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                     if fmt in ("pcm", "pcm16", "pcm_s16le", "l16", "raw_pcm16"):
                         sr = int(raw.get("audio_sample_rate") or 24000)
                         ch = int(raw.get("audio_channels") or 1)
-                        # Prefer MP3 (matches caller TTS files → merger can
+                        # Prefer MP3 (matches caller TTS files â†’ merger can
                         # concat uniformly, browsers play directly). Fall
                         # back to WAV-wrap when pydub/ffmpeg unavailable.
                         encoded = _encode_pcm16_to_mp3(
@@ -1635,7 +1813,7 @@ class VoiceRealtimePlugin(ToolPlugin):
             agent_responder=_responder,
             shape=str(expected.get("shape") or "generic"),
             scope_role=str(expected.get("scope_role") or "voice_agent"),
-            # Forward the agentic kit — drive_conversation auto-detects
+            # Forward the agentic kit â€” drive_conversation auto-detects
             # agentic vs scripted based on which fields are populated.
             persona=persona,
             goal=goal,
@@ -1649,13 +1827,16 @@ class VoiceRealtimePlugin(ToolPlugin):
             # scope/policy against the REAL contract, not a guess.
             # Empty string when no instructions were provided.
             agent_system_prompt=agent_system_prompt,
+            semantic_review_required=semantic_review_required,
+            progress_callback=progress_callback,
+            release_harness_session=release_harness_session,
         )
         # The agentic path populates additional keys; pass them through
         # in `detail` so _promote_verdict_to_tcr can surface rubric_
         # verdict + transcript on the TestCaseResult.
         #
         # reasoning precedence: agentic path emits a conversation_summary
-        # inside rubric_verdict (more informative than turn counts) —
+        # inside rubric_verdict (more informative than turn counts) â€”
         # use it when available.
         rubric_verdict = run.get("rubric_verdict")
         transcript = run.get("transcript") or []
@@ -1668,7 +1849,7 @@ class VoiceRealtimePlugin(ToolPlugin):
             reasoning = (
                 f"{len(run['turns'])} turns; "
                 f"{sum(1 for t in run['turns'] if t.get('passed'))} passed; "
-                f"session_token={run['session_token'][:12]}…"
+                f"session_token={run['session_token'][:12]}â€¦"
             )
         detail: dict[str, Any] = {
             "session_token": run["session_token"],
@@ -1678,12 +1859,17 @@ class VoiceRealtimePlugin(ToolPlugin):
         }
         if rubric_verdict is not None:
             detail["rubric_verdict"] = rubric_verdict
+        if run.get("judge_failed"):
+            detail["judge_failed"] = True
+            detail["judge_failure_reason"] = run.get("judge_failure_reason")
         if transcript:
             detail["transcript"] = transcript
         if "simulator_cost_usd" in run:
             detail["simulator_cost_usd"] = run["simulator_cost_usd"]
         if "judge_cost_usd" in run:
             detail["judge_cost_usd"] = run["judge_cost_usd"]
+        if "total_duration_s" in run:
+            detail["total_duration_s"] = run["total_duration_s"]
         if "sim_end_reason" in run:
             detail["sim_end_reason"] = run["sim_end_reason"]
         return EvaluationResult(
@@ -1718,13 +1904,13 @@ class VoiceRealtimePlugin(ToolPlugin):
         + ``_try_transcribe``) via a synthetic CapturedVoiceTurn so the
         multi-turn path doesn't diverge from the single-turn contract.
         """
-        # 1. Audio bytes → save, then STT via the transcription plugin.
+        # 1. Audio bytes â†’ save, then STT via the transcription plugin.
         # Accept both raw bytes (in-process callers) AND base64 strings
         # (subprocess-bridged harnesses that explicitly base64-encoded
         # for JSON safety, OR the new `{"_b64": "..."}` round-trip when
         # decoded by Agent 5's `_inflate_b64_sentinels`). Real-run
         # signal: voice_dual_7's harness returned raw bytes which the
-        # Agent 5 dispatcher used to stringify via `default=str` —
+        # Agent 5 dispatcher used to stringify via `default=str` â€”
         # leaving the plugin with a useless `"b'\\xff...'"` string and
         # no way to save agent audio. The `_inflate_b64_sentinels` fix
         # at the dispatcher restores bytes; this branch is the
@@ -1753,7 +1939,7 @@ class VoiceRealtimePlugin(ToolPlugin):
             return text, agent_path
 
         # 2. All other shapes: build a CapturedVoiceTurn the single-turn
-        # helpers understand. Zero-duplication — new response shapes added
+        # helpers understand. Zero-duplication â€” new response shapes added
         # to _extract_agent_text automatically flow into multi-turn.
         synthetic = CapturedVoiceTurn(
             token=turn_token, received_at=time.time(),
@@ -1831,7 +2017,7 @@ class VoiceRealtimePlugin(ToolPlugin):
 
         Falls back to a text placeholder file when no TTS provider key
         is configured, so the rest of the flow still works (the
-        candidate gets a fetchable URL — it just contains text not
+        candidate gets a fetchable URL â€” it just contains text not
         audio, and STT-based eval will note that).
         """
         try:
@@ -1850,15 +2036,15 @@ class VoiceRealtimePlugin(ToolPlugin):
                         #
                         # Why: real-run trace 0c7f085f (2026-04-23) showed
                         # OpenAI candidate had 10 caller_*.mp3 + 3
-                        # caller_*.wav files — the .wav ones came from
+                        # caller_*.wav files â€” the .wav ones came from
                         # the TTS fallover path (triggered by ElevenLabs
                         # 429s mid-conversation). The conversation
-                        # merger refuses mixed extensions — result: 3 of
+                        # merger refuses mixed extensions â€” result: 3 of
                         # 5 OpenAI tests had NO merged conversation.mp3
                         # file, so the UI couldn't render the full call
                         # and the report looked incomplete.
                         #
-                        # General fix — the TTS pipeline now guarantees
+                        # General fix â€” the TTS pipeline now guarantees
                         # ONE caller audio format (.mp3) regardless of
                         # which provider produced the underlying bytes.
                         # Applies to every TTS provider, every fallover
@@ -1873,7 +2059,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                             dst = self._session_dir / f"caller_{token}{TARGET_EXT}"
 
                             if src_ext == TARGET_EXT:
-                                # Already MP3 — direct copy (fast path)
+                                # Already MP3 â€” direct copy (fast path)
                                 shutil.copyfile(src, dst)
                             else:
                                 # Transcode to MP3 for merger compatibility
@@ -1882,7 +2068,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                                     seg = AudioSegment.from_file(src)
                                     seg.export(str(dst), format="mp3")
                                     logger.info(
-                                        f"TTS caller audio normalized {src_ext}→.mp3 for merger compatibility "
+                                        f"TTS caller audio normalized {src_ext}â†’.mp3 for merger compatibility "
                                         f"(source provider may have been via fallover)",
                                         extra={"operation": "tts_format_normalize",
                                                "src_ext": src_ext},
@@ -1890,7 +2076,7 @@ class VoiceRealtimePlugin(ToolPlugin):
                                 except Exception as transcode_err:
                                     # pydub/ffmpeg not available OR
                                     # transcode failed. Fall back to
-                                    # copying source extension — this
+                                    # copying source extension â€” this
                                     # preserves legacy behavior rather
                                     # than losing the turn entirely.
                                     dst = self._session_dir / f"caller_{token}{src_ext or '.wav'}"
@@ -1926,7 +2112,7 @@ class VoiceRealtimePlugin(ToolPlugin):
     def evaluate_output(
         self, *, response: Any, expected: Any, criteria: list[dict] | None = None,
         harness_runner=None,
-        # ── Agentic conversational eval context ──
+        # â”€â”€ Agentic conversational eval context â”€â”€
         # When `persona` + `goal` + `rubric` are populated, the plugin
         # routes to the agentic path (user_simulator + rubric_judge)
         # even without a scripted script in `expected`. This is the
@@ -1935,7 +2121,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         goal: str | None = None,
         constraints: list[str] | None = None,
         rubric: list | None = None,
-        max_turns: int = 6,
+        max_turns: int = 4,
         evaluation_mode: str = "auto",
         trace_id: str = "no-trace",
         # Candidate agent's system prompt (+ per-test metadata).
@@ -1944,6 +2130,8 @@ class VoiceRealtimePlugin(ToolPlugin):
         # truth for scope/policy scoring. See _format_agent_instructions_
         # block in rubric_judge.py.
         input_context: dict | None = None,
+        progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+        release_harness_session: Callable[[], None] | None = None,
         **kwargs: Any,
     ) -> EvaluationResult:
         """Score the candidate's voice response.
@@ -1956,21 +2144,18 @@ class VoiceRealtimePlugin(ToolPlugin):
            rubric_judge at the end. No script required. This is the
            DEFAULT PATH for new voice_conversation tests.
 
-        2. **Scripted multi-turn** (`expected` contains a
-           `conversation_script` OR `turns` array): legacy path —
-           drive_conversation iterates the script, substring-matches
-           each turn. Preserved for back-compat only.
+        2. **Scripted multi-turn** (`expected` contains a `conversation_script` OR `turns` array): drive_conversation iterates the script, records deterministic evidence signals, and uses semantic review when the production evaluator requires it.
 
         3. **Single-turn**: if a token (no script, no agentic kit) is
            in expected, looks at captured turns from the in-process HTTP
-           server and substring-matches.
+           server and records deterministic evidence signals.
 
-        Dispatch is data-driven from the schema — no case-specific
+        Dispatch is data-driven from the schema â€” no case-specific
         if-statements in Agent 5 or the harness template.
         """
         # Agentic path takes priority when persona/goal/rubric are
         # populated. This is intentional: if Agent 3 emitted the
-        # agentic kit, that's what the user asked for — don't let a
+        # agentic kit, that's what the user asked for â€” don't let a
         # legacy `conversation_script` key in `expected` silently
         # sidestep it. The plugin's agentic drive handles the multi-
         # turn voice flow end-to-end.
@@ -1978,7 +2163,7 @@ class VoiceRealtimePlugin(ToolPlugin):
         # so _evaluate_conversation (and the agent_system_prompt extraction
         # block inside it) sees a single unified source. The caller's
         # kwarg takes precedence over any input_context already in
-        # `expected` — Agent 5 knows the authoritative TestCase.input_context.
+        # `expected` â€” Agent 5 knows the authoritative TestCase.input_context.
         expected_with_ctx = dict(expected) if isinstance(expected, dict) else {}
         if input_context:
             # Merge existing + override; caller's wins on key conflict.
@@ -2001,6 +2186,9 @@ class VoiceRealtimePlugin(ToolPlugin):
                 max_turns=max_turns,
                 evaluation_mode=evaluation_mode,
                 trace_id=trace_id,
+                semantic_review_required=bool(kwargs.get("semantic_review_required")),
+                progress_callback=progress_callback,
+                release_harness_session=release_harness_session,
             )
 
         script = _extract_conversation_script(expected)
@@ -2016,6 +2204,9 @@ class VoiceRealtimePlugin(ToolPlugin):
                 max_turns=max_turns,
                 evaluation_mode=evaluation_mode,
                 trace_id=trace_id,
+                semantic_review_required=bool(kwargs.get("semantic_review_required")),
+                progress_callback=progress_callback,
+                release_harness_session=release_harness_session,
             )
 
         if not isinstance(expected, dict) or not expected.get("token"):
@@ -2041,7 +2232,7 @@ class VoiceRealtimePlugin(ToolPlugin):
 
         if not agent_text and last.audio_path:
             agent_text, transcription_note = _try_transcribe(last.audio_path)
-            source = source or f"audio→{transcription_note}"
+            source = source or f"audioâ†’{transcription_note}"
 
         if not agent_text:
             return EvaluationResult(
@@ -2090,7 +2281,7 @@ def _extract_conversation_script(expected: Any) -> list[dict[str, Any]] | None:
       - ``{"turns": [...]}`` (most compact)
       - a raw list of turn dicts
 
-    Returns None when no list-of-dicts with at least one turn is present —
+    Returns None when no list-of-dicts with at least one turn is present â€”
     callers fall through to single-turn evaluation. This keeps
     ``evaluate_output`` free of case-specific branches: the presence of a
     script in the data is the only signal that matters.
@@ -2116,14 +2307,14 @@ def _extract_conversation_script(expected: Any) -> list[dict[str, Any]] | None:
         stripped = expected.strip()
         if stripped.startswith("[") or stripped.startswith("{"):
             # Accept BOTH shapes from a JSON-stringified expected_output:
-            #   "[{\"user_text\": ...}, ...]"       — raw list
-            #   "{\"conversation_script\": [...]}"   — dict wrapper
+            #   "[{\"user_text\": ...}, ...]"       â€” raw list
+            #   "{\"conversation_script\": [...]}"   â€” dict wrapper
             # Real-run signal (trace voice_debug_3): Agent 3 / hand-
             # crafted inputs serialize expected_output as a dict-shaped
             # JSON string because TestCase.expected_output is typed
             # `str`. The old extractor only parsed list-shaped strings,
             # so conversation_script never reached drive_conversation
-            # → every turn collapsed to single-turn evaluation → score
+            # â†’ every turn collapsed to single-turn evaluation â†’ score
             # 0.1 regardless of agent quality. Parse once, then recurse
             # into the standard dict / list branches.
             try:
@@ -2139,13 +2330,13 @@ def _wrap_pcm16_as_wav(pcm: bytes, *, sample_rate: int, channels: int) -> bytes:
     """Prepend a RIFF/WAV header to raw PCM16 little-endian audio so the
     result is a playable .wav file.
 
-    Pure stdlib — uses ``wave`` module. Sample width is hard-coded to 2
+    Pure stdlib â€” uses ``wave`` module. Sample width is hard-coded to 2
     bytes (16-bit signed LE) which matches every realtime-audio API that
     returns ``audio_format="pcm16"`` (OpenAI Realtime, ElevenLabs Realtime,
     most telephony providers). Callers pass sample_rate + channels from the
     harness's ``audio_sample_rate`` / ``audio_channels`` fields.
 
-    Browsers + ``<audio>`` tags cannot play naked PCM — they require the
+    Browsers + ``<audio>`` tags cannot play naked PCM â€” they require the
     container header this function adds. Without this, saved agent audio
     files were silent / unseekable / unplayable.
     """
@@ -2165,14 +2356,14 @@ def _encode_pcm16_to_mp3(pcm: bytes, *, sample_rate: int, channels: int) -> byte
     when pydub or ffmpeg isn't available, letting callers fall back to WAV.
 
     Why MP3 matters: the caller-side TTS produces MP3. If the agent side is
-    .wav, the merger refuses mixed extensions and returns None — the user
+    .wav, the merger refuses mixed extensions and returns None â€” the user
     ends up with a "full call" file that's just caller audio stitched
-    together (no agent voice). Encoding agent PCM16 → MP3 here means every
+    together (no agent voice). Encoding agent PCM16 â†’ MP3 here means every
     artifact in voice/ shares the .mp3 extension, the merger concatenates
     cleanly with ID3 stripping, and browsers play the result.
 
-    Pure in-memory pipeline: PCM16 bytes → pydub AudioSegment (raw PCM
-    kwargs) → export to mp3 → return bytes. No temp files.
+    Pure in-memory pipeline: PCM16 bytes â†’ pydub AudioSegment (raw PCM
+    kwargs) â†’ export to mp3 â†’ return bytes. No temp files.
     """
     try:
         from pydub import AudioSegment  # type: ignore
@@ -2190,7 +2381,7 @@ def _encode_pcm16_to_mp3(pcm: bytes, *, sample_rate: int, channels: int) -> byte
         seg.export(out, format="mp3")
         return out.getvalue()
     except Exception as exc:  # noqa: BLE001
-        logger.debug("PCM16 → MP3 encode failed: %s", exc)
+        logger.debug("PCM16 â†’ MP3 encode failed: %s", exc)
         return None
 
 
@@ -2202,7 +2393,7 @@ def _strip_id3v2_header(body: bytes) -> bytes:
       bytes 0-2   "ID3"
       byte  3-4   version (major, revision)
       byte  5     flags
-      bytes 6-9   synchsafe size — each byte's high bit is unused, so
+      bytes 6-9   synchsafe size â€” each byte's high bit is unused, so
                   the real size is (b6<<21)|(b7<<14)|(b8<<7)|b9.
     Total tag length = 10 + size. If the leading 3 bytes aren't "ID3",
     return the body unchanged.
@@ -2220,12 +2411,12 @@ def _strip_id3v2_header(body: bytes) -> bytes:
     b = body[6:10]
     # Each byte uses only the low 7 bits; high bit is always 0.
     if any(x & 0x80 for x in b):
-        # Malformed — leave as-is rather than risk truncating frames.
+        # Malformed â€” leave as-is rather than risk truncating frames.
         return body
     size = (b[0] << 21) | (b[1] << 14) | (b[2] << 7) | b[3]
     cut = 10 + size
     if cut >= len(body):
-        # Tag claims to be larger than the file — refuse to truncate.
+        # Tag claims to be larger than the file â€” refuse to truncate.
         return body
     return body[cut:]
 
@@ -2281,7 +2472,7 @@ def _extract_agent_text(turn: CapturedVoiceTurn) -> tuple[str, str]:
         matches = _TWIML_TEXT_RE.findall(turn.twiml_text)
         if matches:
             return " ".join(m.strip() for m in matches if m.strip()), "twiml"
-        # Some TwiML uses self-closing <Play>URL — just return raw stripped
+        # Some TwiML uses self-closing <Play>URL â€” just return raw stripped
         stripped = re.sub(r"<[^>]+>", " ", turn.twiml_text).strip()
         return stripped, "twiml-raw"
     if turn.ncco_json:
@@ -2362,3 +2553,4 @@ __all__ = [
     "VoiceRealtimePlugin",
     "get_plugin_instance",
 ]
+

@@ -1,4 +1,4 @@
-"""Tests for puzzleeval.agents.agent5.turn_blocks (Phase 4.1).
+﻿"""Tests for puzzleeval.agents.agent5.turn_blocks (Phase 4.1).
 
 Pin the orphan-scrubber's behavior contracts:
   * Detection: identifies server_tool_use blocks lacking a matching
@@ -19,6 +19,7 @@ import pytest
 from puzzleeval.agents.agent5.turn_blocks import (
     SERVER_TOOL_NAMES,
     _summarize_tool_call,
+    _summarize_tool_result,
     build_initial_turn_log,
     detect_orphan_server_tool_uses,
     emit_build_turn_progress,
@@ -137,7 +138,7 @@ class TestStripOrphans:
 
 class TestServerToolNames:
     def test_canonical_set_includes_known_tools(self):
-        """The set must include web_search, web_fetch, advisor — the
+        """The set must include web_search, web_fetch, advisor â€” the
         three server tools Agent 5 uses today."""
         assert "web_search" in SERVER_TOOL_NAMES
         assert "web_fetch" in SERVER_TOOL_NAMES
@@ -145,7 +146,7 @@ class TestServerToolNames:
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 Path B helper-level tests — direct contracts for the new helpers
+# Phase 4 Path B helper-level tests â€” direct contracts for the new helpers
 # extracted from _build_single_harness. These pin the per-helper API surface
 # so future refactors can lean on them without re-running the full mock
 # pipeline.
@@ -173,7 +174,7 @@ def _response_for_log(usage, content=None, stop_reason="end_turn"):
 
 
 class TestBuildInitialTurnLog:
-    """The dict shape is the persistent contract — conversation_summary.json
+    """The dict shape is the persistent contract â€” conversation_summary.json
     + the SSE pipeline_runner read these field names. Pin them."""
 
     def test_canonical_field_set(self):
@@ -191,6 +192,7 @@ class TestBuildInitialTurnLog:
             "input_tokens", "output_tokens", "cache_read_tokens",
             "cache_create_tokens", "cache_hit_pct", "latency_ms",
             "text", "tool_calls", "tool_results", "iterations",
+            "iteration_summary", "server_tool_usage",
         ):
             assert field in log, f"missing field: {field}"
 
@@ -206,7 +208,7 @@ class TestBuildInitialTurnLog:
         assert log["cost_usd"] == 0.0123  # round(.., 4)
 
     def test_cache_hit_pct_when_no_cache(self):
-        # Pure miss: input=100, cache_read=0, cache_create=0 → 0%
+        # Pure miss: input=100, cache_read=0, cache_create=0 â†’ 0%
         resp = _response_for_log(_usage(input_tokens=100))
         log = build_initial_turn_log(
             resp,
@@ -218,7 +220,7 @@ class TestBuildInitialTurnLog:
         assert log["cache_hit_pct"] == 0.0
 
     def test_cache_hit_pct_typical(self):
-        # input=100, cache_read=900, cache_create=0 → 900/(100+900+0) = 90.0%
+        # input=100, cache_read=900, cache_create=0 â†’ 900/(100+900+0) = 90.0%
         resp = _response_for_log(_usage(input_tokens=100, cache_read=900))
         log = build_initial_turn_log(
             resp,
@@ -249,6 +251,8 @@ class TestBuildInitialTurnLog:
         assert len(log["iterations"]) == 1
         assert log["iterations"][0]["type"] == "message"
         assert log["iterations"][0]["model"] == "claude-haiku-4-5-20251001"
+        assert log["iteration_summary"]["count"] == 1
+        assert log["iteration_summary"]["output_tokens"] == 5
 
     def test_iterations_empty_when_no_iterations(self):
         resp = _response_for_log(_usage(iterations=None))
@@ -278,7 +282,7 @@ class TestBuildInitialTurnLog:
 
 
 class TestSummarizeToolCall:
-    """One-line summary per tool kind — the operator-facing diagnostic
+    """One-line summary per tool kind â€” the operator-facing diagnostic
     surface. Cap at ~200 chars so the SSE payload stays bounded."""
 
     def test_web_fetch_uses_url(self):
@@ -295,7 +299,12 @@ class TestSummarizeToolCall:
         })
         assert out == {"tool": "web_search", "summary": "stripe webhooks idempotency"}
 
-    def test_write_file_uses_path_or_file_path(self):
+    def test_write_file_uses_filename_path_or_file_path(self):
+        out_filename = _summarize_tool_call({
+            "tool": "patch_file",
+            "input": {"filename": "build_plan.md"},
+        })
+        assert out_filename["summary"] == "build_plan.md"
         out_a = _summarize_tool_call({
             "tool": "write_file",
             "input": {"path": "harness.py"},
@@ -356,8 +365,45 @@ class TestSummarizeToolCall:
         assert out["tool"] == "?"
 
 
+class TestSummarizeToolResult:
+    def test_web_fetch_result_surfaces_size(self):
+        out = _summarize_tool_result({
+            "tool": "web_fetch",
+            "url": "https://docs.example.com",
+            "chars_returned": 12345,
+        })
+        assert "12345 chars" in out["summary"]
+        assert "docs.example.com" in out["summary"]
+
+    def test_empty_web_fetch_is_explicit(self):
+        out = _summarize_tool_result({"tool": "web_fetch", "chars_returned": 0})
+        assert out["summary"].startswith("empty")
+
+    def test_web_fetch_error_surfaces_code_and_url(self):
+        out = _summarize_tool_result({
+            "tool": "web_fetch",
+            "url": "https://docs.example.com/blocked",
+            "chars_returned": 0,
+            "status": "error",
+            "error_code": "url_not_accessible",
+        })
+        assert "error url_not_accessible" in out["summary"]
+        assert "docs.example.com" in out["summary"]
+
+    def test_web_search_result_surfaces_count(self):
+        out = _summarize_tool_result({
+            "tool": "web_search",
+            "query": "provider websocket api docs",
+            "result_count": 10,
+            "top_results": [{"title": "API Docs"}],
+        })
+        assert "10 results" in out["summary"]
+        assert "provider websocket api docs" in out["summary"]
+        assert "API Docs" in out["summary"]
+
+
 class TestEmitBuildTurnProgress:
-    """The SSE-event emitter — the operator-facing live build telemetry.
+    """The SSE-event emitter â€” the operator-facing live build telemetry.
     No-op when no callback. Phase computed from boundary-state flags."""
 
     def test_no_callback_is_noop(self):
@@ -368,7 +414,7 @@ class TestEmitBuildTurnProgress:
             candidate_name="X",
             turn=0,
             max_turns=20,
-            api_spec_written=False,
+            build_gate_accepted=False,
             smoke_ever_passed=False,
             current_model="m",
             call_cost=0.0,
@@ -380,7 +426,7 @@ class TestEmitBuildTurnProgress:
             turn_log={"text": "", "tool_calls": []},
         )  # no exception
 
-    def test_phase_researching_when_no_api_spec(self):
+    def test_phase_researching_before_build_gate(self):
         events = []
         resp = SimpleNamespace(content=[], stop_reason="end_turn")
         emit_build_turn_progress(
@@ -388,7 +434,7 @@ class TestEmitBuildTurnProgress:
             candidate_name="X",
             turn=0,
             max_turns=20,
-            api_spec_written=False,
+            build_gate_accepted=False,
             smoke_ever_passed=False,
             current_model="m",
             call_cost=0.0,
@@ -402,7 +448,7 @@ class TestEmitBuildTurnProgress:
         assert events[0][0] == "build_turn"
         assert events[0][1]["phase"] == "researching"
 
-    def test_phase_building_after_api_spec_written(self):
+    def test_phase_building_after_build_gate(self):
         events = []
         resp = SimpleNamespace(content=[], stop_reason="end_turn")
         emit_build_turn_progress(
@@ -410,7 +456,7 @@ class TestEmitBuildTurnProgress:
             candidate_name="X",
             turn=0,
             max_turns=20,
-            api_spec_written=True,
+            build_gate_accepted=True,
             smoke_ever_passed=False,
             current_model="m",
             call_cost=0.0,
@@ -431,7 +477,7 @@ class TestEmitBuildTurnProgress:
             candidate_name="X",
             turn=0,
             max_turns=20,
-            api_spec_written=True,
+            build_gate_accepted=True,
             smoke_ever_passed=True,
             current_model="m",
             call_cost=0.0,
@@ -456,7 +502,7 @@ class TestEmitBuildTurnProgress:
             candidate_name="MyCand",
             turn=4,
             max_turns=25,
-            api_spec_written=False,
+            build_gate_accepted=False,
             smoke_ever_passed=False,
             current_model="claude-sonnet-4-6",
             call_cost=0.123,
@@ -479,7 +525,8 @@ class TestEmitBuildTurnProgress:
             "candidate_name", "turn", "max_turns", "phase", "model",
             "cost_usd", "cumulative_cost_usd", "latency_ms",
             "cache_read_tokens", "cache_create_tokens", "tools_used",
-            "tool_calls_detail", "text_preview", "stop_reason",
+            "tool_calls_detail", "tool_results_detail", "text_preview",
+            "stop_reason", "iteration_summary", "server_tool_usage",
         ):
             assert field in payload, f"missing field: {field}"
         # Specific values
@@ -492,6 +539,37 @@ class TestEmitBuildTurnProgress:
         assert len(payload["tool_calls_detail"]) == 1
         assert payload["tool_calls_detail"][0]["summary"] == "https://x.com"
 
+    def test_payload_includes_server_result_and_iteration_summary(self):
+        events = []
+        resp = SimpleNamespace(content=[], stop_reason="tool_use")
+        emit_build_turn_progress(
+            lambda evt, payload: events.append((evt, payload)),
+            candidate_name="X",
+            turn=3,
+            max_turns=20,
+            build_gate_accepted=False,
+            smoke_ever_passed=False,
+            current_model="m",
+            call_cost=1.0,
+            accumulated_cost=1.0,
+            call_latency_ms=250000,
+            cache_read=0,
+            cache_create=0,
+            response=resp,
+            turn_log={
+                "text": "",
+                "tool_calls": [{"tool": "patch_file", "input": {"filename": "build_plan.md"}}],
+                "tool_results": [{"tool": "web_fetch", "chars_returned": 0}],
+                "iteration_summary": {"count": 7, "advisor_count": 1},
+                "server_tool_usage": {"web_search_requests": 2},
+            },
+        )
+        payload = events[0][1]
+        assert payload["tool_calls_detail"][0]["summary"] == "build_plan.md"
+        assert payload["tool_results_detail"][0]["summary"].startswith("empty")
+        assert payload["iteration_summary"]["count"] == 7
+        assert payload["server_tool_usage"]["web_search_requests"] == 2
+
     def test_text_preview_truncated_at_300(self):
         events = []
         resp = SimpleNamespace(content=[], stop_reason="end_turn")
@@ -500,7 +578,7 @@ class TestEmitBuildTurnProgress:
             candidate_name="X",
             turn=0,
             max_turns=20,
-            api_spec_written=False,
+            build_gate_accepted=False,
             smoke_ever_passed=False,
             current_model="m",
             call_cost=0.0,
@@ -514,7 +592,7 @@ class TestEmitBuildTurnProgress:
         assert len(events[0][1]["text_preview"]) == 300
 
     def test_turn_is_1_indexed(self):
-        """Operators read this as 'turn 5 of 25' — must be 1-indexed."""
+        """Operators read this as 'turn 5 of 25' â€” must be 1-indexed."""
         events = []
         resp = SimpleNamespace(content=[], stop_reason="end_turn")
         emit_build_turn_progress(
@@ -522,7 +600,7 @@ class TestEmitBuildTurnProgress:
             candidate_name="X",
             turn=0,  # zero-indexed in the loop
             max_turns=20,
-            api_spec_written=False,
+            build_gate_accepted=False,
             smoke_ever_passed=False,
             current_model="m",
             call_cost=0.0,
@@ -534,3 +612,4 @@ class TestEmitBuildTurnProgress:
             turn_log={"text": "", "tool_calls": []},
         )
         assert events[0][1]["turn"] == 1  # surfaced as 1-indexed
+

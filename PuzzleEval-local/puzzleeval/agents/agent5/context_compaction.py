@@ -1,28 +1,17 @@
-"""Context compaction at the Sonnet → Opus model transition.
+"""Context compaction and bounded artifact restoration for Agent 5.
 
-Direct fix for the 749b09b1 narrative-inertia failure: Opus inheriting
-Sonnet's exit narration ("Phase 1 complete — handing off to Phase 2
-(Opus)") and looping 33 turns without realizing IT IS Opus.
+Agent 5 uses the builder model from turn 0. Compaction is still useful after
+research_synthesis.json and implementation_plan.json are accepted because it
+grounds the next turn in durable, load-bearing artifacts instead of bulky
+research/tool logs.
 
-A single ``PHASE2_DIRECTIVE`` user-message injection cannot reliably
-override embedded narrative bias when the prior context is large
-(observed: cache_read=88,763 tokens stuck identical across 33 turns).
-The fix is to REPLACE the conversation history with a compact, canonical
-state packet at the model-transition point. Opus then starts a fresh
-conversation that points at on-disk artifacts (objective.md,
-runtime_state.json, build_plan.md, api_spec.txt) for the prior context.
+The active policy is artifact restoration, not ritual rereading: the next turn
+gets a compact packet with objective, docs, test manifest, research/build brief,
+implementation plan, runtime state, latest failure context, and code diagnostics.
+The builder should read deeper files only when a specific detail is missing.
 
-Cost: ~$0.10-0.30 per build (one Opus call without cache hit). Saved
-per occurrence: ~$1.65 (the observed 33-turn waste). Net win even if
-the compaction only helps 1 build in 30.
-
-Scoped to the Sonnet → Opus transition ONLY. Other phase boundaries
-keep their existing prompt-injection mechanism (compacting at every
-boundary would be wasteful — narrative inertia is a model-transition
-phenomenon, not a phase-boundary one).
-
-Bypass: ``PUZZLEEVAL_CONTEXT_COMPACTION_AT_MODEL_TRANSITION=0`` falls
-back to the legacy PHASE2_DIRECTIVE-only path.
+Bypass: ``PUZZLEEVAL_CONTEXT_COMPACTION_AT_BUILD_GATE=0`` disables this
+artifact-grounding step.
 """
 
 from __future__ import annotations
@@ -32,9 +21,11 @@ from pathlib import Path
 from typing import Any
 
 
-# Marker the next API call site logs so we can audit when compaction
-# fired. Kept here so callers don't recompose the string.
-COMPACTION_EVENT_NAME = "context_compacted_at_model_transition"
+COMPACTION_EVENT_NAME = "context_compacted_at_build_gate"
+SERVER_RESTORATION_EVENT_NAME = "context_restored_after_server_compaction"
+SNAPSHOT_RELATIVE_PATH = "_agent_state/post_compaction_snapshot.json"
+MAX_RESTORATION_PACKET_CHARS = 12_000
+TARGET_RESTORATION_PACKET_CHARS = 10_000
 
 
 def _agent_state_dir(sandbox_dir: Path) -> Path:
@@ -42,8 +33,8 @@ def _agent_state_dir(sandbox_dir: Path) -> Path:
 
 
 def _read_optional(path: Path, max_chars: int = 4000) -> str:
-    """Read a file if it exists, truncating long content. Returns empty
-    string when missing or unreadable."""
+    """Read a file if it exists, truncating long content."""
+
     if not path.exists():
         return ""
     try:
@@ -55,23 +46,25 @@ def _read_optional(path: Path, max_chars: int = 4000) -> str:
     return text
 
 
-def _extract_outstanding_success_criteria(objective_md: str) -> str:
-    """Pull the SUCCESS CRITERIA section out of objective.md.
+def _read_json(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
-    Returns the raw section text. Doesn't try to be clever about
-    "outstanding" vs "satisfied" — at the Phase 1 → Phase 2 transition
-    NONE of the criteria are yet satisfied (the harness doesn't exist
-    yet). Showing the full SUCCESS CRITERIA list orients Opus toward
-    what the build is graded against.
-    """
+
+def _extract_outstanding_success_criteria(objective_md: str) -> str:
+    """Pull the SUCCESS CRITERIA section out of objective.md."""
+
     if not objective_md:
         return ""
-    # Find the section header
     marker = "## SUCCESS CRITERIA"
     idx = objective_md.find(marker)
     if idx < 0:
         return ""
-    # Find the start of the next ## section (or end of file)
     end_marker = "\n## "
     rest = objective_md[idx + len(marker):]
     end_idx = rest.find(end_marker)
@@ -79,133 +72,297 @@ def _extract_outstanding_success_criteria(objective_md: str) -> str:
     return section.strip()
 
 
-def _extract_phase_2_todos(build_plan_md: str) -> str:
-    """Pull the Phase 2 — Build section out of build_plan.md.
-
-    Returns the raw section text or empty when build_plan.md is absent
-    or doesn't yet have a Phase 2 section.
-    """
-    if not build_plan_md:
-        return ""
-    marker = "## Phase 2"
-    idx = build_plan_md.find(marker)
-    if idx < 0:
-        return ""
-    end_marker = "\n## "
-    rest = build_plan_md[idx + len(marker):]
-    end_idx = rest.find(end_marker)
-    section = rest if end_idx < 0 else rest[:end_idx]
-    return section.strip()
+def _objective_summary(sandbox_dir: Path) -> dict[str, Any]:
+    objective = _read_optional(_agent_state_dir(sandbox_dir) / "objective.md", 5000)
+    criteria = _extract_outstanding_success_criteria(objective)
+    objective_ids: list[str] = []
+    for line in criteria.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("- [") and "OBJ-" in stripped:
+            objective_ids.append(stripped[:120])
+    return {
+        "path": "_agent_state/objective.md",
+        "objective_ids_or_criteria": objective_ids or criteria.splitlines()[:12],
+    }
 
 
-def compose_canonical_state_packet(sandbox_dir: Path) -> str:
-    """Build the compacted user-message content for the model transition.
-
-    Reads from the on-disk artifacts (orchestrator-owned) so the message
-    reflects current truth, not stale conversation history.
-
-    Pure function — reads files, returns string. No mutation.
-    """
-    objective_md = _read_optional(_agent_state_dir(sandbox_dir) / "objective.md")
-    build_plan_md = _read_optional(_agent_state_dir(sandbox_dir) / "build_plan.md")
-    runtime_state_path = _agent_state_dir(sandbox_dir) / "runtime_state.json"
-    runtime_state_payload: dict[str, Any] = {}
-    if runtime_state_path.exists():
-        try:
-            runtime_state_payload = json.loads(
-                runtime_state_path.read_text(encoding="utf-8")
-            )
-        except (OSError, json.JSONDecodeError):
-            runtime_state_payload = {}
-
-    success_criteria = _extract_outstanding_success_criteria(objective_md)
-    phase_2_todos = _extract_phase_2_todos(build_plan_md)
-
-    files_present = runtime_state_payload.get("files_present", [])
-    files_pending = runtime_state_payload.get("files_pending", [])
-
-    # The packet is intentionally direct + imperative. Opus's first
-    # response after compaction sees this as the most recent user input
-    # — overriding any narrative bias that would otherwise lead it to
-    # emit "handing off to Opus" exit text.
-    parts: list[str] = [
-        "**You are now Phase 2 builder (Opus). You ARE the builder — do not narrate "
-        "any handoff or transition. Write the scaffold files now.**",
-        "",
-        "## Where you stand",
-        "",
-        f"- Current phase: {runtime_state_payload.get('current_phase', 'phase_2_build')}",
-        f"- Current turn: {runtime_state_payload.get('current_turn', '?')}",
-        f"- Files already in your sandbox: {', '.join(files_present) if files_present else '(none beyond initial setup)'}",
-        f"- Files still to write: {', '.join(files_pending) if files_pending else '(none)'}",
-        "",
-        "## Read these for full context",
-        "",
-        "Your prior research is on disk. Do NOT try to recall it from memory:",
-        "",
-        "- `read_file('api_spec.txt')` — the spec you (Sonnet) wrote in Phase 1.",
-        "  This has the auth method, endpoints, request/response shapes.",
-        "- `read_file('_agent_state/objective.md')` — what you must deliver.",
-        "- `read_file('_agent_state/runtime_state.json')` — your authoritative state.",
-        "- `read_file('_agent_state/build_plan.md')` — your Phase 2 todos.",
-    ]
-
-    if success_criteria:
-        parts.extend([
-            "",
-            "## SUCCESS CRITERIA from objective.md (your build is graded against these)",
-            "",
-            success_criteria,
-        ])
-
-    if phase_2_todos:
-        parts.extend([
-            "",
-            "## Phase 2 todos from build_plan.md",
-            "",
-            phase_2_todos,
-        ])
-
-    parts.extend([
-        "",
-        "## Next required action",
-        "",
-        "Your IMMEDIATE next response MUST call `write_file` (in parallel) for:",
-        "",
-        "- `requirements.txt`",
-        "- `harness.py`",
-        "- `smoke_test.py`",
-        "- `live_test.py`",
-        "",
-        "Read api_spec.txt and _agent_state/build_plan.md first. If the plan "
-        "needs a Phase 2 update, patch it before scaffold writes. Then issue "
-        "the four parallel write_file calls. Do NOT acknowledge this message "
-        "in narration. Do NOT describe a handoff. You ARE Opus. You ARE the "
-        "builder. Just call the tools.",
-    ])
-
-    return "\n".join(parts)
+def _docs_entrypoint_summary(sandbox_dir: Path) -> dict[str, Any]:
+    data = _read_json(_agent_state_dir(sandbox_dir) / "docs_entrypoint.json")
+    prefetched = data.get("prefetched_docs") or data.get("prefetched_doc_files") or {}
+    if isinstance(prefetched, dict):
+        prefetched_files = list(prefetched.values())[:8]
+    elif isinstance(prefetched, list):
+        prefetched_files = prefetched[:8]
+    else:
+        prefetched_files = []
+    return {
+        "path": "_agent_state/docs_entrypoint.json",
+        "evidence_status": data.get("evidence_status"),
+        "docs_verdict": data.get("docs_verdict"),
+        "primary_docs_entrypoint": data.get("primary_docs_entrypoint")
+        or data.get("verified_api_docs_url"),
+        "auth_method": data.get("auth_method"),
+        "api_access_method": data.get("api_access_method"),
+        "prefetched_docs": prefetched_files,
+    }
 
 
-def compact_for_model_transition(
+def _test_manifest_summary(sandbox_dir: Path) -> dict[str, Any]:
+    data = _read_json(_agent_state_dir(sandbox_dir) / "test_case_manifest.json")
+    return {
+        "path": "_agent_state/test_case_manifest.json",
+        "input_families": data.get("input_families")
+        or data.get("families")
+        or data.get("input_family_summaries")
+        or [],
+        "representative_cases": data.get("representative_cases")
+        or data.get("representative_test_cases")
+        or [],
+        "max_turns": data.get("max_turns"),
+        "evaluation_mode": data.get("evaluation_mode"),
+    }
+
+
+def _research_build_brief_summary(sandbox_dir: Path) -> dict[str, Any]:
+    path = _agent_state_dir(sandbox_dir) / "research_build_brief.json"
+    data = _read_json(path)
+    if data:
+        return {
+            "path": "_agent_state/research_build_brief.json",
+            "brief": data.get("brief") or data.get("build_brief") or data,
+        }
+    text = _read_optional(path, 1800)
+    return {"path": "_agent_state/research_build_brief.json", "brief": text} if text else {}
+
+
+def _research_synthesis_summary(sandbox_dir: Path) -> dict[str, Any]:
+    data = _read_json(_agent_state_dir(sandbox_dir) / "research_synthesis.json")
+    return {
+        "path": "_agent_state/research_synthesis.json",
+        "build_brief": data.get("build_brief"),
+        "chosen_api_surface": data.get("chosen_api_surface"),
+        "unresolved_questions": data.get("unresolved_questions") or [],
+        "facts_used_count": len(data.get("facts_used_for_implementation_plan") or []),
+    }
+
+
+def _implementation_plan_summary(sandbox_dir: Path) -> dict[str, Any]:
+    data = _read_json(_agent_state_dir(sandbox_dir) / "implementation_plan.json")
+    return {
+        "path": "_agent_state/implementation_plan.json",
+        "chosen_surface": data.get("chosen_surface") or data.get("chosen_api_surface"),
+        "runtime_pattern": data.get("runtime_pattern") or data.get("interaction_pattern"),
+        "file_plan": data.get("file_plan") or data.get("files_to_create"),
+        "live_or_probe_strategy": data.get("live_test_strategy")
+        or data.get("representative_probe_strategy")
+        or data.get("validation_strategy"),
+        "objective_coverage": data.get("objective_coverage"),
+    }
+
+
+def _runtime_state_summary(sandbox_dir: Path) -> dict[str, Any]:
+    data = _read_json(_agent_state_dir(sandbox_dir) / "runtime_state.json")
+    keys = (
+        "current_phase",
+        "current_turn",
+        "files_present",
+        "files_pending",
+        "lead_model",
+        "research_worker_model",
+        "completion_gate_status",
+        "completion_gate_issues",
+        "context_compactions",
+    )
+    return {"path": "_agent_state/runtime_state.json", **{k: data.get(k) for k in keys}}
+
+
+def _latest_failure_summary(sandbox_dir: Path) -> dict[str, Any]:
+    data = _read_json(_agent_state_dir(sandbox_dir) / "latest_failure_packet.json")
+    diagnosis = data.get("diagnosis") if isinstance(data.get("diagnosis"), dict) else {}
+    return {
+        "path": "_agent_state/latest_failure_packet.json",
+        "turn": data.get("turn"),
+        "failure_source": data.get("failure_source"),
+        "exit_code": data.get("exit_code"),
+        "mechanical_tags": data.get("mechanical_tags"),
+        "observed_failure": diagnosis.get("observed_failure"),
+        "likely_root_cause": diagnosis.get("likely_root_cause"),
+        "next_diagnostic_or_patch": diagnosis.get("next_diagnostic_or_patch"),
+        "research_would_change_implementation": diagnosis.get("research_would_change_implementation"),
+        "issues": data.get("issues"),
+        "code_diagnostics": data.get("code_diagnostics"),
+    }
+
+
+def _code_diagnostics_summary(sandbox_dir: Path) -> dict[str, Any]:
+    try:
+        from puzzleeval.agents.agent5.code_diagnostics import summarize_code_diagnostics
+
+        summary = summarize_code_diagnostics(sandbox_dir)
+    except Exception:  # noqa: BLE001
+        summary = {}
+    return {"path": "_agent_state/code_diagnostics.json", **summary} if summary else {}
+
+
+def _truncate_json_payload(payload: Any, max_chars: int) -> tuple[str, bool]:
+    text = json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str)
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars] + f"\n... truncated at {max_chars} chars", True
+
+
+def _section(
+    title: str,
+    payload: Any,
+    *,
+    max_chars: int,
+) -> tuple[str, bool]:
+    text, truncated = _truncate_json_payload(payload, max_chars)
+    return f"## {title}\n{text}", truncated
+
+
+def _write_snapshot(
     sandbox_dir: Path,
-) -> list[dict[str, Any]]:
-    """Return a fresh ``messages`` list with one canonical user message.
+    *,
+    event_name: str,
+    turn: Any,
+    included_artifacts: list[str],
+    omitted_artifacts: list[str],
+    truncation_flags: dict[str, bool],
+    packet_char_count: int,
+) -> None:
+    payload = {
+        "event_name": event_name,
+        "turn": turn,
+        "included_artifacts": included_artifacts,
+        "omitted_artifacts": omitted_artifacts,
+        "truncation_flags": truncation_flags,
+        "packet_char_count": packet_char_count,
+    }
+    path = sandbox_dir / SNAPSHOT_RELATIVE_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False, default=str),
+        encoding="utf-8",
+    )
+    tmp.replace(path)
 
-    Caller replaces ``state.messages`` with this return value at the
-    Sonnet → Opus transition point. The system prompt is passed
-    separately in ``client.messages.create(system=...)`` and is NOT
-    affected by this compaction.
 
-    The returned list always has exactly one entry — a user message
-    containing the compacted state packet.
-    """
-    content = compose_canonical_state_packet(sandbox_dir)
+def compose_canonical_state_packet(
+    sandbox_dir: Path,
+    *,
+    event_name: str = COMPACTION_EVENT_NAME,
+) -> str:
+    """Build and persist the bounded restored-state packet."""
+
+    summaries: list[tuple[str, dict[str, Any], int]] = [
+        ("Objective", _objective_summary(sandbox_dir), 1800),
+        ("Docs Entrypoint", _docs_entrypoint_summary(sandbox_dir), 1200),
+        ("Test Case Manifest", _test_manifest_summary(sandbox_dir), 1600),
+        ("Research Build Brief", _research_build_brief_summary(sandbox_dir), 1800),
+        ("Research Synthesis", _research_synthesis_summary(sandbox_dir), 1800),
+        ("Implementation Plan", _implementation_plan_summary(sandbox_dir), 1800),
+        ("Runtime State", _runtime_state_summary(sandbox_dir), 1200),
+        ("Latest Failure Packet", _latest_failure_summary(sandbox_dir), 1200),
+        ("Code Diagnostics", _code_diagnostics_summary(sandbox_dir), 1200),
+    ]
+    included: list[str] = []
+    omitted: list[str] = [
+        "full fetched docs",
+        "full research findings",
+        "full conversation logs",
+    ]
+    truncation: dict[str, bool] = {}
+    body_sections: list[str] = []
+    for title, payload, max_chars in summaries:
+        clean_payload = {k: v for k, v in payload.items() if v not in (None, "", [], {})}
+        if not clean_payload:
+            continue
+        section, was_truncated = _section(title, clean_payload, max_chars=max_chars)
+        truncation[title] = was_truncated
+        path = clean_payload.get("path")
+        if isinstance(path, str):
+            included.append(path)
+        body_sections.append(section)
+
+    header = "\n".join([
+        "**Agent 5 post-compaction restoration packet. You are the builder.**",
+        "",
+        "Use this restored snapshot as current working context. Read files only "
+        "when a specific detail needed for the next action is missing from the "
+        "snapshot. After an accepted implementation plan, begin scaffold/build "
+        "work without ritual rereads.",
+        "",
+        "Deeper artifacts are on disk at the paths shown below. This packet never "
+        "inlines full fetched docs, full research findings, or conversation logs.",
+        "",
+    ])
+    footer = "\n\n".join([
+        "## Next Productive Action",
+        "If the implementation plan is accepted and required scaffold files are "
+        "pending, write or patch the minimal vertical slice now: requirements.txt, "
+        "harness.py, smoke_test.py, and live_test.py. Keep dependent steps serial "
+        "(patch, test, diagnose), and use parallel tool calls only for independent "
+        "read-only inspection.",
+    ])
+    packet = header + "\n\n".join(body_sections) + "\n\n" + footer
+    if len(packet) > MAX_RESTORATION_PACKET_CHARS:
+        truncation["packet"] = True
+        packet = (
+            packet[:MAX_RESTORATION_PACKET_CHARS]
+            + f"\n\n[restoration packet truncated at {MAX_RESTORATION_PACKET_CHARS} chars]"
+        )
+    else:
+        truncation["packet"] = False
+
+    runtime_turn = _runtime_state_summary(sandbox_dir).get("current_turn")
+    _write_snapshot(
+        sandbox_dir,
+        event_name=event_name,
+        turn=runtime_turn,
+        included_artifacts=included,
+        omitted_artifacts=omitted,
+        truncation_flags=truncation,
+        packet_char_count=len(packet),
+    )
+    return packet
+
+
+def compact_for_build_gate(sandbox_dir: Path) -> list[dict[str, Any]]:
+    """Return a fresh messages list with one restored-state user message."""
+
+    content = compose_canonical_state_packet(
+        sandbox_dir,
+        event_name=COMPACTION_EVENT_NAME,
+    )
     return [{"role": "user", "content": content}]
+
+
+def restore_after_server_compaction(sandbox_dir: Path) -> dict[str, Any]:
+    """Return one restoration user message after server-side compaction."""
+
+    return {
+        "role": "user",
+        "content": compose_canonical_state_packet(
+            sandbox_dir,
+            event_name=SERVER_RESTORATION_EVENT_NAME,
+        ),
+    }
+
+
+def compact_for_model_transition(sandbox_dir: Path) -> list[dict[str, Any]]:
+    """Compatibility wrapper for old imports."""
+
+    return compact_for_build_gate(sandbox_dir)
 
 
 __all__ = [
     "COMPACTION_EVENT_NAME",
+    "SERVER_RESTORATION_EVENT_NAME",
+    "SNAPSHOT_RELATIVE_PATH",
     "compose_canonical_state_packet",
+    "compact_for_build_gate",
     "compact_for_model_transition",
+    "restore_after_server_compaction",
 ]

@@ -80,7 +80,7 @@ _SUBSTANTIVE_ELEVENLABS_REFLECTION = """# Reflection: pre-HARNESS_COMPLETE
 
 ## SUCCESS CRITERIA evidence walk-through
 
-- smoke_test.py passes: smoke_test.py:42 runs five probes (happy path,
+- offline smoke check passes: smoke_test.py:42 runs mocked mechanical probes (happy path,
   empty input, malformed input, max input, concurrency); output shows
   "5/5 passed".
 - live_test.py passes: live_test.py:18 invokes harness.run() with a

@@ -276,6 +276,8 @@ interface EvidenceRow {
   // Stable pointer to the merged full-conversation recording. The backend
   // also mirrors this as audio_paths[{ role: "conversation" }].
   merged_audio_path?: string | null;
+  judge_failed?: boolean;
+  judge_failure_reason?: string | null;
   // Rubric verdict from the agentic conversational eval path. Mirrors
   // RubricVerdict shape — see src/types/pipeline.ts. Null/undefined for
   // non-conversational tests and for scripted-mode conversations.
@@ -330,6 +332,7 @@ interface CandidateReport {
   sandbox_used?: boolean;
   failure_evidence?: EvidenceRow[];
   success_evidence?: EvidenceRow[];
+  test_evidence?: EvidenceRow[];
   pros?: string[];
   cons?: string[];
   // Build-status disclosure (from report.py's failed-build surfacing).
@@ -338,8 +341,40 @@ interface CandidateReport {
   // The candidate row renders critical_failures + forensics_tail in
   // a dedicated <ForensicsBlock> so the user can see WHY it failed.
   build_succeeded?: boolean;
+  abandoned?: boolean;
+  abandon_reason?: string | null;
   critical_failures?: string[];
   forensics_tail?: ForensicsEvent[];
+}
+
+interface EfficiencySummary {
+  migration_flags?: Record<string, boolean>;
+  totals?: {
+    candidates_attempted?: number;
+    total_turns_observed?: number;
+    total_cost_usd?: number;
+    agent5_build_cost_usd?: number;
+    agent5_test_cost_usd?: number;
+  };
+  turns_by_phase?: Record<string, number>;
+  cost_by_phase_usd?: Record<string, number>;
+  latency_by_phase_ms?: Record<string, number>;
+  research?: Record<string, unknown>;
+  blocked_fetches?: Record<string, unknown>;
+  artifact_overhead?: Record<string, unknown>;
+  failure_packets?: {
+    count?: number;
+    by_category?: Record<string, number>;
+  };
+  provider_health?: {
+    status_counts?: Record<string, number>;
+    failure_categories?: Record<string, number>;
+  };
+  abandoned_candidates?: {
+    count?: number;
+    by_reason?: Record<string, number>;
+  };
+  candidates?: Array<Record<string, unknown>>;
 }
 
 interface EvaluationReport {
@@ -359,6 +394,7 @@ interface EvaluationReport {
   overall_winner?: string | null;
   candidate_reports?: CandidateReport[];
   advisories?: string[];
+  efficiency_summary?: EfficiencySummary | null;
 }
 
 interface Props {
@@ -456,6 +492,8 @@ export function EvaluationReportCard({ report }: Props): ReactNode {
         </div>
       )}
 
+      <EfficiencySummaryBlock summary={r.efficiency_summary} />
+
       {/* Per-candidate detail (top 5 ranked) */}
       {candidates.length > 0 && (
         <div className="space-y-2">
@@ -466,6 +504,107 @@ export function EvaluationReportCard({ report }: Props): ReactNode {
         </div>
       )}
     </div>
+  );
+}
+
+function countMapLabel(map?: Record<string, number>): string {
+  const entries = Object.entries(map ?? {}).filter(([, v]) => Number(v) > 0);
+  if (entries.length === 0) return "none";
+  return entries.map(([k, v]) => `${k}: ${v}`).join(", ");
+}
+
+function numericField(obj: Record<string, unknown> | undefined, key: string): number {
+  const value = obj?.[key];
+  return typeof value === "number" ? value : 0;
+}
+
+function EfficiencySummaryBlock({
+  summary,
+}: {
+  summary?: EfficiencySummary | null;
+}) {
+  if (!summary) return null;
+  const phases = Object.keys(summary.turns_by_phase ?? {});
+  const research = summary.research ?? {};
+  const blocked = summary.blocked_fetches ?? {};
+  const overhead = summary.artifact_overhead ?? {};
+  const flags = summary.migration_flags ?? {};
+  return (
+    <details className="rounded border border-zinc-800 bg-zinc-900/40 p-3 text-xs">
+      <summary className="cursor-pointer text-sm text-zinc-300">
+        Build efficiency summary
+      </summary>
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+        <div>
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+            Phase rollup
+          </div>
+          <div className="space-y-1 text-zinc-300">
+            {phases.length > 0 ? (
+              phases.map((phase) => (
+                <div key={phase} className="flex justify-between gap-2">
+                  <span>{phase}</span>
+                  <span className="font-mono text-zinc-400">
+                    {summary.turns_by_phase?.[phase] ?? 0} turns / $
+                    {(summary.cost_by_phase_usd?.[phase] ?? 0).toFixed(4)}
+                  </span>
+                </div>
+              ))
+            ) : (
+              <div className="text-zinc-500">No per-phase data captured.</div>
+            )}
+          </div>
+        </div>
+        <div>
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+            Research and fetches
+          </div>
+          <div className="space-y-1 text-zinc-300">
+            <div>research turns: {numericField(research, "turns")}</div>
+            <div>web searches: {numericField(research, "web_search_results")}</div>
+            <div>web fetches: {numericField(research, "web_fetch_results")}</div>
+            <div>cache hit: {numericField(research, "cache_hit_pct").toFixed(1)}%</div>
+            <div>blocked fetches: {numericField(blocked, "web_fetch_blocks")}</div>
+            <div>empty fetches: {numericField(blocked, "empty_web_fetch_results")}</div>
+          </div>
+        </div>
+        <div>
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+            Recovery signals
+          </div>
+          <div className="space-y-1 text-zinc-300">
+            <div>artifact-only turns: {numericField(overhead, "artifact_only_turns")}</div>
+            <div>diagnostic turns: {numericField(overhead, "diagnostic_script_turns")}</div>
+            <div>failure packets: {summary.failure_packets?.count ?? 0}</div>
+            <div>abandoned: {summary.abandoned_candidates?.count ?? 0}</div>
+            <div>packet categories: {countMapLabel(summary.failure_packets?.by_category)}</div>
+            <div>abandon reasons: {countMapLabel(summary.abandoned_candidates?.by_reason)}</div>
+          </div>
+        </div>
+      </div>
+      {Object.keys(flags).length > 0 && (
+        <div className="mt-3 border-t border-zinc-800 pt-2">
+          <div className="mb-1 text-[10px] uppercase tracking-wide text-zinc-500">
+            Migration flags
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {Object.entries(flags).map(([name, enabled]) => (
+              <span
+                key={name}
+                className={
+                  "rounded border px-1.5 py-0.5 font-mono text-[10px] " +
+                  (enabled
+                    ? "border-emerald-900/60 text-emerald-300"
+                    : "border-amber-900/60 text-amber-300")
+                }
+              >
+                {name.replace("PUZZLEEVAL_", "")}={enabled ? "1" : "0"}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+    </details>
   );
 }
 
@@ -546,12 +685,23 @@ function CandidateRow({ c }: { c: CandidateReport }) {
   const passPct = typeof c.pass_rate === "number" ? c.pass_rate * 100 : 0;
   const monthly = c.monthly_cost_projection_usd;
   const buildFailed = c.build_succeeded === false;
+  const abandoned = c.abandoned === true;
+  const evidenceRows = c.test_evidence?.length
+    ? c.test_evidence
+    : [...(c.failure_evidence ?? []), ...(c.success_evidence ?? [])];
+  const callEvidence = evidenceRows.filter(
+    (ev) =>
+      Boolean(ev.merged_audio_path) ||
+      Boolean(ev.audio_paths?.some((ap) => ap.role === "conversation"))
+  );
   return (
     <div
       className={
         "rounded border p-3 space-y-2 " +
         (buildFailed
-          ? "bg-amber-950/20 border-amber-900/50"
+          ? abandoned
+            ? "bg-zinc-900/60 border-zinc-700/70"
+            : "bg-amber-950/20 border-amber-900/50"
           : "bg-zinc-900/70 border-zinc-800")
       }
     >
@@ -564,14 +714,16 @@ function CandidateRow({ c }: { c: CandidateReport }) {
           )}
           {buildFailed && (
             <span className="ml-2 text-[10px] uppercase tracking-wider text-amber-400 font-semibold">
-              build failed validation
+              {abandoned ? "abandoned" : "build failed validation"}
             </span>
           )}
         </div>
         <div className="text-xs text-zinc-400">
           {buildFailed ? (
             <span className="text-amber-400/90">
-              not tested — see forensics
+              {abandoned
+                ? `abandoned${c.abandon_reason ? `: ${c.abandon_reason}` : ""} - see evidence`
+                : "not tested - see forensics"}
             </span>
           ) : (
             <>
@@ -617,6 +769,34 @@ function CandidateRow({ c }: { c: CandidateReport }) {
           )}
         </div>
       )}
+      {callEvidence.length > 0 && (
+        <div className="rounded border border-zinc-800 bg-zinc-950/40 p-2 text-xs">
+          <div className="mb-2 flex items-baseline justify-between gap-2">
+            <div className="text-[10px] uppercase tracking-wide text-zinc-500">
+              Full call recordings
+            </div>
+            <div className="text-[10px] text-zinc-600">
+              {callEvidence.length} test{callEvidence.length === 1 ? "" : "s"}
+            </div>
+          </div>
+          <div className="space-y-2">
+            {callEvidence.map((ev, i) => (
+              <div key={`${ev.test_case_id ?? "test"}-${i}`}>
+                <div className="mb-1 flex items-center justify-between gap-2 text-zinc-300">
+                  <span>{ev.scenario || ev.test_case_id || `Test ${i + 1}`}</span>
+                  <span className={ev.passed ? "text-emerald-400" : "text-amber-400"}>
+                    {ev.passed ? "passed" : "failed"}
+                  </span>
+                </div>
+                <AudioPathsBlock
+                  paths={(ev.audio_paths ?? []).filter((ap) => ap.role === "conversation")}
+                  mergedAudioPath={ev.merged_audio_path}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {c.failure_evidence && c.failure_evidence.length > 0 && (
         <details className="text-xs">
           <summary className="cursor-pointer text-zinc-500 hover:text-zinc-300">
@@ -631,6 +811,11 @@ function CandidateRow({ c }: { c: CandidateReport }) {
                 {ev.reasoning_excerpt && (
                   <div className="text-zinc-500 italic">
                     {ev.reasoning_excerpt}
+                  </div>
+                )}
+                {ev.judge_failed && (
+                  <div className="text-amber-400">
+                    Judge failed: {ev.judge_failure_reason || "rubric verdict unavailable"}
                   </div>
                 )}
                 <AudioPathsBlock
@@ -660,6 +845,11 @@ function CandidateRow({ c }: { c: CandidateReport }) {
                 {ev.reasoning_excerpt && (
                   <div className="text-zinc-500 italic">
                     {ev.reasoning_excerpt}
+                  </div>
+                )}
+                {ev.judge_failed && (
+                  <div className="text-amber-400">
+                    Judge failed: {ev.judge_failure_reason || "rubric verdict unavailable"}
                   </div>
                 )}
                 <AudioPathsBlock

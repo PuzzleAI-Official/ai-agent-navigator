@@ -1,5 +1,5 @@
-# ============================================================================
-# Configuration — Centralized settings loaded from environment variables
+﻿# ============================================================================
+# Configuration â€” Centralized settings loaded from environment variables
 # ============================================================================
 # WHY ENVIRONMENT VARIABLES?
 #   - API keys should NEVER be hardcoded in source code (security risk).
@@ -25,12 +25,12 @@ import os
 # https://console.anthropic.com/. Put it in puzzleeval-api/.env or export
 # it in your shell.
 #
-# Read at import but deliberately NOT enforced here — raising at module
+# Read at import but deliberately NOT enforced here â€” raising at module
 # import time would break anything that wants to inspect / register /
 # list parts of the library without actually calling Claude (plugin
 # registry, plugin status reporter, unit tests). Call
 # `require_anthropic_key()` at the top of any function that's about to
-# instantiate an Anthropic client — it raises a clear EnvironmentError
+# instantiate an Anthropic client â€” it raises a clear EnvironmentError
 # when the key is missing.
 # ---------------------------------------------------------------------------
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
@@ -40,7 +40,7 @@ def require_anthropic_key() -> str:
     """Return the Anthropic API key; raise a clear error if unset.
 
     Call this at the start of any function that's about to instantiate
-    `anthropic.Anthropic(...)`. Lazy check by design — we want imports
+    `anthropic.Anthropic(...)`. Lazy check by design â€” we want imports
     to succeed in environments where Claude isn't actually called
     (CLI status commands, plugin readiness inspection, unit tests).
     """
@@ -59,14 +59,14 @@ def require_anthropic_key() -> str:
 # ---------------------------------------------------------------------------
 # Model Selection
 # ---------------------------------------------------------------------------
-# Which Claude model to use. Defaults to claude-sonnet-4-6 — best speed/intelligence
+# Which Claude model to use. Defaults to claude-sonnet-4-6 â€” best speed/intelligence
 # balance. Used by Agents 1-4 and post-loop evaluation.
 # Override with: export PUZZLEEVAL_MODEL="claude-opus-4-7"
 #
 # Available models (as of 2026):
-#   claude-opus-4-7    — most capable, slowest, most expensive (Agent 5 builder)
-#   claude-sonnet-4-6  — best speed/intelligence balance (Agents 1-4, research)
-#   claude-haiku-4-5   — fastest, cheapest, less capable
+#   claude-opus-4-7    â€” most capable, slowest, most expensive (Agent 5 builder)
+#   claude-sonnet-4-6  â€” best speed/intelligence balance (Agents 1-4, research)
+#   claude-haiku-4-5   â€” fastest, cheapest, less capable
 # ---------------------------------------------------------------------------
 DEFAULT_MODEL = os.environ.get("PUZZLEEVAL_MODEL", "claude-sonnet-4-6")
 
@@ -74,13 +74,13 @@ DEFAULT_MODEL = os.environ.get("PUZZLEEVAL_MODEL", "claude-sonnet-4-6")
 # ---------------------------------------------------------------------------
 # Agent 1 Model
 # ---------------------------------------------------------------------------
-# Agent 1 is the DIRECTOR of the pipeline — it decomposes the user's demand
+# Agent 1 is the DIRECTOR of the pipeline â€” it decomposes the user's demand
 # into an ordered WorkflowBlueprint with step ordering, data flow, role
 # assignment, and architecture options (all-in-one vs best-per-step).
 # That's a planning task that benefits from Opus 4.7's deeper reasoning.
 #
 # Cost impact: Agent 1 runs in ~1-3 turns with ~4K in + ~0.5-1K out per turn.
-# Opus vs Sonnet adds ~$0.05/evaluation — a ~1% rounding error at pipeline
+# Opus vs Sonnet adds ~$0.05/evaluation â€” a ~1% rounding error at pipeline
 # scale (~$6 total). Override with PUZZLEEVAL_AGENT1_MODEL if you want to
 # run Agent 1 on Sonnet to shave that cost.
 # ---------------------------------------------------------------------------
@@ -105,17 +105,17 @@ RESEARCH_MODEL = os.environ.get("PUZZLEEVAL_RESEARCH_MODEL", "claude-sonnet-4-6"
 # tests. See puzzleeval/user_simulator.py and puzzleeval/rubric_judge.py.
 #
 # Global mode override (per-test TestCase.evaluation_mode wins when
-# set — this env var forces a global override across all conversational
+# set â€” this env var forces a global override across all conversational
 # tests in the run):
-#   "auto"     → per-test evaluation_mode respected (default)
-#   "agentic"  → force agentic path on every conversational test
-#   "scripted" → force legacy static-script path (back-compat only —
+#   "auto"     â†’ per-test evaluation_mode respected (default)
+#   "agentic"  â†’ force agentic path on every conversational test
+#   "scripted" â†’ force legacy static-script path (back-compat only â€”
 #                multi-turn conversational evaluation needs agentic;
 #                the scripted fallback exists only for legacy tests)
 CONVERSATION_EVAL_MODE = os.environ.get(
     "PUZZLEEVAL_CONVERSATION_EVAL_MODE", "auto"
 )
-# User simulator runs Haiku 4.5 by default — reactive enough for caller
+# User simulator runs Haiku 4.5 by default â€” reactive enough for caller
 # utterances, 10x cheaper than Sonnet. Override to Sonnet when the
 # persona is particularly nuanced (e.g., highly technical customer
 # pushing back on agent claims).
@@ -132,14 +132,14 @@ USER_SIM_TEMPERATURE = float(
 USER_SIM_MAX_TOKENS = int(
     os.environ.get("PUZZLEEVAL_USER_SIM_MAX_TOKENS", "512")
 )
-# Rubric judge uses Sonnet 4.6 — quality matters more than cost here;
+# Rubric judge uses Sonnet 4.6 â€” quality matters more than cost here;
 # one judge call per test versus N simulator calls per test.
 RUBRIC_JUDGE_MODEL = os.environ.get(
     "PUZZLEEVAL_RUBRIC_JUDGE_MODEL", "claude-sonnet-4-6"
 )
 # Judge output is structured (RubricVerdict). 4096 suits typical rubric
-# sizes (6 criteria × ~300 tokens reasoning + summary + overhead).
-# Rubric judge max_tokens — bumped from 4096 to 8192 (2026-04-23) after
+# sizes (6 criteria Ã— ~300 tokens reasoning + summary + overhead).
+# Rubric judge max_tokens â€” bumped from 4096 to 8192 (2026-04-23) after
 # real-run trace 0c7f085f observed 2 judge crashes with:
 #   "Invalid JSON: EOF while parsing a string at line 1 column 2126"
 #   "Invalid JSON: EOF while parsing a string at line 1 column 175"
@@ -147,7 +147,7 @@ RUBRIC_JUDGE_MODEL = os.environ.get(
 # max_tokens cap mid-string, the partial JSON fails pydantic validation
 # and the whole test case loses its rubric verdict. 8192 is enough for
 # typical 5-criterion rubrics with detailed per-criterion reasoning
-# (~600 chars each × 5 + overhead = ~4KB content, 4KB thinking).
+# (~600 chars each Ã— 5 + overhead = ~4KB content, 4KB thinking).
 #
 # Raise this further if you see recurring JSON-truncation errors for
 # a particular rubric shape. Lower to 4096 to measure cost-savings at
@@ -155,12 +155,23 @@ RUBRIC_JUDGE_MODEL = os.environ.get(
 RUBRIC_JUDGE_MAX_TOKENS = int(
     os.environ.get("PUZZLEEVAL_RUBRIC_JUDGE_MAX_TOKENS", "8192")
 )
+RUBRIC_JUDGE_TIMEOUT_S = float(
+    os.environ.get("PUZZLEEVAL_RUBRIC_JUDGE_TIMEOUT_S", "90")
+)
+RUBRIC_JUDGE_MAX_RETRIES = int(
+    os.environ.get("PUZZLEEVAL_RUBRIC_JUDGE_MAX_RETRIES", "0")
+)
+RUBRIC_JUDGE_ADAPTIVE_THINKING_ENABLED = (
+    os.environ.get("PUZZLEEVAL_RUBRIC_JUDGE_ADAPTIVE_THINKING", "0") != "0"
+)
+CONVERSATION_DEFAULT_MAX_TURNS = int(
+    os.environ.get("PUZZLEEVAL_CONVERSATION_DEFAULT_MAX_TURNS", "4")
+)
 # Hard ceiling on conversation length regardless of what TestCase.max_turns
-# says. Protects worst-case cost envelope: 12 turns × (Haiku + agent call
-# + STT) caps out around $0.50-0.80 per test. Tests that set max_turns
-# above this get silently clamped down.
+# says. Protects worst-case cost envelope. Most tests should stay at the
+# default 4 turns; complex scenarios can ask for more up to this ceiling.
 CONVERSATION_MAX_TURNS_CEILING = int(
-    os.environ.get("PUZZLEEVAL_CONVERSATION_MAX_TURNS_CEILING", "12")
+    os.environ.get("PUZZLEEVAL_CONVERSATION_MAX_TURNS_CEILING", "6")
 )
 
 
@@ -179,7 +190,7 @@ SCREENING_MODEL = os.environ.get("PUZZLEEVAL_SCREENING_MODEL", RESEARCH_MODEL)
 # Token Limits
 # ---------------------------------------------------------------------------
 # Maximum number of tokens Claude can generate in its response.
-# 4096 is generous for structured JSON output — most Agent 1 responses
+# 4096 is generous for structured JSON output â€” most Agent 1 responses
 # will be ~500-1000 tokens.
 # ---------------------------------------------------------------------------
 MAX_TOKENS = int(os.environ.get("PUZZLEEVAL_MAX_TOKENS", "4096"))
@@ -189,10 +200,10 @@ MAX_TOKENS = int(os.environ.get("PUZZLEEVAL_MAX_TOKENS", "4096"))
 # Logging Configuration
 # ---------------------------------------------------------------------------
 # LOG_LEVEL controls how verbose the logs are:
-#   DEBUG    — everything, including internal details (noisy)
-#   INFO     — normal operations (recommended for development)
-#   WARNING  — only potential problems
-#   ERROR    — only actual failures
+#   DEBUG    â€” everything, including internal details (noisy)
+#   INFO     â€” normal operations (recommended for development)
+#   WARNING  â€” only potential problems
+#   ERROR    â€” only actual failures
 #
 # LOG_OUTPUT_PATH: if set, logs also write to this file (in addition to stderr).
 # This is useful for later piping to cloud logging services.
@@ -202,13 +213,13 @@ LOG_OUTPUT_PATH = os.environ.get("PUZZLEEVAL_LOG_PATH", None)
 
 
 # ---------------------------------------------------------------------------
-# Pricing tables — canonical home is `puzzleeval.telemetry.pricing_tables`.
+# Pricing tables â€” canonical home is `puzzleeval.telemetry.pricing_tables`.
 # ---------------------------------------------------------------------------
 # Re-exported here so legacy callers (`from puzzleeval.config import
 # MODEL_PRICING`) keep working. New code should import directly from
 # `puzzleeval.telemetry` or `puzzleeval.telemetry.pricing_tables`.
 #
-# To update pricing, edit `puzzleeval/telemetry/pricing_tables.py` — that
+# To update pricing, edit `puzzleeval/telemetry/pricing_tables.py` â€” that
 # is the single source of truth. The CI guard
 # `tests/test_pricing_table_completeness.py` asserts every model name
 # referenced in the codebase has an entry in the canonical table.
@@ -230,17 +241,17 @@ from puzzleeval.telemetry.pricing_tables import (
 # entire workflow (Zapier, n8n, etc.) AND ONE per-scope search per step in
 # the blueprint (so specialists at each scope surface alongside the
 # all-in-ones). Every candidate carries a `covers_step_ids: frozenset[str]`
-# claim plus a `coverage_confidence: dict[str, "claimed"]` tag — Agent 2
-# never verifies, only records what search snippets claim. Phase 6.5's
-# deep-verify upgrades `"claimed"` → `"verified"` per scope or drops the
-# scope from `covers_step_ids`.
+# claim plus a `coverage_confidence: dict[str, "claimed"]` tag â€” Agent 2
+# never verifies, only records what search snippets claim. Later
+# selected-candidate verification/research upgrades `"claimed"` to
+# `"verified"` per scope or drops the scope from `covers_step_ids`.
 #
 # When disabled: single-pass search (today's behavior); every candidate
 # gets an empty `covers_step_ids` and empty `coverage_confidence` so
 # downstream falls back to the flat flow.
 #
 # 1-scope blueprints and blueprint=None runs always take the single-pass
-# path regardless of this flag — dual search only activates for N>=2 steps.
+# path regardless of this flag â€” dual search only activates for N>=2 steps.
 # ---------------------------------------------------------------------------
 RESEARCH_DUAL_SEARCH_ENABLED = (
     os.environ.get("PUZZLEEVAL_RESEARCH_DUAL_SEARCH_ENABLED", "1") != "0"
@@ -273,24 +284,22 @@ USER_SELECTION_ENABLED = (
 
 
 # ---------------------------------------------------------------------------
-# Agent 4 Deep-Verify flags — REMOVED.
+# Agent 4 Deep-Verify flags â€” REMOVED.
 # ---------------------------------------------------------------------------
-# The deep-verify path (full atlas extraction in Agent 4) was removed
+# The legacy full-atlas extraction path in Agent 4 was removed
 # along with its supporting modules (``deep_verify_runner.py``,
 # ``provider_atlas.py``, ``deep_verify_prompt.py``, ``manual_atlas.py``).
 # Rationale: Agent 4's atlas extraction and Agent 5's build-oriented
-# research have different goals (structured provider surface vs
-# build-ready api_spec.txt). Forcing both into Agent 4 produced
-# atlases Agent 5 couldn't consume efficiently, leading to 20+ turn
-# build loops where the builder re-read SDK source to rediscover
-# what the atlas had in the wrong shape.
+# research have different goals. Agent 4 verifies the official docs
+# entrypoint and lightweight access metadata; Agent 5 owns research
+# strategy, synthesis, implementation plan, build, debug, and evidence.
 #
 # Current split:
-#   Agent 4: shallow verify (screening.py) — confirm public API exists,
-#            emit auth_method + verified_api_docs_url + access_method
-#   Agent 5: Phase-1 research (implement_test_env.py BUILDER_SYSTEM_PROMPT)
-#            — Sonnet reads docs, writes api_spec.txt, then switches to
-#            Opus for build.
+#   Agent 4: docs-entrypoint verifier plus lightweight auth/access/pricing
+#            metadata.
+#   Agent 5: Opus leads from turn 0 for strategy, synthesis, implementation
+#            planning, build, debug, and completion. Sonnet is reserved for
+#            bounded research workers.
 
 
 # ---------------------------------------------------------------------------
@@ -320,7 +329,7 @@ SCOPE_TEST_MODE = os.environ.get("PUZZLEEVAL_SCOPE_TEST_MODE", "1") != "0"
 # ---------------------------------------------------------------------------
 # Anthropic's server-side web_fetch tool sometimes hits 403/Cloudflare blocks
 # (url_not_accessible) or 429 rate limits (too_many_requests). The model has
-# already seen the error inside its current turn — but we can guide the NEXT
+# already seen the error inside its current turn â€” but we can guide the NEXT
 # turn with a fallback message that suggests web_search alternatives,
 # GitHub SDK lookups, or alternate docs URLs.
 #
@@ -343,26 +352,28 @@ FETCH_RATE_LIMIT_BACKOFF_SECONDS = int(
 # gets an autonomous builder agent that reads API docs, writes code, tests it,
 # and fixes errors iteratively.
 #
-# AGENT5_BUILDER_MODEL: Sonnet 4.6 (same as research/screening) — handles
-#   web content well and produces good code. Same price as Sonnet 4.5.
+# AGENT5_BUILDER_MODEL: Opus 4.7 by default. Agent 5 uses this lead model
+#   from turn 0 for research planning, synthesis, build, debug, and
+#   completion. RESEARCH_MODEL is only for bounded worker research.
 # AGENT5_MAX_TURNS: 15 is enough for: read docs (2-3) + write code (1) +
 #   test + fix cycles (2-3 iterations) with margin for complex APIs.
 # AGENT5_MAX_BUDGET_PER_CANDIDATE: $3 covers ~15 turns of web fetch +
 #   code generation. Most candidates finish in $1-2.
-# AGENT5_MAX_OUTPUT_TOKENS: 8192 — code generation needs more output tokens
+# AGENT5_MAX_OUTPUT_TOKENS: 8192 â€” code generation needs more output tokens
 #   than the default 4096 (a full harness.py + requirements.txt can be 2-3K tokens).
 # ---------------------------------------------------------------------------
 AGENT5_BUILDER_MODEL = os.environ.get("PUZZLEEVAL_BUILDER_MODEL", "claude-opus-4-7")
 # AGENT5_MAX_TURNS: upper bound on the outer loop. The real stop signal is
 # adaptive progress tracking (diminishing returns). This is just the worst-case
-# ceiling — legitimately complex builds (voice WebSocket SDK with session
+# ceiling â€” legitimately complex builds (voice WebSocket SDK with session
 # state, OAuth flows, multi-endpoint pipelines) can legitimately need 25-35
-# turns. Prior 25 cap was killing Phase 2 debug cycles on complex SDKs.
+# turns. Prior 25 cap was killing complex SDK debug cycles.
 AGENT5_MAX_TURNS = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_TURNS", "40"))
-# DIMINISHING_RETURNS_WINDOW: if N consecutive turns produce ZERO file
-# writes AND ZERO new research findings, we're stuck — inject a wrap-up
-# nudge. Not a hard stop: the agent can still write code to recover. Pattern
-# adapted from Claude Code's query/tokenBudget.ts diminishing-returns detector.
+# DIMINISHING_RETURNS_WINDOW: if N consecutive turns produce ZERO durable
+# artifact/evidence progress, we're stuck enough to inject a wrap-up nudge.
+# Not a hard stop: the agent can still write code to recover. Pattern adapted
+# from Claude Code's query/tokenBudget.ts diminishing-returns detector, using
+# PuzzleEval artifacts/tests/research as the progress signal.
 AGENT5_DIMINISHING_RETURNS_WINDOW = int(
     os.environ.get("PUZZLEEVAL_AGENT5_DIMINISHING_WINDOW", "3")
 )
@@ -373,17 +384,17 @@ AGENT5_DIMINISHING_RETURNS_WINDOW = int(
 AGENT5_MAX_REASSESSMENT_TIERS = int(
     os.environ.get("PUZZLEEVAL_AGENT5_MAX_REASSESSMENT_TIERS", "4")
 )
-# Gate C — patch-fragmentation nudge. When the last 2 real turns were BOTH
+# Gate C â€” patch-fragmentation nudge. When the last 2 real turns were BOTH
 # small (<= AGENT5_PATCH_FRAGMENT_TOKEN_CEILING output tokens each) AND BOTH
 # applied a single `patch_file` call to the SAME file, inject a one-time
-# soft nudge suggesting parallel edits for the next bug on that file.
-# Runtime-only (not prompt-static) — fires AT MOST once per file per build
+# soft nudge suggesting same-turn edits for the next bug on that file.
+# Runtime-only (not prompt-static) â€” fires AT MOST once per file per build
 # so it can't spam the loop. Set the flag to "0" to disable the whole
 # gate; set the ceiling to "0" to effectively disable it while keeping
 # the plumbing hot for A/B tests. Informed by real-run evidence: voice
 # builds regularly show 4-5 serial single-line patches to harness.py
-# that could have been one parallel turn — ~$0.20-0.40 per build
-# lost to round-trip overhead. See plan §4.2.
+# that could have been one same-turn batch - ~$0.20-0.40 per build
+# lost to round-trip overhead. See plan Â§4.2.
 AGENT5_PATCH_FRAGMENT_NUDGE_ENABLED = (
     os.environ.get("PUZZLEEVAL_AGENT5_PATCH_FRAGMENT_NUDGE", "1") == "1"
 )
@@ -391,20 +402,21 @@ AGENT5_PATCH_FRAGMENT_TOKEN_CEILING = int(
     os.environ.get("PUZZLEEVAL_AGENT5_PATCH_FRAGMENT_TOKEN_CEILING", "600")
 )
 
-# Agent 5 builder write_file gates (B1, B2, B3) — soft-by-default per AD-007.
+# Agent 5 builder write_file gates (B1, B2, B3) â€” soft-by-default per AD-007.
 # Each gate has an env-var bypass so operators can disable in real runs if a
 # false-positive blocks legitimate work. All default ON.
 #
-#   * GATE_FORBIDDEN_FILENAMES — REJECT_TOOL_CALL on meta-files like NOTES.md.
+#   * GATE_FORBIDDEN_FILENAMES â€” REJECT_TOOL_CALL on meta-files like NOTES.md.
 #     Builder receives a tool error in the next turn and adapts (rename to a
-#     canonical file or store the content in api_spec.txt).
-#   * GATE_INTROSPECTION_WARN — WARN-only (log + allow) when the builder
+#     canonical file or store the content in research_synthesis.json,
+#     implementation_plan.json, or reflection evidence).
+#   * GATE_INTROSPECTION_WARN â€” WARN-only (log + allow) when the builder
 #     writes inspect_/check_/explore_/probe_*.py BEFORE harness.py exists.
 #     Observability for fragmented-probing antipattern; doesn't block.
-#   * GATE_PHASE1_SCAFFOLD_BLOCK — REJECT_TOOL_CALL when the builder writes
+#   * GATE_PHASE1_SCAFFOLD_BLOCK â€” REJECT_TOOL_CALL when the builder writes
 #     scaffold files (harness.py, smoke_test.py, live_test.py,
-#     requirements.txt) while api_spec_written is False. Phase-keyed (NOT
-#     model-keyed) so model-fallback ladders can't trigger false rejects.
+#     requirements.txt) before the active build gate is satisfied. Phase-keyed
+#     (NOT model-keyed) so model-fallback ladders can't trigger false rejects.
 GATE_FORBIDDEN_FILENAMES_ENABLED = (
     os.environ.get("PUZZLEEVAL_GATE_FORBIDDEN_FILENAMES", "1") != "0"
 )
@@ -415,34 +427,31 @@ GATE_PHASE1_SCAFFOLD_BLOCK_ENABLED = (
     os.environ.get("PUZZLEEVAL_GATE_PHASE1_SCAFFOLD_BLOCK", "1") != "0"
 )
 
-# Gate B4: pre-spec research budget. Counts web_search + web_fetch +
-# ask_research uses while api_spec_written is False; injects a user message
-# before the next API call when the count crosses the budget. Soft —
-# the message lets the builder adapt (write spec with TODOs OR call
-# advisor for a tier-up); doesn't halt the build.
-GATE_PRESPEC_RESEARCH_BUDGET_ENABLED = (
-    os.environ.get("PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET", "1") != "0"
+# Gate B4: pre-build research budget. Counts web_search + web_fetch +
+# ask_research uses before the active build gate is satisfied; injects a user message
+# before the next API call when the count crosses the budget. Soft â€”
+# the message lets the builder adapt by committing research_synthesis.json and
+# implementation_plan.json with explicit risks, making one targeted gap-fill, or
+# writing a validated abandon_candidate.json; it doesn't halt the build.
+GATE_PREBUILD_RESEARCH_BUDGET_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_PREBUILD_RESEARCH_BUDGET", "1") != "0"
 )
-GATE_PRESPEC_RESEARCH_BUDGET = int(
-    os.environ.get("PUZZLEEVAL_GATE_PRESPEC_RESEARCH_BUDGET_COUNT", "2")
+GATE_PREBUILD_RESEARCH_BUDGET = int(
+    os.environ.get("PUZZLEEVAL_GATE_PREBUILD_RESEARCH_BUDGET_COUNT", "2")
 )
 
-# Phase 2B gates (G-A2, G-A3, G-A4) — schema-side soft validators.
+# Schema-side soft validators (G-A2, G-A3).
 # All WARN-tier; emit structured `gate_fired` logs without raising.
 # Bypass via env-var per-gate. See PuzzleEval-local/CLAUDE.md AD-007
 # table for the full description and OOD-recovery story per gate.
 #
-# G-A2 — Agent2Result per-scope-floor (warn when <3 candidates per scope)
-# G-A3 — TestCase instructions-asymmetry (capability-predicate-driven)
-# G-A4 — BuildReadinessChecklist Verified-Pass needs all 4 non-negotiables
+# G-A2 â€” Agent2Result per-scope-floor (warn when <3 candidates per scope)
+# G-A3 â€” TestCase instructions-asymmetry (capability-predicate-driven)
 GATE_AGENT2_SCOPE_FLOOR_ENABLED = (
     os.environ.get("PUZZLEEVAL_GATE_AGENT2_SCOPE_FLOOR", "1") != "0"
 )
 GATE_TESTCASE_INSTRUCTIONS_ASYMMETRY_ENABLED = (
     os.environ.get("PUZZLEEVAL_GATE_TESTCASE_INSTRUCTIONS_ASYMMETRY", "1") != "0"
-)
-GATE_CHECKLIST_VERIFIED_PASS_ENABLED = (
-    os.environ.get("PUZZLEEVAL_GATE_CHECKLIST_VERIFIED_PASS", "1") != "0"
 )
 AGENT5_MAX_BUDGET_PER_CANDIDATE = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_PER_CANDIDATE", "3.0")
@@ -450,7 +459,7 @@ AGENT5_MAX_BUDGET_PER_CANDIDATE = float(
 AGENT5_MAX_BUDGET_TOTAL = float(
     os.environ.get("PUZZLEEVAL_AGENT5_BUDGET_TOTAL", "20.0")
 )
-# Voice-modality build budget — voice harnesses are intrinsically harder than
+# Voice-modality build budget â€” voice harnesses are intrinsically harder than
 # REST (multi-turn WebSocket state, async events, real-time TTS/STT) and need
 # more headroom. Both turn cap AND dollar budget bumped together so voice
 # builds don't quietly become expensive (one without the other would let cost
@@ -464,8 +473,15 @@ AGENT5_MAX_BUDGET_PER_CANDIDATE_VOICE = float(
 )
 AGENT5_MAX_PARALLEL = int(os.environ.get("PUZZLEEVAL_AGENT5_MAX_PARALLEL", "5"))
 AGENT5_CODE_TIMEOUT = int(os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT", "120"))
+# Frontend/operator liveness while an Agent 5 API turn is in flight. This is
+# intentionally observability-only: it does not shorten or cancel the call, but
+# prevents multi-minute server-side research / advisor turns from looking like
+# a frozen UI. Set to 0 to disable.
+AGENT5_PROGRESS_HEARTBEAT_SECONDS = float(
+    os.environ.get("PUZZLEEVAL_AGENT5_PROGRESS_HEARTBEAT_SECONDS", "30")
+)
 
-# Harness forensics layer — observability for Agent-5-built harnesses.
+# Harness forensics layer â€” observability for Agent-5-built harnesses.
 # `_forensics.py` is auto-injected into every sandbox; harnesses import it
 # for `log()` + `traced_op()` + canonical event taxonomy. The semantic
 # verification gate (verify_forensics_coverage in agent5/verification.py)
@@ -475,7 +491,7 @@ AGENT5_CODE_TIMEOUT = int(os.environ.get("PUZZLEEVAL_AGENT5_CODE_TIMEOUT", "120"
 GATE_FORENSICS_COVERAGE_ENABLED = (
     os.environ.get("PUZZLEEVAL_GATE_FORENSICS_COVERAGE", "1") != "0"
 )
-# Autonomy artifacts (PR 1 — Goal/Planning/State/Reflection plan).
+# Autonomy artifacts (PR 1 â€” Goal/Planning/State/Reflection plan).
 # When enabled, the orchestrator stages ``_agent_state/`` with
 # objective.md (system-generated contract from Agent 1-4 outputs) +
 # runtime_state.json (orchestrator-owned authoritative state, updated
@@ -483,11 +499,63 @@ GATE_FORENSICS_COVERAGE_ENABLED = (
 # (build_plan.md, agent_observations.json, reflection_phase_<n>.md) are
 # written by the agent in response to directives. Disabling this flag
 # falls back to the legacy reactive build path (existing AD-007 gates
-# still fire as the safety net). Soft-by-default — failure to stage
+# still fire as the safety net). Soft-by-default â€” failure to stage
 # artifacts is logged but doesn't abort the build.
 GATE_AUTONOMY_ARTIFACTS_ENABLED = (
     os.environ.get("PUZZLEEVAL_GATE_AUTONOMY_ARTIFACTS", "1") != "0"
 )
+RESEARCH_WORKERS_ENABLED = (
+    os.environ.get("PUZZLEEVAL_RESEARCH_WORKERS_ENABLED", "1") != "0"
+)
+IMPLEMENTATION_PLAN_MAX_REVISIONS = int(
+    os.environ.get("PUZZLEEVAL_IMPLEMENTATION_PLAN_MAX_REVISIONS", "1")
+)
+PERSISTENT_WORKER_RUNTIME_ENABLED = (
+    os.environ.get("PUZZLEEVAL_PERSISTENT_WORKER_RUNTIME_ENABLED", "1") != "0"
+)
+FAILURE_PACKET_DEBUG_ENABLED = (
+    os.environ.get("PUZZLEEVAL_FAILURE_PACKET_DEBUG_ENABLED", "1") != "0"
+)
+FAILURE_PACKET_LLM_REVIEW_ENABLED = (
+    os.environ.get("PUZZLEEVAL_FAILURE_PACKET_LLM_REVIEW_ENABLED", "1") != "0"
+)
+VOICE_LIVE_SEMANTIC_REVIEW_ENABLED = (
+    os.environ.get("PUZZLEEVAL_VOICE_LIVE_SEMANTIC_REVIEW_ENABLED", "1") != "0"
+)
+REPRESENTATIVE_PROBE_GATE_ENABLED = (
+    os.environ.get("PUZZLEEVAL_REPRESENTATIVE_PROBE_GATE", "1") != "0"
+)
+ABANDON_CANDIDATE_ENABLED = (
+    os.environ.get("PUZZLEEVAL_ABANDON_CANDIDATE_ENABLED", "1") != "0"
+)
+EFFICIENCY_SUMMARY_ENABLED = (
+    os.environ.get("PUZZLEEVAL_EFFICIENCY_SUMMARY_ENABLED", "1") != "0"
+)
+CODE_DIAGNOSTICS_ENABLED = (
+    os.environ.get("PUZZLEEVAL_CODE_DIAGNOSTICS_ENABLED", "1") != "0"
+)
+
+
+def migration_flags_snapshot() -> dict[str, bool]:
+    return {
+        "PUZZLEEVAL_OBJECTIVE_VALIDATOR_ENABLED": OBJECTIVE_VALIDATOR_ENABLED,
+        "PUZZLEEVAL_RESEARCH_WORKERS_ENABLED": RESEARCH_WORKERS_ENABLED,
+        "PUZZLEEVAL_PERSISTENT_WORKER_RUNTIME_ENABLED": PERSISTENT_WORKER_RUNTIME_ENABLED,
+        "PUZZLEEVAL_FAILURE_PACKET_DEBUG_ENABLED": FAILURE_PACKET_DEBUG_ENABLED,
+        "PUZZLEEVAL_FAILURE_PACKET_LLM_REVIEW_ENABLED": FAILURE_PACKET_LLM_REVIEW_ENABLED,
+        "PUZZLEEVAL_VOICE_LIVE_SEMANTIC_REVIEW_ENABLED": VOICE_LIVE_SEMANTIC_REVIEW_ENABLED,
+        "PUZZLEEVAL_REPRESENTATIVE_PROBE_GATE": REPRESENTATIVE_PROBE_GATE_ENABLED,
+        "PUZZLEEVAL_ABANDON_CANDIDATE_ENABLED": ABANDON_CANDIDATE_ENABLED,
+        "PUZZLEEVAL_EFFICIENCY_SUMMARY_ENABLED": EFFICIENCY_SUMMARY_ENABLED,
+        "PUZZLEEVAL_CODE_DIAGNOSTICS_ENABLED": CODE_DIAGNOSTICS_ENABLED,
+    }
+
+
+OBJECTIVE_VALIDATOR_ENABLED = (
+    os.environ.get("PUZZLEEVAL_OBJECTIVE_VALIDATOR_ENABLED", "1") != "0"
+)
+
+
 # Build-plan directives are intentionally off by default. The passive
 # artifact may still be staged for operator/debug inspection, but the latest
 # voice run showed forced build_plan.md updates adding turn cost without
@@ -496,18 +564,12 @@ GATE_AUTONOMY_ARTIFACTS_ENABLED = (
 AUTONOMY_BUILD_PLAN_DIRECTIVES_ENABLED = (
     os.environ.get("PUZZLEEVAL_AUTONOMY_BUILD_PLAN_DIRECTIVES", "0") != "0"
 )
-# Context compaction at the Sonnet → Opus model transition. Direct fix
-# for run 749b09b1's narrative-inertia loop (Opus inheriting Sonnet's
-# exit narration and emitting 33 turns of "handing off" without writing
-# code). When enabled, ``messages`` is cleared at the api_spec_written
-# transition and replaced with a single canonical state packet pointing
-# at on-disk artifacts. The KV-cache is lost (~$0.10-0.30 per build) in
-# exchange for the reliability gain. When disabled, falls back to the
-# legacy PHASE2_DIRECTIVE-only path (the user message gets appended but
-# the prior conversation history stays). Scoped to the model transition
-# only — other phase boundaries keep their existing mechanisms.
-CONTEXT_COMPACTION_AT_MODEL_TRANSITION_ENABLED = (
-    os.environ.get("PUZZLEEVAL_CONTEXT_COMPACTION_AT_MODEL_TRANSITION", "1") != "0"
+# Context compaction at the implementation-plan build gate. Agent 5 uses the
+# builder model from turn 0; compaction is artifact grounding after
+# research_synthesis.json + implementation_plan.json are accepted.
+CONTEXT_COMPACTION_AT_BUILD_GATE_ENABLED = (
+    os.environ.get("PUZZLEEVAL_CONTEXT_COMPACTION_AT_BUILD_GATE", "1")
+    != "0"
 )
 # Pre-HARNESS_COMPLETE reflection-evidence gate (PR 2 of the autonomy plan).
 # When enabled, the build loop:
@@ -515,7 +577,7 @@ CONTEXT_COMPACTION_AT_MODEL_TRANSITION_ENABLED = (
 #     is detected without a substantive ``_agent_state/reflection_phase_3.md``.
 #   * Calls ``verify_reflection_complete`` after structural + forensics
 #     gates pass; rejects HARNESS_COMPLETE on missing/vacuous reflection.
-#   * Soft tier per AD-007 — one retry, then accept with
+#   * Soft tier per AD-007 â€” one retry, then accept with
 #     ``reflection_gate_fired`` telemetry.
 # Disabling falls back to PR 1 telemetry-only behavior. Bypass is the
 # emergency unblock; the phased-rollout mechanism for risk management is
@@ -539,11 +601,12 @@ REFLECTION_LLM_JUDGE_MODEL = os.environ.get(
 )
 # Directive suppression on agreement (PR 3 of the autonomy plan).
 # When enabled, the orchestrator reads ``_agent_state/agent_observations.json``
-# at the api_spec_written transition and SUPPRESSES the redundant
-# prompt-injection (context compaction OR PHASE2_DIRECTIVE) when the
-# agent's most recent phase observation matches the orchestrator's
-# current phase. Telemetry distinguishes:
-#   * directive_suppressed_agent_observed - agreement, no injection
+# at the active build-gate transition and may suppress only the redundant
+# directive text when the agent's most recent phase observation matches the
+# orchestrator's current phase. Context compaction still runs:
+# it is the direct 749b09b1 narrative-inertia fix and must not depend on
+# agent-authored observations. Telemetry distinguishes:
+#   * directive_suppressed_agent_observed - agreement, no redundant directive text
 #   * agent_observation_phase_disagreement - disagreement, fire to correct
 #   * directive_fired_no_agent_observation - no observation, default fire
 # The autonomy artifacts flag must also be enabled (the agent's
@@ -560,7 +623,7 @@ HARNESS_FAULTHANDLER_TIMEOUT = int(
     os.environ.get("PUZZLEEVAL_HARNESS_FAULTHANDLER_TIMEOUT", "45")
 )
 AGENT5_MAX_OUTPUT_TOKENS = int(
-    # 24K — raised from 16K after a real-run trace (71734f9d) showed
+    # 24K â€” raised from 16K after a real-run trace (71734f9d) showed
     # Turn 0 of ElevenLabs hitting stop_reason=max_tokens even with
     # 16K budget, losing $0.68 to response truncation. Root cause:
     # Sonnet 4.6 with adaptive thinking + 3 web_fetch results at 15K
@@ -590,13 +653,29 @@ AGENT5_MAX_CANDIDATES = int(
 AGENT6_EVAL_MODEL = os.environ.get("PUZZLEEVAL_AGENT6_EVAL_MODEL", DEFAULT_MODEL)
 # AGENT6_TEST_TIMEOUT = per-test-case subprocess timeout in seconds.
 # Same scaling rule as AGENT5_CODE_TIMEOUT: 120s baseline for sync APIs;
-# long-running operations (any provider whose atlas reports async_polling
-# or batch_file) automatically scale to AGENT6_TEST_TIMEOUT_LONG.
+# long-running operations (any provider metadata/research that reports
+# async_polling or batch_file) automatically scale to AGENT6_TEST_TIMEOUT_LONG.
 AGENT6_TEST_TIMEOUT = int(
     os.environ.get("PUZZLEEVAL_AGENT6_TEST_TIMEOUT", "120")
 )
 AGENT6_TEST_TIMEOUT_LONG = int(
     os.environ.get("PUZZLEEVAL_AGENT6_TEST_TIMEOUT_LONG", "600")
+)
+PERSISTENT_HARNESS_RUNNER_ENABLED = (
+    PERSISTENT_WORKER_RUNTIME_ENABLED
+    and os.environ.get("PUZZLEEVAL_PERSISTENT_HARNESS_RUNNER", "1") != "0"
+)
+AGENT6_CONVERSATION_TIMEOUT = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_CONVERSATION_TIMEOUT", "600")
+)
+AGENT6_WHOLE_TEST_TIMEOUT = int(
+    os.environ.get("PUZZLEEVAL_AGENT6_WHOLE_TEST_TIMEOUT", "240")
+)
+GATE_SESSION_CONTINUITY_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_SESSION_CONTINUITY", "1") != "0"
+)
+GATE_STREAM_KEEPALIVE_DIAGNOSTIC_ENABLED = (
+    os.environ.get("PUZZLEEVAL_GATE_STREAM_KEEPALIVE_DIAGNOSTIC", "1") != "0"
 )
 AGENT6_RATE_LIMIT_BACKOFF = int(
     os.environ.get("PUZZLEEVAL_AGENT6_RATE_LIMIT_BACKOFF", "3")
@@ -605,14 +684,14 @@ AGENT6_EVAL_MAX_TOKENS = int(
     # Real run 045bbd10 (2026-04-21) exposed that 4096 tokens is too
     # small when the evaluator batches 8 test cases AND uses adaptive
     # thinking (thinking tokens are a subset of max_tokens). Adaptive
-    # thinking burns ~1-3K tokens; batch JSON for 8 tests × 3-5
-    # criteria × ~50 tokens each = 1-2K more. Total needed ~3-5K for
+    # thinking burns ~1-3K tokens; batch JSON for 8 tests Ã— 3-5
+    # criteria Ã— ~50 tokens each = 1-2K more. Total needed ~3-5K for
     # JSON alone, which exceeds the remaining budget after thinking.
     # Real symptom: `EOF while parsing a string at column 5471` (JSON
-    # truncated mid-string) → retry also truncates → terminal fail
-    # → all evaluations return empty → every test scored 0/100.
+    # truncated mid-string) â†’ retry also truncates â†’ terminal fail
+    # â†’ all evaluations return empty â†’ every test scored 0/100.
     # Bumped to 16000 which matches AGENT5_MAX_OUTPUT_TOKENS and
-    # gives comfortable headroom. max_tokens is a ceiling — actual
+    # gives comfortable headroom. max_tokens is a ceiling â€” actual
     # usage stays low for small batches, so this has no cost impact
     # when not needed.
     os.environ.get("PUZZLEEVAL_AGENT6_EVAL_MAX_TOKENS", "16000")
@@ -628,7 +707,7 @@ AGENT6_MIN_TESTS_BEFORE_ABORT = int(
 )
 
 # AGENT6_PER_CANDIDATE_PARALLELISM controls how many SINGLE-TURN test
-# cases for ONE candidate run concurrently. Default 6 — chosen as the
+# cases for ONE candidate run concurrently. Default 6 â€” chosen as the
 # CEILING below the ElevenLabs Conversational AI Starter pack's
 # concurrent-session cap (the tightest paid tier we currently exercise).
 # Cloud-migration safe: this is ThreadPoolExecutor INSIDE a single
@@ -636,7 +715,7 @@ AGENT6_MIN_TESTS_BEFORE_ABORT = int(
 # managed-sandbox migrations apply the same parallelism per container.
 #
 # Going above 6 on Starter would trigger ElevenLabs's 429 / "session
-# limit exceeded" path on every voice run — the AGENT6_SESSION_RETRY_BACKOFF
+# limit exceeded" path on every voice run â€” the AGENT6_SESSION_RETRY_BACKOFF
 # path catches these gracefully but at the cost of 5-35s of retry
 # backoff per overflow.
 #
@@ -645,17 +724,17 @@ AGENT6_MIN_TESTS_BEFORE_ABORT = int(
 #     batch 1 + 1 in batch 2 (plus background audio merge from item 5
 #     overlapping batch 2's conversation). Batch 1 wall-clock = max
 #     conversation in batch (~135s); batch 2 wall-clock = single test
-#     (~135s). Total ≈ 270s vs the prior 390s of 3 sequential batches
-#     of 3 — saves ~2 min on the test phase.
-#   - For ≥7-test batches, the background audio merge (item 5,
+#     (~135s). Total â‰ˆ 270s vs the prior 390s of 3 sequential batches
+#     of 3 â€” saves ~2 min on the test phase.
+#   - For â‰¥7-test batches, the background audio merge (item 5,
 #     voice_realtime._merge_conversation_audio submitted to a daemon
-#     pool) frees workers at conversation-end, not merge-end — so
+#     pool) frees workers at conversation-end, not merge-end â€” so
 #     batch 2 starts ~70s sooner than sync-merge would allow.
 #   - The rate_limiter (puzzleeval/rate_limiter.py) is wired into
 #     _execute_all_tests at implement_test_env.py:7617. Every test
 #     call goes through `rate_limiter.acquire(candidate, upstream)`
 #     BEFORE hitting the provider API. acquire() SLEEPS until a
-#     token is available — pure back-pressure, no errors raised.
+#     token is available â€” pure back-pressure, no errors raised.
 #   - Default DEFAULT_RPS=2 per candidate means the EFFECTIVE
 #     parallelism is capped at ~2 RPS regardless of how many threads
 #     are queued. 6-parallel just means we have 6 threads waiting in
@@ -663,15 +742,15 @@ AGENT6_MIN_TESTS_BEFORE_ABORT = int(
 #
 # AGENT6_PER_CANDIDATE_SESSION_PARALLELISM controls how many MULTI-TURN
 # tests (conversation, voice_conversation, voice_turn) run concurrently
-# for ONE candidate. Default 6 — same Starter-pack concurrent-session
+# for ONE candidate. Default 6 â€” same Starter-pack concurrent-session
 # ceiling as single-turn. Each multi-turn test opens a separate provider
 # session (WebSocket connection / conversation_id / session handle) that
 # can run 60-135s. ElevenLabs Starter's concurrent-session cap is 6 per
-# workspace; OpenAI Realtime tier-1 handles 6× concurrent WebSockets
+# workspace; OpenAI Realtime tier-1 handles 6Ã— concurrent WebSockets
 # fine.
 #
 # If a tighter free-tier provider's session cap proves below 6, the
-# AGENT6_SESSION_RETRY_BACKOFF retry path absorbs the surge — the
+# AGENT6_SESSION_RETRY_BACKOFF retry path absorbs the surge â€” the
 # harness waits for a prior session to release and retries. With
 # backoff base=5s and max=3 retries, worst case is slower wall-clock,
 # never test failure.
@@ -681,7 +760,7 @@ AGENT6_MIN_TESTS_BEFORE_ABORT = int(
 # managed sandboxes). Each one is ThreadPoolExecutor INSIDE a single
 # container / job. No cross-candidate coordination, no process-level
 # shared state, no filesystem racing. "Lift and shift" to cloud works
-# with no redesign — the same parallelism bounds apply at the
+# with no redesign â€” the same parallelism bounds apply at the
 # per-container level whether we run locally or in the cloud.
 #
 # If you hit "concurrent session exceeded" errors on free-tier voice
@@ -697,7 +776,7 @@ AGENT6_PER_CANDIDATE_SESSION_PARALLELISM = int(
     os.environ.get("PUZZLEEVAL_AGENT6_PER_CANDIDATE_SESSION_PARALLELISM", "6")
 )
 
-# AGENT6_SESSION_RETRY_BACKOFF_BASE / MAX_RETRIES — wait-and-retry
+# AGENT6_SESSION_RETRY_BACKOFF_BASE / MAX_RETRIES â€” wait-and-retry
 # behavior when a provider returns a "concurrent session limit
 # exceeded" error.
 #
@@ -705,12 +784,12 @@ AGENT6_PER_CANDIDATE_SESSION_PARALLELISM = int(
 # than the provider allows (free tiers commonly cap at 1), the harness
 # call fails. Instead of marking the test as errored, we wait for a
 # prior session to release and retry. This preserves result quality
-# AT THE COST of wall-clock time — but wall-clock was the whole point
+# AT THE COST of wall-clock time â€” but wall-clock was the whole point
 # of parallelism, so the user-facing behavior is "parallel if the
 # provider supports it, graceful serialization if it doesn't."
 #
-# Backoff shape: exponential — base × 2^(attempt-1). With base=5 and
-# max=3 retries, waits are 5s → 10s → 20s (35s total before giving
+# Backoff shape: exponential â€” base Ã— 2^(attempt-1). With base=5 and
+# max=3 retries, waits are 5s â†’ 10s â†’ 20s (35s total before giving
 # up). Typical multi-turn conversation takes 15-30s, so by the third
 # retry a prior session has almost certainly released.
 #
@@ -727,14 +806,14 @@ AGENT6_SESSION_MAX_RETRIES = int(
 # REPORT_MAX_EVIDENCE_PER_KIND controls how many per-candidate
 # TestEvidence entries (failures + successes, separately) get packed
 # into the final EvaluationReport. The frontend (EvaluationReportCard)
-# renders EVERY entry it receives inside expandable <details> blocks —
-# it does NOT paginate — so this cap is the end-to-end visibility
+# renders EVERY entry it receives inside expandable <details> blocks â€”
+# it does NOT paginate â€” so this cap is the end-to-end visibility
 # ceiling.
 #
 # Earlier default was 3 "representative" failures + 3 successes, which
 # was fine when typical evals ran 5-10 tests per candidate. With
 # Agent 3 now generating 10-50 tests per run, 3 leaves 70-90% of
-# results invisible. Default bumped to 50 — covers 99% of real runs
+# results invisible. Default bumped to 50 â€” covers 99% of real runs
 # entirely, and the frontend's <details> accordion keeps the UI tidy
 # even at that size (users expand what they want to inspect).
 #
@@ -770,8 +849,8 @@ PROVIDER_REGISTRY_PATH = os.environ.get(
 # same upstream.
 #
 # The limiter (puzzleeval/rate_limiter.py) runs in two layers:
-#   1. Per-candidate token bucket — respects each candidate's own docs.
-#   2. Per-upstream-provider global bucket — groups candidates that wrap
+#   1. Per-candidate token bucket â€” respects each candidate's own docs.
+#   2. Per-upstream-provider global bucket â€” groups candidates that wrap
 #      the same LLM and caps shared throughput.
 #
 # Both default to ON. Disable with PUZZLEEVAL_RATE_LIMIT_ENABLED=0 for
@@ -786,16 +865,16 @@ DEFAULT_RPS = float(os.environ.get("PUZZLEEVAL_DEFAULT_RPS", "2.0"))
 UPSTREAM_RPS = float(os.environ.get("PUZZLEEVAL_UPSTREAM_RPS", "5.0"))
 
 # ---------------------------------------------------------------------------
-# Adversarial verification (Gap E — Claude Code-style verification agent)
+# Adversarial verification (Gap E â€” Claude Code-style verification agent)
 # ---------------------------------------------------------------------------
-# After Agent 5 builds a harness and signals HARNESS_COMPLETE on smoke +
-# one live call, run a battery of adversarial probes (empty input, max
+# After Agent 5 builds a harness and signals HARNESS_COMPLETE with
+# production-equivalence evidence, run a battery of adversarial probes (empty input, max
 # input, malformed input, idempotency, concurrency, auth-error). When the
 # battery surfaces a critical failure (crash or silent corruption), the
 # harness is marked NOT READY and Agent 3 test cases skip it.
 #
 # Disable via PUZZLEEVAL_ADVERSARIAL_PROBES_ENABLED=0 to fall back to the
-# legacy behavior (smoke-test-only verification).
+# legacy behavior (completion without the post-loop adversarial battery).
 # ---------------------------------------------------------------------------
 ADVERSARIAL_PROBES_ENABLED = os.environ.get(
     "PUZZLEEVAL_ADVERSARIAL_PROBES_ENABLED", "1"
@@ -806,7 +885,7 @@ ADVERSARIAL_PROBES_ENABLED = os.environ.get(
 # Agent 5 build-failure fallback (Q4 closure)
 # ---------------------------------------------------------------------------
 # When EVERY selected candidate fails to produce a working harness, the
-# pipeline used to surface a hard failure ("Zero harnesses built — pipeline
+# pipeline used to surface a hard failure ("Zero harnesses built â€” pipeline
 # cannot continue"). The user is left with no testable environment.
 #
 # With AGENT5_FALLBACK_ENABLED=1 (default), Agent 5 instead pulls
@@ -842,10 +921,10 @@ AGENT5_FALLBACK_MAX = int(
 # item 4). Empirical evidence from real run trace 73a9d605
 # (conversation_log.json): Opus build turns under EFFORT=high were
 # spending substantial budget on extended thinking that produced no
-# visible work — e.g., ElevenLabs T2 Opus turn cost $0.97 with 262
+# visible work â€” e.g., ElevenLabs T2 Opus turn cost $0.97 with 262
 # output tokens, 0 visible text, 0 tools called. Adaptive thinking
 # auto-tunes UPWARD when the model hits a complex decision point, so
-# `medium` is a FLOOR, not a cap — hard decisions still get the
+# `medium` is a FLOOR, not a cap â€” hard decisions still get the
 # reasoning depth they need, routine tool execution doesn't burn
 # budget on it.
 #
@@ -860,12 +939,12 @@ AGENT5_FALLBACK_MAX = int(
 EFFORT = os.environ.get("PUZZLEEVAL_EFFORT", "medium").lower().strip()
 _VALID_EFFORTS = {"low", "medium", "high", "xhigh", "max", ""}
 if EFFORT not in _VALID_EFFORTS:
-    # Unknown value — log and reset to default so downstream API calls don't
+    # Unknown value â€” log and reset to default so downstream API calls don't
     # fail with a 400. We don't raise because config import shouldn't crash.
     import sys as _sys
     print(
         f"warning: PUZZLEEVAL_EFFORT={EFFORT!r} not in "
-        f"{sorted(_VALID_EFFORTS)} — defaulting to 'medium'",
+        f"{sorted(_VALID_EFFORTS)} â€” defaulting to 'medium'",
         file=_sys.stderr,
     )
     EFFORT = "medium"
@@ -891,9 +970,9 @@ def output_config_for_request() -> dict | None:
 # expose all plugins as Claude-callable tools + adaptive thinking, let
 # Claude decide whether any plugin would sharpen the verdict.
 #
-# Off by default — opt in when you want extra precision for ambiguous
+# Off by default â€” opt in when you want extra precision for ambiguous
 # modalities at the cost of non-determinism in the fallback path.
-# Modality-clear cases (audio→audio, code→code, etc.) remain deterministic
+# Modality-clear cases (audioâ†’audio, codeâ†’code, etc.) remain deterministic
 # regardless of this flag.
 # ---------------------------------------------------------------------------
 HYBRID_EVAL_ENABLED = os.environ.get(
@@ -906,7 +985,7 @@ HYBRID_EVAL_ENABLED = os.environ.get(
 # ---------------------------------------------------------------------------
 # The path Agent 5 uses to pick which plugin(s) score a given test case.
 #
-#   "tool_runner" (default) — Plugins are exposed as ``@beta_tool`` functions
+#   "tool_runner" (default) â€” Plugins are exposed as ``@beta_tool`` functions
 #       to Claude via ``client.beta.messages.tool_runner``. Claude reads the
 #       test case + response, picks the right plugin(s), chains them across
 #       iterations when multiple are needed, and emits a structured
@@ -918,15 +997,15 @@ HYBRID_EVAL_ENABLED = os.environ.get(
 #       "Agent 3 mis-labeled the modality" gap, the "ambiguous enum tiebreak"
 #       gap, AND scales cleanly past 30+ plugins via `tool_search_tool`.
 #
-#       Non-deterministic by design — Claude's selection varies slightly
-#       across runs. Borderline scores may wobble by ±0.02; rank ordering
+#       Non-deterministic by design â€” Claude's selection varies slightly
+#       across runs. Borderline scores may wobble by Â±0.02; rank ordering
 #       stays stable.
 #
-#   "deterministic" — Legacy enum-based dispatch. For emergency bisection
+#   "deterministic" â€” Legacy enum-based dispatch. For emergency bisection
 #       only. modality.py picks one plugin per (input_type, output_type)
 #       pair. Reproducible but has the coverage gaps that motivated C.
 #
-#   "hybrid" — Deterministic first; if the chosen plugin returns
+#   "hybrid" â€” Deterministic first; if the chosen plugin returns
 #       ``fallback_reason`` OR no plugin matches, fall back to tool_runner.
 #       Middle ground: reproducible for clean cases, intelligent for edges.
 # ---------------------------------------------------------------------------
@@ -956,13 +1035,13 @@ EVAL_MAX_ITERATIONS = int(
 # When enabled, plugin tools are marked ``allowed_callers=["direct",
 # "code_execution_20260120"]`` and a code_execution tool is added so
 # Claude can write one Python script that chains multiple plugins in a
-# single container — intermediate tool results don't enter the model's
+# single container â€” intermediate tool results don't enter the model's
 # context. Specifically closes the "need 3 tools, got 1" coverage gap
 # without N separate API round-trips. Claude decides per-test whether
 # to use programmatic mode; single-tool cases still invoke directly.
-# On by default — docs recommend this path for multi-modal scoring.
-# Flip to 0 for a pure direct-dispatch evaluation path (emergency
-# rollback + regression bisection).
+# On by default â€” docs recommend this path for multi-modal scoring.
+# Flip to 0 for a pure direct-dispatch evaluation path during regression
+# bisection.
 EVAL_PROGRAMMATIC_CHAINING_ENABLED = os.environ.get(
     "PUZZLEEVAL_EVAL_PROGRAMMATIC_CHAINING", "1"
 ).lower() not in ("0", "false", "no", "")
@@ -973,7 +1052,7 @@ EVAL_PROGRAMMATIC_CHAINING_ENABLED = os.environ.get(
 # ---------------------------------------------------------------------------
 # When enabled, the Agent 5 builder loop adds `code_execution_20260120` to
 # its tool list and marks write_file/patch_file/run_code/read_file as
-# `allowed_callers=["direct", "code_execution_20260120"]` — Claude can
+# `allowed_callers=["direct", "code_execution_20260120"]` â€” Claude can
 # write Python that chains tool calls in a single container instead of
 # sampling between every call. Estimated savings: 30-50% on builder cost
 # and latency for multi-step builds.
@@ -996,14 +1075,14 @@ PROGRAMMATIC_TOOLS_ENABLED = os.environ.get(
 # instead of full price.
 #
 # Docs reference: https://platform.claude.com/docs/en/build-with-claude/prompt-caching
-#   "For Multi-Turn Conversations ... use automatic caching" — we use
+#   "For Multi-Turn Conversations ... use automatic caching" â€” we use
 #   explicit block-level placement which is equivalent and more
 #   predictable.
 #
 # Combined with the existing system-block cache (10.7K tokens) and the
 # `clear_at_least: 10000` guard on context_management.edits, this gives
 # a 40-60% input-cost reduction on 15-25 turn Agent 5 builds at Opus
-# rates with zero risk of paying more than current baseline — worst
+# rates with zero risk of paying more than current baseline â€” worst
 # case (every cache miss) matches pre-change cost.
 #
 # Flip to 0 if a future Anthropic change makes this regressive, or
@@ -1029,12 +1108,12 @@ CACHE_CLEAR_AT_LEAST_TOKENS = int(
 
 
 # Trigger threshold for `clear_tool_uses_20250919` to fire on Agent 5
-# builds. Raised from 80K → 120K based on real-run trace 8ded6706
+# builds. Raised from 80K â†’ 120K based on real-run trace 8ded6706
 # (2026-04-25) analysis: at 80K, the edit fires at turn 7-9 in a
 # typical 12-turn build, costing ~$0.30 per fire in cache_create
 # while only saving ~$0.20 in subsequent cache_reads (only 3-5
 # remaining turns benefit from the smaller prefix). Net loss
-# ~$0.10-0.15 per build × 2 fires per candidate × 2 candidates =
+# ~$0.10-0.15 per build Ã— 2 fires per candidate Ã— 2 candidates =
 # ~$0.40-0.60 wasted per voice run.
 #
 # 120K threshold delays the edit to the END of typical builds where
@@ -1044,14 +1123,14 @@ CACHE_CLEAR_AT_LEAST_TOKENS = int(
 # enough to amortize the rewrite cost).
 #
 # Safety: Opus context window is 200K, `compact_20260112` triggers
-# at 150K. 120K → 150K → 200K leaves headroom for both clear_tool_uses
+# at 150K. 120K â†’ 150K â†’ 200K leaves headroom for both clear_tool_uses
 # and the compact safety net.
 CACHE_CLEAR_TOOL_USES_TRIGGER = int(
     os.environ.get("PUZZLEEVAL_CACHE_CLEAR_TRIGGER", "120000")
 )
 
 
-# MIN_CACHEABLE_TOKENS — canonical home is puzzleeval.telemetry.pricing_tables.
+# MIN_CACHEABLE_TOKENS â€” canonical home is puzzleeval.telemetry.pricing_tables.
 # Re-exported for back-compat with existing call sites.
 from puzzleeval.telemetry.pricing_tables import MIN_CACHEABLE_TOKENS  # noqa: E402, F401
 
@@ -1065,7 +1144,7 @@ from puzzleeval.telemetry.pricing_tables import MIN_CACHEABLE_TOKENS  # noqa: E4
 # hardcoded in each. Hoisted here so tuning is a one-line change and the
 # three consumers can never drift.
 #
-# These are POLICY, not bandaids — they define what "sufficient test coverage"
+# These are POLICY, not bandaids â€” they define what "sufficient test coverage"
 # means for every scope regardless of capability / domain / provider. Lift
 # them to env-overridable so product tuning doesn't require code edits.
 # ---------------------------------------------------------------------------
@@ -1101,7 +1180,7 @@ SUFFICIENCY_HARD_FLOOR = int(
 # Agent 5's builder reads `user_understanding.constraints.monthly_volume` to
 # pick between atomic and batch endpoints. The bands below convert the raw
 # number into qualitative guidance the LLM reasons about. These are
-# SMB / mid-market / enterprise heuristics — not per-provider carveouts.
+# SMB / mid-market / enterprise heuristics â€” not per-provider carveouts.
 #
 # Shape: list of (exclusive_upper_bound, label, guidance_hint). Evaluated
 # in order; first band whose threshold the volume falls under wins.
@@ -1126,9 +1205,9 @@ def band_monthly_volume(monthly_volume: int | None) -> tuple[str, str]:
     Single source of truth so callers don't reinvent the threshold list.
     """
     if monthly_volume is None:
-        return "UNSPECIFIED", "not specified — assume moderate"
+        return "UNSPECIFIED", "not specified â€” assume moderate"
     for threshold, label, hint in MONTHLY_VOLUME_BANDS:
         if monthly_volume < threshold:
             return label, hint
-    # unreachable — last band has inf threshold
+    # unreachable â€” last band has inf threshold
     return MONTHLY_VOLUME_BANDS[-1][1], MONTHLY_VOLUME_BANDS[-1][2]

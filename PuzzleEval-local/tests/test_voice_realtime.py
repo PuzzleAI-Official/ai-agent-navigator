@@ -73,6 +73,16 @@ def test_is_available_true(plugin):
     assert ok is True
 
 
+def test_clear_resets_artifact_index(plugin):
+    plugin._record_artifact("tok", "caller", "caller.mp3")
+
+    assert plugin.artifacts_for_token("tok")
+
+    plugin.clear()
+
+    assert plugin.artifacts_for_token("tok") == []
+
+
 # ---------------------------------------------------------------------------
 # Synthesis
 # ---------------------------------------------------------------------------

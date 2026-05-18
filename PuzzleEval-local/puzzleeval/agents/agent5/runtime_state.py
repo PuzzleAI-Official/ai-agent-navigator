@@ -23,6 +23,7 @@ is wrong, correct it).
 from __future__ import annotations
 
 import json
+import subprocess
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
 
 
 RUNTIME_STATE_FILENAME = "runtime_state.json"
+RUNTIME_SNAPSHOT_FILENAME = "runtime_snapshot.json"
 """Canonical filename inside the ``_agent_state/`` directory."""
 
 
@@ -44,13 +46,19 @@ def _runtime_state_path(sandbox_dir: Path) -> Path:
     return _agent_state_dir(sandbox_dir) / RUNTIME_STATE_FILENAME
 
 
+def _runtime_snapshot_path(sandbox_dir: Path) -> Path:
+    return _agent_state_dir(sandbox_dir) / RUNTIME_SNAPSHOT_FILENAME
+
+
 # Filenames the orchestrator considers when computing files_present /
 # files_pending. The list is intentionally focused on the canonical
 # build artifacts the agent must produce; we do NOT enumerate every
 # possible file (e.g., test_inputs/, fetched_docs_*) to keep the
 # state file readable + bounded.
-_TRACKED_BUILD_FILES = (
-    "api_spec.txt",
+_TRACKED_REQUIRED_FILES = (
+    "_agent_state/research_plan.json",
+    "_agent_state/research_synthesis.json",
+    "_agent_state/implementation_plan.json",
     "requirements.txt",
     "harness.py",
     "smoke_test.py",
@@ -65,7 +73,7 @@ def _scan_files_present(sandbox_dir: Path) -> tuple[list[str], list[str]]:
     """
     present: list[str] = []
     pending: list[str] = []
-    for fname in _TRACKED_BUILD_FILES:
+    for fname in _TRACKED_REQUIRED_FILES:
         if (sandbox_dir / fname).exists():
             present.append(fname)
         else:
@@ -80,14 +88,22 @@ def derive_current_phase(
     """Compute the current phase from observable state.
 
     The phases mirror the builder's 4-phase choreography:
-      - phase_1_research: api_spec.txt absent
-      - phase_2_build: api_spec.txt present, harness.py absent
+      - phase_1_research: active build gate not satisfied
+      - phase_2_build: build gate satisfied, harness.py absent
       - phase_3_verify: harness.py present, smoke not yet passed
       - phase_4_deliver: smoke passed (or verification_passed)
 
     Pure function. No mutation.
     """
-    if not state.api_spec_written:
+    build_gate_satisfied = bool(
+        getattr(
+            state,
+            "implementation_plan_accepted",
+            getattr(state, "build_gate_accepted", False),
+        )
+    )
+
+    if not build_gate_satisfied:
         return "phase_1_research"
     if not (sandbox_dir / "harness.py").exists():
         return "phase_2_build"
@@ -111,6 +127,8 @@ def init_runtime_state(
 
     The directory ``sandbox_dir / "_agent_state"`` is created if missing.
     """
+    from puzzleeval import config
+
     state_dir = _agent_state_dir(sandbox_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
 
@@ -123,6 +141,8 @@ def init_runtime_state(
         "phase_entered_at_turn": 0,
         "current_turn": 0,
         "current_model": initial_model,
+        "lead_model": config.AGENT5_BUILDER_MODEL,
+        "research_worker_model": config.RESEARCH_MODEL,
         "effective_max_turns": effective_max_turns,
         "effective_max_budget_usd": effective_max_budget_usd,
         "accumulated_cost_usd": 0.0,
@@ -130,16 +150,80 @@ def init_runtime_state(
         "files_pending": files_pending,
         "smoke_test_status": "not_run",
         "live_test_status": "not_run",
+        "live_passed_at_turn": None,
+        "last_live_test_output": None,
+        "completion_gate_status": "not_signaled",
+        "completion_gate_issues": [],
+        "external_provider_status": None,
         "errors_encountered_this_turn": [],
         "errors_history": [],
         "directives_fired": [],
         "context_compactions": [],
         "verification_attempts": 0,
         "verification_passed": False,
+        "implementation_plan_accepted": False,
+        "migration_flags": config.migration_flags_snapshot(),
         "last_updated_t_abs": time.time(),
     }
     _runtime_state_path(sandbox_dir).write_text(
         json.dumps(payload, indent=2, sort_keys=False),
+        encoding="utf-8",
+    )
+    return payload
+
+
+def write_runtime_snapshot(sandbox_dir: Path) -> dict[str, Any]:
+    """Persist active code/config facts for stale-runtime diagnosis.
+
+    Real runs can use an already-running backend process. This snapshot lets
+    postmortems prove which code path and gate flags were active for a build
+    instead of assuming the edited source on disk was loaded.
+    """
+    from puzzleeval import config
+    from puzzleeval.agents.agent5 import tools
+
+    try:
+        git_sha = subprocess.check_output(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=Path(__file__).resolve().parents[3],
+            text=True,
+            stderr=subprocess.DEVNULL,
+            timeout=2,
+        ).strip()
+    except Exception:  # noqa: BLE001 - snapshot is best effort
+        git_sha = None
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "git_sha": git_sha,
+        "runtime_state_module": str(Path(__file__).resolve()),
+        "runtime_state_module_path": str(Path(__file__).resolve()),
+        "tools_module": str(Path(tools.__file__).resolve()),
+        "tools_module_path": str(Path(tools.__file__).resolve()),
+        "allowed_extensions": sorted(tools.ALLOWED_EXTENSIONS),
+        "orchestrator_owned_artifacts": sorted(tools.ORCHESTRATOR_OWNED_ARTIFACTS),
+        "gate_flags": {
+            "forensics_coverage": config.GATE_FORENSICS_COVERAGE_ENABLED,
+            "autonomy_artifacts": config.GATE_AUTONOMY_ARTIFACTS_ENABLED,
+            "reflection_phase_3": config.GATE_REFLECTION_PHASE_3_ENABLED,
+            "context_compaction": config.CONTEXT_COMPACTION_AT_BUILD_GATE_ENABLED,
+            "persistent_harness_runner": config.PERSISTENT_HARNESS_RUNNER_ENABLED,
+            "build_gate_compaction": config.CONTEXT_COMPACTION_AT_BUILD_GATE_ENABLED,
+        },
+        "migration_flags": config.migration_flags_snapshot(),
+        "config": {
+            "agent5_builder_model": config.AGENT5_BUILDER_MODEL,
+            "research_worker_model": config.RESEARCH_MODEL,
+            "agent5_max_verification_retries": config.AGENT5_MAX_VERIFICATION_RETRIES,
+            "agent5_max_turns": config.AGENT5_MAX_TURNS,
+            "agent5_max_turns_voice": config.AGENT5_MAX_TURNS_VOICE,
+        },
+        "written_t_abs": time.time(),
+    }
+    state_dir = _agent_state_dir(sandbox_dir)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    _runtime_snapshot_path(sandbox_dir).write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
         encoding="utf-8",
     )
     return payload
@@ -152,6 +236,11 @@ def update_runtime_state(
     current_model: str,
     smoke_test_status: str | None = None,
     live_test_status: str | None = None,
+    live_passed_at_turn: int | None = None,
+    last_live_test_output: str | None = None,
+    completion_gate_status: str | None = None,
+    completion_gate_issues: list[str] | None = None,
+    external_provider_status: str | None = None,
     errors_encountered_this_turn: list[dict[str, Any]] | None = None,
     directive_fired: dict[str, Any] | None = None,
     context_compaction_event: dict[str, Any] | None = None,
@@ -168,12 +257,14 @@ def update_runtime_state(
         smoke_test_status: One of "not_run", "passing", "failing"; pass
             None to leave unchanged from the prior write.
         live_test_status: Same shape as smoke_test_status.
+        completion_gate_status: Human-readable completion-gate status to
+            persist for operators and final report assembly.
         errors_encountered_this_turn: List of error dicts observed in
             this turn. Pass empty list to clear; pass None to leave
             unchanged. Each entry should have "category" + "message" at
             minimum.
         directive_fired: When the orchestrator fired a directive THIS
-            turn (e.g., PHASE2_DIRECTIVE), pass the entry dict so it's
+            turn, pass the entry dict so it's
             appended to ``directives_fired``. None means no directive.
         context_compaction_event: Same shape as directive_fired but for
             context-compaction events.
@@ -212,6 +303,13 @@ def update_runtime_state(
         "files_pending": files_pending,
         "verification_attempts": state.verification_attempts,
         "verification_passed": state.verification_passed,
+        "implementation_plan_accepted": bool(
+            getattr(
+                state,
+                "implementation_plan_accepted",
+                getattr(state, "build_gate_accepted", False),
+            )
+        ),
         "smoke_ever_passed": state.smoke_ever_passed,
         "smoke_passed_at_turn": state.smoke_passed_at_turn,
         "consecutive_errors": state.consecutive_errors,
@@ -227,6 +325,16 @@ def update_runtime_state(
         payload["live_test_status"] = live_test_status
     elif state.verification_passed:
         payload["live_test_status"] = "passing"
+    if live_passed_at_turn is not None:
+        payload["live_passed_at_turn"] = live_passed_at_turn
+    if last_live_test_output is not None:
+        payload["last_live_test_output"] = last_live_test_output[-2000:]
+    if completion_gate_status is not None:
+        payload["completion_gate_status"] = completion_gate_status
+    if completion_gate_issues is not None:
+        payload["completion_gate_issues"] = list(completion_gate_issues)[-20:]
+    if external_provider_status is not None:
+        payload["external_provider_status"] = external_provider_status
     if errors_encountered_this_turn is not None:
         payload["errors_encountered_this_turn"] = errors_encountered_this_turn
         # Roll into history
@@ -292,7 +400,7 @@ def read_agent_observations(sandbox_dir: Path) -> dict[str, Any] | None:
 # + ``runtime_state.json`` (disk mirror). The agent's claimed mental model
 # lives in ``agent_observations.json`` (advisory, never authoritative).
 #
-# Before firing a redundant prompt-injection (e.g. PHASE2_DIRECTIVE), the
+# Before firing a redundant build-gate directive, the
 # orchestrator can check: "does the agent already know we're at this
 # phase?" If YES, suppress the directive (telemetry: agreed). If NO or
 # UNSURE, fire the directive (telemetry: disagreed / no_observation).
@@ -392,6 +500,7 @@ __all__ = [
     "derive_current_phase",
     "evaluate_agent_phase_agreement",
     "init_runtime_state",
+    "write_runtime_snapshot",
     "update_runtime_state",
     "read_runtime_state",
     "read_agent_observations",

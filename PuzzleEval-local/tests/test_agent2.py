@@ -473,6 +473,7 @@ class TestResearchAgent:
                 "Found candidates: Google Document AI, AWS Textract..."
             ),
             self._make_mock_structure_response(None),
+            self._make_mock_structure_response(None),
         ]
 
         input_data = Agent2Input(

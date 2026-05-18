@@ -26,7 +26,7 @@
 # │       a. client = anthropic.Anthropic(...)                      │
 # │       b. content_blocks = _build_file_message(input)            │
 # │       c. response = client.messages.parse(                      │
-# │            output_format=Agent3Result)           ★ SINGLE CALL  │
+# │            output_format=Agent3GenerationResult) ★ SINGLE CALL  │
 # │       d. return response.parsed_output                          │
 # └─────────────────────────────────────────────────────────────────┘
 # ============================================================================
@@ -40,6 +40,12 @@ from puzzleeval.config import (
     ANTHROPIC_API_KEY,
     DEFAULT_MODEL,
 )
+from puzzleeval.anthropic_client import (
+    AGENT3_GENERATION_MAX_RETRIES,
+    AGENT3_GENERATION_TIMEOUT_S,
+    AGENT3_TRANSIENT_RETRY_ATTEMPTS,
+    build_client,
+)
 from puzzleeval.exceptions import (
     AgentAPIError,
     AgentFileParseError,
@@ -48,7 +54,12 @@ from puzzleeval.exceptions import (
 )
 from puzzleeval.file_parsers import parse_file
 from puzzleeval.logging_setup import get_logger, log_llm_call
-from puzzleeval.schemas import Agent3Input, Agent3Result, UserUnderstandingOutput
+from puzzleeval.schemas import (
+    Agent3GenerationResult,
+    Agent3Input,
+    Agent3Result,
+    UserUnderstandingOutput,
+)
 
 
 # ============================================================================
@@ -284,9 +295,13 @@ def run_file_tests_agent(input_data: Agent3Input) -> Agent3Result:
         return run_synthetic_tests_agent(input_data)
 
     # ★ CORE LINE 1: Create the API client
-    # Central factory — 120 s timeout + max_retries=3 (see anthropic_client.py).
-    from puzzleeval.anthropic_client import build_client
-    client = build_client(api_key=ANTHROPIC_API_KEY)
+    # Agent 3F can produce large structured outputs from file contents, so
+    # it uses the same long-generation profile as Agent 3.
+    client = build_client(
+        api_key=ANTHROPIC_API_KEY,
+        timeout=AGENT3_GENERATION_TIMEOUT_S,
+        max_retries=AGENT3_GENERATION_MAX_RETRIES,
+    )
 
     # [logging]
     logger = get_logger("agent_3f_file_tests")
@@ -303,8 +318,8 @@ def run_file_tests_agent(input_data: Agent3Input) -> Agent3Result:
 
     # ★ CORE LINE 3: Call Claude with structured output
     # parse_with_fallback handles grammar-budget rejections — same pattern
-    # as Agents 1/2/3/4. Agent3Result on file-based generation tends to be
-    # even larger (one TestCase per file × multiple weighted criteria).
+    # as Agents 1/2/3/4. Agent3GenerationResult on file-based generation tends
+    # to be even larger (one TestCase per file × multiple weighted criteria).
     start_time = time.time()
     try:
         from puzzleeval.agent_preamble import with_preamble
@@ -315,9 +330,11 @@ def run_file_tests_agent(input_data: Agent3Input) -> Agent3Result:
             max_tokens=GENERATION_MAX_TOKENS,
             system=[{"type": "text", "text": with_preamble(SYSTEM_PROMPT)}],
             messages=[{"role": "user", "content": content_blocks}],
-            output_format=Agent3Result,
+            output_format=Agent3GenerationResult,
             extra={},
             trace_id=input_data.trace_id,
+            transient_max_attempts=AGENT3_TRANSIENT_RETRY_ATTEMPTS,
+            fallback_on_strict_transient_error=True,
         )
 
     except anthropic.RateLimitError as e:
@@ -355,8 +372,16 @@ def run_file_tests_agent(input_data: Agent3Input) -> Agent3Result:
         operation="file_tests_generate",
     )
 
-    # ★ CORE LINE 4: Return the parsed result
-    result = response.parsed_output
+    # ★ CORE LINE 4: Return the parsed result. The business fixture is
+    # orchestrator-owned metadata, so keep it out of the LLM-emitted schema
+    # and attach it only after parsing.
+    generated = response.parsed_output
+    if generated is None:
+        result = None
+    else:
+        result_data = generated.model_dump()
+        result_data["business_fixture"] = input_data.business_fixture
+        result = Agent3Result(**result_data)
 
     if result is None:
         logger.error("Parsed output is None", extra={

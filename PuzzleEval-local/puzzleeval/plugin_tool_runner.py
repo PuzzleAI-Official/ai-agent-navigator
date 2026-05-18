@@ -50,12 +50,20 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-import anthropic
-from anthropic import beta_tool
+try:
+    import anthropic
+    from anthropic import beta_tool
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    from puzzleeval.anthropic_client import anthropic  # type: ignore
+    beta_tool = anthropic.beta_tool  # type: ignore[attr-defined]
+except ImportError:  # pragma: no cover - fallback stub lacks package metadata
+    from puzzleeval.anthropic_client import anthropic  # type: ignore
+    beta_tool = anthropic.beta_tool  # type: ignore[attr-defined]
 from pydantic import BaseModel, Field
 
 from puzzleeval.agent_preamble import with_preamble
 from puzzleeval.config import (
+    CONVERSATION_DEFAULT_MAX_TURNS,
     DEFAULT_MODEL,
     EVAL_MAX_ITERATIONS,
     EVAL_PROGRAMMATIC_CHAINING_ENABLED,
@@ -151,7 +159,7 @@ class EvalContext:
     # emitting a structured ``ScoreVerdict`` — in that case we still
     # have conclusive plugin scoring (e.g., voice_realtime's
     # drive_conversation ran 5 turns cleanly, produced per-turn
-    # substring passes, and computed overall_score) that we want to
+    # evidence signals, and computed overall_score) that we want to
     # promote directly instead of collapsing to LLM-judge fallback.
     plugin_verdicts: list["_CapturedPluginVerdict"] = field(default_factory=list)
     # ── Agentic conversational eval context ──
@@ -164,7 +172,7 @@ class EvalContext:
     goal: str | None = None
     constraints: list[str] = field(default_factory=list)
     rubric: list = field(default_factory=list)  # list[RubricCriterion]
-    max_turns: int = 6
+    max_turns: int = CONVERSATION_DEFAULT_MAX_TURNS
     evaluation_mode: str = "auto"
     trace_id: str = "no-trace"
     # The candidate agent's configured system prompt + any per-test
@@ -174,6 +182,8 @@ class EvalContext:
     # rubric_judge so scope/policy scoring has ground truth. Empty
     # dict is safe for non-conversational tests.
     input_context: dict = field(default_factory=dict)
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None
+    release_harness_session: Callable[[], None] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +270,9 @@ def _build_plugin_tool(
                 evaluation_mode=ctx.evaluation_mode,
                 trace_id=ctx.trace_id,
                 input_context=ctx.input_context,
+                semantic_review_required=True,
+                progress_callback=ctx.progress_callback,
+                release_harness_session=ctx.release_harness_session,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -623,9 +636,11 @@ def evaluate_with_tool_runner(
     goal: str | None = None,
     constraints: list[str] | None = None,
     rubric: list | None = None,
-    max_turns: int = 6,
+    max_turns: int = CONVERSATION_DEFAULT_MAX_TURNS,
     evaluation_mode: str = "auto",
     input_context: dict | None = None,
+    progress_callback: Callable[[str, dict[str, Any]], None] | None = None,
+    release_harness_session: Callable[[], None] | None = None,
 ) -> ToolRunnerVerdict:
     """Score one test case using Claude + plugin tools via ``tool_runner``.
 
@@ -680,6 +695,8 @@ def evaluate_with_tool_runner(
         evaluation_mode=evaluation_mode,
         trace_id=trace_id or "no-trace",
         input_context=dict(input_context or {}),
+        progress_callback=progress_callback,
+        release_harness_session=release_harness_session,
     )
 
     # Direct-invoke fast path for unambiguous multi-call modalities.
@@ -755,6 +772,9 @@ def evaluate_with_tool_runner(
                     evaluation_mode=ctx.evaluation_mode,
                     trace_id=ctx.trace_id,
                     input_context=ctx.input_context,
+                    semantic_review_required=True,
+                    progress_callback=ctx.progress_callback,
+                    release_harness_session=ctx.release_harness_session,
                 )
             except Exception as exc:  # noqa: BLE001
                 logger.warning(

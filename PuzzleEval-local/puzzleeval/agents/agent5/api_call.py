@@ -12,8 +12,9 @@ boundary (~265 LoC) out of ``_build_single_harness``. This module owns:
         then FailedHarness(build_timeout).
       - ``anthropic.APIConnectionError`` / ``anthropic.APIStatusError``
         → FailedHarness(unknown).
-  * The model-fallback ladder via ``call_with_model_fallback`` (Opus →
-    Sonnet → Haiku on persistent 429 at the primary model).
+  * Strict use of the configured Agent 5 builder model. Builder calls do
+    not silently downgrade to the research-worker model; emergency model
+    overrides use ``PUZZLEEVAL_BUILDER_MODEL``.
   * The block-level ``cache_control: ephemeral`` system prompt + per-call
     server-side context_management edits (clear_thinking, clear_tool_uses,
     compact).
@@ -46,7 +47,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Union
 
-import anthropic
+try:
+    import anthropic
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    from puzzleeval.anthropic_client import anthropic  # type: ignore
 
 from puzzleeval.anthropic_client import call_with_model_fallback
 from puzzleeval.config import (
@@ -84,8 +88,8 @@ def _build_context_management_edits() -> list[dict]:
          blocks across turns to maximize cache hits on the message prefix.
       2. ``clear_tool_uses_20250919`` — clears stale tool results when
          input tokens cross ``CACHE_CLEAR_TOOL_USES_TRIGGER`` (default
-         120K). Keeps last 3 tool uses; never clears write_file /
-         patch_file / advisor.
+         120K). Keeps last 3 tool uses; never clears locally dispatched
+         Agent 5 custom tools or advisor.
       3. ``compact_20260112`` — Claude-powered summarization at 150K
          tokens. Custom instructions preserve API endpoints, auth header
          format, env var names, SDK versions, file purposes, errors +
@@ -108,8 +112,22 @@ def _build_context_management_edits() -> list[dict]:
                 "value": CACHE_CLEAR_AT_LEAST_TOKENS,
             },
             "clear_tool_inputs": False,
+            # Never clear locally-dispatched custom tools unless the pairing
+            # invariant can be preserved server-side. The latest voice run hit
+            # an Anthropic 400 when a local run_code tool_use survived but its
+            # tool_result had been stripped. Keep web/advisor compaction
+            # available, but protect every local custom tool result.
             "exclude_tools": [
-                "write_file", "patch_file", "advisor",
+                "ask_research",
+                "read_file",
+                "read_file_range",
+                "read_forensics",
+                "run_code",
+                "summarize_build_state",
+                "summarize_forensics",
+                "write_file",
+                "patch_file",
+                "advisor",
             ],
         },
         {
@@ -119,7 +137,7 @@ def _build_context_management_edits() -> list[dict]:
                 "Summarize this conversation for continuity. "
                 "You MUST preserve ALL of the following:\n"
                 "1. Exact API endpoint URLs, base URL, and auth header format (e.g., 'Bearer' vs 'Token')\n"
-                "2. Full api_spec.txt contents: INPUT_COMPATIBILITY, ROUTING_TABLE, ENDPOINTS, WORKING_EXAMPLE\n"
+                "2. Full research_synthesis.json decisions: input_compatibility, routing_table, chosen_api_surface, working_examples, errors_and_limits\n"
                 "3. Credential env var names (e.g., MINDEE_API_KEY, VERYFI_CLIENT_ID) and which API version they target\n"
                 "4. Installed SDK package names and versions (e.g., 'mindee>=4.25.0') and key method names used\n"
                 "5. All files written to sandbox (harness.py, requirements.txt, smoke_test.py, etc.) and their purpose\n"
@@ -159,6 +177,18 @@ def _is_ptl_error(exc: anthropic.BadRequestError) -> bool:
     return any(marker in error_msg for marker in PTL_MARKERS)
 
 
+EMPTY_TOOL_RESULT_PLACEHOLDER = (
+    "(tool returned no content; PuzzleEval inserted this diagnostic "
+    "placeholder so the Anthropic message contract remains valid)"
+)
+
+MISSING_TOOL_RESULT_PLACEHOLDER = (
+    "(tool result was missing; PuzzleEval inserted this synthetic error "
+    "result before the Anthropic API call so every assistant tool_use has "
+    "a matching user tool_result)"
+)
+
+
 def _is_empty_content(value: Any) -> bool:
     if value is None:
         return True
@@ -193,11 +223,7 @@ def _sanitize_message_content(content: Any) -> tuple[Any, bool, bool]:
                 result_content = block.get("content")
                 if _is_empty_content(result_content):
                     block = dict(block)
-                    block["content"] = (
-                        "(tool returned no content; PuzzleEval inserted this "
-                        "diagnostic placeholder so the Anthropic message "
-                        "contract remains valid)"
-                    )
+                    block["content"] = EMPTY_TOOL_RESULT_PLACEHOLDER
                     block["is_error"] = block.get("is_error", True)
                     changed = True
                 cleaned.append(block)
@@ -219,6 +245,194 @@ def _sanitize_message_content(content: Any) -> tuple[Any, bool, bool]:
     return cleaned, changed, len(cleaned) == 0
 
 
+def _block_type(block: Any) -> str:
+    if isinstance(block, dict):
+        return str(block.get("type") or "")
+    return str(getattr(block, "type", "") or "")
+
+
+def _block_value(block: Any, key: str) -> Any:
+    if isinstance(block, dict):
+        return block.get(key)
+    return getattr(block, key, None)
+
+
+def _content_as_block_list(content: Any) -> list[Any]:
+    if isinstance(content, list):
+        return list(content)
+    if isinstance(content, str):
+        if not content.strip():
+            return []
+        return [{"type": "text", "text": content}]
+    if content is None:
+        return []
+    return [content]
+
+
+def _assistant_tool_use_ids(msg: dict) -> list[str]:
+    if msg.get("role") != "assistant":
+        return []
+    ids: list[str] = []
+    for block in _content_as_block_list(msg.get("content")):
+        if _block_type(block) == "tool_use":
+            tool_id = _block_value(block, "id")
+            if tool_id:
+                ids.append(str(tool_id))
+    return ids
+
+
+def _user_tool_result_ids(msg: dict) -> set[str]:
+    if msg.get("role") != "user":
+        return set()
+    ids: set[str] = set()
+    for block in _content_as_block_list(msg.get("content")):
+        if _block_type(block) == "tool_result":
+            tool_id = _block_value(block, "tool_use_id")
+            if tool_id:
+                ids.add(str(tool_id))
+    return ids
+
+
+def _tool_result_id(block: Any) -> str:
+    if _block_type(block) != "tool_result":
+        return ""
+    tool_id = _block_value(block, "tool_use_id")
+    return str(tool_id) if tool_id else ""
+
+
+def _synthetic_tool_result(tool_use_id: str) -> dict[str, Any]:
+    return {
+        "type": "tool_result",
+        "tool_use_id": tool_use_id,
+        "content": f"{MISSING_TOOL_RESULT_PLACEHOLDER}: {tool_use_id}",
+        "is_error": True,
+    }
+
+
+def _append_missing_tool_results(msg: dict, missing_ids: list[str]) -> dict:
+    updated = dict(msg)
+    blocks = _content_as_block_list(updated.get("content"))
+    blocks.extend(_synthetic_tool_result(tool_id) for tool_id in missing_ids)
+    updated["content"] = blocks
+    return updated
+
+
+def _normalize_tool_result_response(msg: dict, tool_ids: list[str]) -> tuple[dict, int]:
+    """Return a user message whose required tool_results are contiguous first.
+
+    Anthropic's contract is stricter than "the ids exist somewhere": the user
+    message immediately after an assistant tool-use turn must begin with the
+    matching tool_result blocks. Supplemental text is allowed only after those
+    results. This normalizer makes that invariant explicit and keeps local
+    diagnostics from corrupting the API protocol.
+    """
+
+    updated = dict(msg)
+    blocks = _content_as_block_list(updated.get("content"))
+    by_id: dict[str, Any] = {}
+    extras: list[Any] = []
+    for block in blocks:
+        result_id = _tool_result_id(block)
+        if result_id and result_id not in by_id:
+            by_id[result_id] = block
+        else:
+            extras.append(block)
+
+    ordered: list[Any] = []
+    repaired = 0
+    for tool_id in tool_ids:
+        block = by_id.pop(tool_id, None)
+        if block is None:
+            block = _synthetic_tool_result(tool_id)
+            repaired += 1
+        ordered.append(block)
+
+    # Preserve unrelated tool_results and text after the required contiguous
+    # prefix. They may be useful diagnostics, but they cannot appear before or
+    # between required tool_result blocks.
+    ordered.extend(by_id.values())
+    ordered.extend(extras)
+    if ordered != blocks and repaired == 0:
+        repaired += 1
+    updated["content"] = ordered
+    return updated, repaired
+
+
+def validate_tool_result_pairing(messages: list[Any]) -> list[str]:
+    """Return API-boundary tool-result invariant violations.
+
+    This validator is intentionally mechanical: it checks Anthropic's wire
+    protocol only, not build semantics. It is used after best-effort
+    sanitization so malformed histories are caught locally instead of burning a
+    real API call.
+    """
+
+    issues: list[str] = []
+    for index, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        tool_ids = _assistant_tool_use_ids(msg)
+        if not tool_ids:
+            continue
+        next_msg = messages[index + 1] if index + 1 < len(messages) else None
+        if not isinstance(next_msg, dict) or next_msg.get("role") != "user":
+            issues.append(f"assistant message {index} has tool_use blocks without following user tool_result message")
+            continue
+        blocks = _content_as_block_list(next_msg.get("content"))
+        prefix_ids = [_tool_result_id(block) for block in blocks[:len(tool_ids)]]
+        if prefix_ids != tool_ids:
+            issues.append(
+                f"assistant message {index} tool_result prefix mismatch: expected {tool_ids}, got {prefix_ids}"
+            )
+    return issues
+
+
+def _enforce_tool_result_pairing(messages: list[Any]) -> tuple[list[Any], int]:
+    """Ensure assistant tool_use blocks are followed by matching tool_results.
+
+    Anthropic's tool contract is positional: when an assistant message contains
+    one or more ``tool_use`` blocks, the immediately following user message must
+    contain a non-empty ``tool_result`` block for every ``tool_use.id``. The
+    build loop normally creates those pairs, but this API-boundary sanitizer is
+    the last line of defense after context compaction, server-tool cleanup, or
+    partial tool-dispatch failures.
+    """
+    repaired = 0
+    out: list[Any] = []
+    i = 0
+    while i < len(messages):
+        msg = messages[i]
+        out.append(msg)
+        if not isinstance(msg, dict):
+            i += 1
+            continue
+
+        tool_ids = _assistant_tool_use_ids(msg)
+        if not tool_ids:
+            i += 1
+            continue
+
+        next_msg = messages[i + 1] if i + 1 < len(messages) else None
+        if isinstance(next_msg, dict) and next_msg.get("role") == "user":
+            normalized, normalized_repairs = _normalize_tool_result_response(
+                next_msg,
+                tool_ids,
+            )
+            messages[i + 1] = normalized
+            repaired += normalized_repairs
+            i += 1
+            continue
+
+        out.append({
+            "role": "user",
+            "content": [_synthetic_tool_result(tool_id) for tool_id in tool_ids],
+        })
+        repaired += len(tool_ids)
+        i += 1
+
+    return out, repaired
+
+
 def sanitize_messages_for_anthropic(
     messages: list,
     *,
@@ -226,12 +440,15 @@ def sanitize_messages_for_anthropic(
     trace_id: str,
     candidate_name: str,
 ) -> int:
-    """Remove/repair empty message content before an Anthropic API call.
+    """Repair message-shape invariants before an Anthropic API call.
 
     This is a defensive API-boundary invariant, not a provider-specific patch:
     no tool, server result, context compaction, or future helper may pass empty
-    user/assistant text to Anthropic. Returns the number of repaired/dropped
-    messages for telemetry.
+    user/assistant text to Anthropic. Also, every assistant ``tool_use`` block
+    must be followed immediately by a user ``tool_result`` with the same
+    ``tool_use_id`` and non-empty content. Missing results are synthesized;
+    empty results are backfilled. Returns the number of repaired/dropped items
+    for telemetry.
     """
     repaired = 0
     sanitized: list[Any] = []
@@ -249,15 +466,25 @@ def sanitize_messages_for_anthropic(
             msg["content"] = content
         sanitized.append(msg)
 
+    sanitized, pairing_repairs = _enforce_tool_result_pairing(sanitized)
+    repaired += pairing_repairs
+    protocol_issues = validate_tool_result_pairing(sanitized)
+    if protocol_issues:
+        raise ValueError(
+            "Anthropic tool_result protocol invariant failed after sanitization: "
+            + "; ".join(protocol_issues[:5])
+        )
+
     if repaired:
         messages[:] = sanitized
         logger.warning(
-            "sanitized empty builder message content before Anthropic call",
+            "sanitized builder messages before Anthropic call",
             extra={
                 "operation": "agent5_message_sanitized",
                 "trace_id": trace_id,
                 "candidate_name": candidate_name,
-                "repaired_messages": repaired,
+                "repaired_items": repaired,
+                "tool_pairing_repairs": pairing_repairs,
             },
         )
     return repaired
@@ -400,12 +627,10 @@ def make_builder_api_call(ctx: BuilderAPICallContext) -> APICallOutcome:
                 candidate_name=candidate_name,
             )
 
-            # Wrap in model-fallback ladder: on persistent 429 at
-            # ``current_model`` (Opus 4.7 by default), degrade to Sonnet
-            # 4.6 → Haiku 4.5 rather than hard-failing after the SDK's
-            # 3 retries. ``call_with_model_fallback`` re-raises non-rate-
-            # limit errors unchanged so the PTL recovery branch below
-            # still fires.
+            # Call the configured Agent 5 lead model exactly. The generic
+            # fallback helper is still used for consistent rate-limit
+            # classification, but builder fallback is disabled so Opus-lead
+            # ownership cannot silently degrade into a Sonnet build turn.
             kwargs: dict[str, object] = {}
             if ctx.output_config is not None:
                 kwargs["output_config"] = ctx.output_config
@@ -433,6 +658,7 @@ def make_builder_api_call(ctx: BuilderAPICallContext) -> APICallOutcome:
                 primary_model=ctx.current_model,
                 trace_id=ctx.trace_id,
                 operation_label=f"agent5_builder/{candidate_name}",
+                allow_fallbacks=False,
             )
             return APICallSuccess(response=response)
 
@@ -559,4 +785,5 @@ __all__ = [
     "PTL_MARKERS",
     "make_builder_api_call",
     "sanitize_messages_for_anthropic",
+    "validate_tool_result_pairing",
 ]

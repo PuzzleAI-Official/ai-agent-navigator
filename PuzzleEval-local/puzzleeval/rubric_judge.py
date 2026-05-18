@@ -17,8 +17,9 @@ Design notes:
   - ``parse_with_fallback`` handles the grammar-compilation edge. The
     judge's output is structured (RubricVerdict schema); any failure
     degrades to non-strict tool mode automatically.
-  - Adaptive thinking is on by default — judging quality across a 6-
-    turn transcript benefits from deliberate reasoning.
+  - Adaptive thinking is opt-in. Default judging uses a rubric-specific
+    timeout/retry budget because voice runs should not keep provider
+    sessions open while the judge thinks.
   - Critical-gate semantics are enforced CODE-SIDE, not just in the
     prompt. The judge emits per-criterion scores + critical_failures;
     this module post-processes to compute `passed` deterministically:
@@ -62,6 +63,27 @@ def _resolve_config() -> tuple[str, int]:
         RUBRIC_JUDGE_MAX_TOKENS,
     )
     return RUBRIC_JUDGE_MODEL, RUBRIC_JUDGE_MAX_TOKENS
+
+
+def _build_bounded_judge_client() -> anthropic.Anthropic:
+    """Build the judge client with the rubric-specific timeout policy.
+
+    The general Anthropic client allows longer server-tool calls used by
+    research/build agents. Transcript judging is different: it has no server
+    tools and should fail at the test level rather than occupy an evaluation
+    worker for many minutes. Keeping this helper here makes the timeout policy
+    a single rubric-judge contract instead of a voice-plugin special case.
+    """
+
+    from puzzleeval.config import (
+        RUBRIC_JUDGE_MAX_RETRIES,
+        RUBRIC_JUDGE_TIMEOUT_S,
+    )
+
+    return build_client(
+        timeout=RUBRIC_JUDGE_TIMEOUT_S,
+        max_retries=RUBRIC_JUDGE_MAX_RETRIES,
+    )
 
 
 # ============================================================================
@@ -118,6 +140,13 @@ Finally, write a 2-3 sentence conversation_summary that captures: what the user 
 **Goal completion is BINARY at the logical level.** Did the caller leave with what they came for? Partial ≤ 0.5; genuinely mid-flow ≤ 0.7; clear resolution (booked, got the answer, received the confirmation) ≥ 0.85.
 
 **Critical-gate criteria override overall pass.** Any criterion the rubric flags as `critical=True` that you score below its `min_passing_score` (default 0.5) — add its name to `critical_failures`. The pipeline will fail the test regardless of overall_score.
+
+**Conversation continuity is core behavior.** For voice/phone or chatbot
+rubrics that include continuity, repeated first-turn behavior after turn
+0 is a serious failure: do not treat repeated greetings, repeated
+self-introductions, or asking again for already-provided facts as minor
+style issues. Score continuity low unless the agent is explicitly
+confirming information.
 
 **Do NOT inflate scores.** An agent that was "mostly okay" is 0.6, not 0.8. Reserve 0.85+ for agents that would genuinely satisfy this specific caller in a real interaction.
 
@@ -490,6 +519,33 @@ def judge_conversation(
             cost_usd=0.0,
         )
 
+    agent_turns = [t for t in transcript if t.role == "agent"]
+    if not any((t.text or "").strip() and not (t.text or "").startswith("[AGENT ERROR:") for t in agent_turns):
+        return RubricVerdict(
+            overall_score=0.0,
+            passed=False,
+            criterion_scores=[
+                RubricScore(
+                    criterion_name=c.name,
+                    score=0.0,
+                    reasoning=(
+                        "Deterministic precheck: no substantive agent "
+                        "response was present."
+                    ),
+                    evidence_turn_indices=[
+                        t.turn_index for t in transcript if t.role == "agent"
+                    ],
+                )
+                for c in rubric
+            ],
+            conversation_summary=(
+                "Deterministic precheck failed: the transcript contains "
+                "no substantive agent response to judge."
+            ),
+            critical_failures=[c.name for c in rubric if c.critical],
+            cost_usd=0.0,
+        )
+
     model_to_use, max_tokens = _resolve_config()
     if model is not None:
         model_to_use = model
@@ -508,21 +564,25 @@ def judge_conversation(
     )
 
     if client is None:
-        client = build_client()
+        client = _build_bounded_judge_client()
 
     start = time.time()
 
-    # Use adaptive thinking via output_config_for_request when available —
-    # judge benefits from deliberate reasoning across a multi-turn trace.
+    # Keep transcript judging bounded by default. Adaptive thinking remains
+    # opt-in for difficult rubrics.
     try:
-        from puzzleeval.config import output_config_for_request
+        from puzzleeval.config import (
+            RUBRIC_JUDGE_ADAPTIVE_THINKING_ENABLED,
+            output_config_for_request,
+        )
         ocfg = output_config_for_request()
     except Exception:  # pragma: no cover — config edge
         ocfg = None
+        RUBRIC_JUDGE_ADAPTIVE_THINKING_ENABLED = False
 
-    extra: dict[str, Any] = {
-        "thinking": {"type": "adaptive"},
-    }
+    extra: dict[str, Any] = {}
+    if RUBRIC_JUDGE_ADAPTIVE_THINKING_ENABLED:
+        extra["thinking"] = {"type": "adaptive"}
     if ocfg:
         extra["output_config"] = ocfg
 
@@ -545,6 +605,7 @@ def judge_conversation(
         extra=extra,
         trace_id=trace_id,
         fallback_tool_name="emit_rubric_verdict",
+        transient_max_attempts=1,
     )
 
     cost_usd = log_llm_call(

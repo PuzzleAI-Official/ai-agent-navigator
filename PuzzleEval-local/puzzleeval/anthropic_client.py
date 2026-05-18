@@ -15,17 +15,65 @@ via ``build_client()`` so three policies apply uniformly:
     should NOT stack model fallback on top of it — one graceful degradation
     at a time is enough.
 
-Every agent gets resilient HTTP + automatic model degradation without any
-bespoke handling per call site.
+Most callers get resilient HTTP + optional model degradation without bespoke
+handling per call site. Callers with strict model ownership can disable the
+ladder explicitly.
 """
 
 from __future__ import annotations
 
 import logging
 import os
+import sys
 from typing import Any, Callable
 
-import anthropic
+try:
+    import anthropic
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    class _MissingAnthropicError(RuntimeError):
+        pass
+
+    class _MissingAnthropic:
+        class types:
+            class Message:  # noqa: D401 - annotation compatibility stub
+                pass
+
+        class _BaseError(Exception):
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args)
+                for key, value in kwargs.items():
+                    setattr(self, key, value)
+
+        class BadRequestError(_BaseError):
+            pass
+
+        class RateLimitError(_BaseError):
+            pass
+
+        class InternalServerError(_BaseError):
+            pass
+
+        class APIConnectionError(_BaseError):
+            pass
+
+        class APIStatusError(_BaseError):
+            status_code = None
+
+        class Anthropic:  # noqa: D401 - compatibility stub
+            def __init__(self, *args, **kwargs):
+                raise _MissingAnthropicError(
+                    "The 'anthropic' package is required for real API calls. "
+                    "Install PuzzleEval dependencies before running agents."
+                )
+
+        @staticmethod
+        def beta_tool(func=None, *args, **kwargs):
+            if func is None:
+                return lambda inner: inner
+            return func
+
+    anthropic = _MissingAnthropic()  # type: ignore[assignment]
+    sys.modules.setdefault("anthropic", anthropic)  # type: ignore[arg-type]
 
 from puzzleeval.config import require_anthropic_key
 
@@ -37,10 +85,16 @@ logger = logging.getLogger(__name__)
 # Two timeout tiers because the pipeline has two call shapes with very
 # different wall-clocks:
 #
-#   DEFAULT_TIMEOUT_S — used by single-shot structured-output calls
-#   (Agent 1, Agent 3, Agent 2's STRUCTURE pass, Agent 4's STRUCTURE
-#   pass). These are messages.parse() style and typically finish in
-#   10-30 seconds. 120 s is ample headroom.
+#   DEFAULT_TIMEOUT_S — used by most single-shot structured-output calls
+#   (Agent 1, Agent 2's STRUCTURE pass, Agent 4's STRUCTURE pass).
+#   These are messages.parse() style and typically finish in 10-30
+#   seconds. 120 s is ample headroom for those paths.
+#
+#   AGENT3_GENERATION_TIMEOUT_S — used by Agent 3 / 3F test generation.
+#   Voice/conversation test cases with fixtures and weighted rubrics can
+#   be much larger than the other single-shot calls. Keep this separate
+#   so Agent 3 gets enough room without making every short call slow to
+#   fail when the API connection is unhealthy.
 #
 #   SERVER_TOOL_TIMEOUT_S — used by calls that loop server-side tools
 #   (Agent 2's RESEARCH pass with web_search, Agent 4's deep_verify
@@ -59,6 +113,15 @@ SERVER_TOOL_TIMEOUT_S = float(
     os.environ.get("PUZZLEEVAL_ANTHROPIC_SERVER_TOOL_TIMEOUT_S", "420")
 )
 DEFAULT_MAX_RETRIES = int(os.environ.get("PUZZLEEVAL_ANTHROPIC_MAX_RETRIES", "3"))
+AGENT3_GENERATION_TIMEOUT_S = float(
+    os.environ.get("PUZZLEEVAL_AGENT3_GENERATION_TIMEOUT_S", "300")
+)
+AGENT3_GENERATION_MAX_RETRIES = int(
+    os.environ.get("PUZZLEEVAL_AGENT3_GENERATION_MAX_RETRIES", "1")
+)
+AGENT3_TRANSIENT_RETRY_ATTEMPTS = int(
+    os.environ.get("PUZZLEEVAL_AGENT3_TRANSIENT_RETRY_ATTEMPTS", "2")
+)
 
 
 _API_KEY_SENTINEL = object()
@@ -74,7 +137,7 @@ def build_client(
 
     Every agent should use this rather than calling ``anthropic.Anthropic()``
     directly — it ensures the timeout + retry policy is consistent across
-    Agents 1-5, plugins, and the deep-verify runner.
+    Agents 1-5 and plugins.
 
     ``api_key`` semantics:
       * Omitted → ``require_anthropic_key()`` is called (raises if env var
@@ -128,6 +191,7 @@ def call_with_model_fallback(
     trace_id: str = "",
     is_rate_limit: Callable[[Exception], bool] | None = None,
     operation_label: str = "anthropic_call",
+    allow_fallbacks: bool = True,
 ) -> Any:
     """Run ``fn(model)`` against the primary model, fall back on 429.
 
@@ -137,13 +201,17 @@ def call_with_model_fallback(
     model in the ladder. If all models in the ladder rate-limit, the
     last exception is re-raised.
 
+    Set ``allow_fallbacks=False`` for call sites with strict model ownership
+    (for example Agent 5 builder turns). In that mode the helper still
+    centralizes rate-limit classification but only calls ``primary_model``.
+
     Non-rate-limit exceptions (BadRequestError, APIConnectionError,
     APIStatusError) propagate immediately — model fallback only addresses
     capacity issues, not request validity.
     """
     if is_rate_limit is None:
         is_rate_limit = _default_is_rate_limit
-    chain = model_fallback_chain(primary_model)
+    chain = model_fallback_chain(primary_model) if allow_fallbacks else (primary_model,)
     last_exc: Exception | None = None
     for idx, model in enumerate(chain):
         try:
@@ -273,6 +341,9 @@ def retry_on_transient_5xx(
 
 
 __all__ = [
+    "AGENT3_GENERATION_MAX_RETRIES",
+    "AGENT3_GENERATION_TIMEOUT_S",
+    "AGENT3_TRANSIENT_RETRY_ATTEMPTS",
     "DEFAULT_MAX_RETRIES",
     "DEFAULT_TIMEOUT_S",
     "SERVER_TOOL_TIMEOUT_S",

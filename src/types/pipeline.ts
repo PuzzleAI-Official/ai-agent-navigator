@@ -116,10 +116,12 @@ export interface TestResult {
   // expand panes can use them.
   output_received?: string;
   input_sent?: Record<string, unknown>;
+  judge_failed?: boolean;
+  judge_failure_reason?: string | null;
 }
 
 // Phase 4: every candidate carries a coverage set over blueprint step IDs.
-// Values are "claimed" by Agent 2 dual search; Phase 6.5 upgrades confirmed
+// Values are "claimed" by Agent 2 dual search; selected-candidate verification upgrades confirmed
 // scopes to "verified" or drops them from covers_step_ids.
 export type CoverageConfidence = "claimed" | "verified";
 
@@ -127,7 +129,7 @@ export type CoverageConfidence = "claimed" | "verified";
 // PricingBreakdown — structured pricing for a candidate.
 // ---------------------------------------------------------------------------
 // Mirrors puzzleeval/schemas.py::PricingBreakdown + PricingTier. Agent 2
-// never fills this; Phase 6.5's 4B extraction during deep-verify populates
+// never fills this; selected-candidate metadata/research populates
 // it. Every field is optional so the UI renders gracefully when the
 // extractor couldn't infer a field (e.g. sparse docs).
 // ---------------------------------------------------------------------------
@@ -163,8 +165,8 @@ export interface PipelineCandidate {
   claimed_capabilities: string[];
   // Dual-search coverage (Phase 4)
   covers_step_ids: string[];                                  // blueprint step IDs this candidate claims to cover
-  coverage_confidence: Record<string, CoverageConfidence>;    // keyed by step_id; "claimed" until deep-verify upgrades to "verified"
-  // Structured pricing populated by the deep-verify 4B extraction step
+  coverage_confidence: Record<string, CoverageConfidence>;    // keyed by step_id; "claimed" until verification upgrades to "verified"
+  // Structured pricing populated by selected-candidate metadata/research
   pricing_breakdown?: PricingBreakdown | null;                // null when the candidate hasn't been deep-verified yet
   // Agent 4 enrichment
   confirmed_capabilities: string[];
@@ -281,7 +283,7 @@ export interface SelectCandidatesResponse {
   scope_coverage: Record<string, number>;   // scope_id -> count picked
 }
 
-// Rejection entries shown by RejectionSummary after the deep-verify pass.
+// Rejection entries shown by RejectionSummary after selected-candidate verification.
 // Populated from `candidate_rejected` SSE events.
 export interface RejectionEntry {
   name: string;

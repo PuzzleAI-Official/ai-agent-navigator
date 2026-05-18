@@ -27,7 +27,9 @@ rankings, and projects monthly cost via the existing
 from __future__ import annotations
 
 import logging
+import json
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ class TestEvidence:
     # for non-conversational tests and for scripted-path conversations.
     # Shape: dict mirroring puzzleeval.schemas.RubricVerdict.model_dump().
     rubric_verdict: dict | None = None
+    judge_failed: bool = False
+    judge_failure_reason: str | None = None
     # Per-turn transcript for conversational tests (agentic mode).
     # Each entry: ``{turn_index, role: 'user'|'agent', text, meta}``.
     # Empty for non-conversational and legacy scripted-path tests.
@@ -83,7 +87,7 @@ class CandidateReport:
     """
     name: str
     provider: str
-    rank: int  # 1 = best; sorted by overall_score desc, ties broken by cost
+    rank: int  # 1 = best; sorted by pass_rate, then score, then cost/latency
     overall_score: float  # 0.0–1.0
     pass_rate: float
     passed_count: int
@@ -97,6 +101,7 @@ class CandidateReport:
     sandbox_used: bool
     failure_evidence: list[TestEvidence] = field(default_factory=list)
     success_evidence: list[TestEvidence] = field(default_factory=list)
+    test_evidence: list[TestEvidence] = field(default_factory=list)
     pros: list[str] = field(default_factory=list)
     cons: list[str] = field(default_factory=list)
     coverage_gaps: list[str] = field(default_factory=list)
@@ -107,6 +112,11 @@ class CandidateReport:
     # failed validation" section so the user understands WHY a named
     # candidate doesn't have test results.
     build_succeeded: bool = True
+    # Phase 6: a candidate can be truthfully abandoned when provider/account
+    # state or API incompatibility means more build-loop turns would only
+    # burn budget. This is distinct from gate rejection or harness error.
+    abandoned: bool = False
+    abandon_reason: str | None = None
     # When build_succeeded=False, lists the adversarial-probe critical
     # failures (e.g., "empty_input: timeout: ...", "concurrency:
     # outcomes=['crash','crash','crash']"). Empty for successful builds.
@@ -128,6 +138,24 @@ class CoverageReport:
 
 
 @dataclass
+class EfficiencySummary:
+    """User-facing explanation of where Agent 5 spent time and money."""
+
+    migration_flags: dict[str, bool]
+    totals: dict[str, Any]
+    turns_by_phase: dict[str, int]
+    cost_by_phase_usd: dict[str, float]
+    latency_by_phase_ms: dict[str, float]
+    research: dict[str, Any]
+    blocked_fetches: dict[str, Any]
+    artifact_overhead: dict[str, Any]
+    failure_packets: dict[str, Any]
+    provider_health: dict[str, Any]
+    abandoned_candidates: dict[str, Any]
+    candidates: list[dict] = field(default_factory=list)
+
+
+@dataclass
 class EvaluationReport:
     """The user-facing final report. JSON-serializable via asdict()."""
     run_id: str
@@ -143,6 +171,7 @@ class EvaluationReport:
     overall_winner: str | None
     candidate_reports: list[CandidateReport]
     advisories: list[str] = field(default_factory=list)
+    efficiency_summary: EfficiencySummary | None = None
     # Phase 9 per-scope breakdown from Agent 5. When populated, the
     # frontend's ResultsComparison renders one section per scope instead
     # of the legacy flat card layout. Serialized as list[dict] — the
@@ -268,6 +297,29 @@ def _extract_test_evidence(
                         "text": str(t.get("text") or "")[:2000],
                         "meta": t.get("meta") or {},
                     })
+        judge_failed = bool(
+            tr.get("judge_failed")
+            or tr.get("rubric_judge_failed")
+            or (
+                rubric_dict is None
+                and bool(transcript_list)
+                and (
+                    tr.get("evaluation_mode") in {"agentic_conversation", "voice_realtime"}
+                    or tr.get("rubric_error")
+                    or tr.get("judge_error")
+                    or tr.get("rubric_failure_reason")
+                )
+            )
+        )
+        judge_failure_reason = None
+        if judge_failed:
+            judge_failure_reason = str(
+                tr.get("judge_failure_reason")
+                or tr.get("rubric_failure_reason")
+                or tr.get("rubric_error")
+                or tr.get("judge_error")
+                or "rubric verdict was unavailable for this conversational result"
+            )[:300]
         ev = TestEvidence(
             test_case_id=str(tr.get("test_case_id") or tr.get("id") or ""),
             scenario=str(tr.get("scenario") or "")[:120],
@@ -279,6 +331,8 @@ def _extract_test_evidence(
             audio_paths=audio_paths,
             merged_audio_path=merged_audio_path,
             rubric_verdict=rubric_dict,
+            judge_failed=judge_failed,
+            judge_failure_reason=judge_failure_reason,
             transcript=transcript_list,
         )
         (passed if ev.passed else failed).append(ev)
@@ -371,6 +425,345 @@ def _normalize_audio_artifacts(tr: dict) -> tuple[list[dict], str | None]:
     return audio_paths, merged_audio_path if merged_audio_path else None
 
 
+def _collect_numeric_fields(obj: Any, keys: set[str], out: list[float], *, depth: int = 0) -> None:
+    if depth > 4 or len(out) >= 200:
+        return
+    if isinstance(obj, dict):
+        for key, value in obj.items():
+            if key in keys:
+                try:
+                    numeric = float(value)
+                    if numeric > 0:
+                        out.append(numeric)
+                except (TypeError, ValueError):
+                    pass
+            elif isinstance(value, (dict, list)):
+                _collect_numeric_fields(value, keys, out, depth=depth + 1)
+    elif isinstance(obj, list):
+        for item in obj[:200]:
+            if isinstance(item, (dict, list)):
+                _collect_numeric_fields(item, keys, out, depth=depth + 1)
+
+
+def _derive_avg_latency_ms(candidate_run: Any, test_results: list[Any]) -> float | None:
+    """Compute truthful average latency from candidate/test/turn evidence."""
+
+    raw_avg = _safe_get(candidate_run, "avg_latency_ms", None)
+    try:
+        raw_avg_f = float(raw_avg)
+        if raw_avg_f > 0:
+            return raw_avg_f
+    except (TypeError, ValueError):
+        pass
+
+    latencies: list[float] = []
+    for raw_tr in test_results:
+        tr = _test_result_to_dict(raw_tr)
+        for key in ("latency_ms", "duration_ms", "elapsed_ms"):
+            try:
+                value = float(tr.get(key))
+                if value > 0:
+                    latencies.append(value)
+            except (TypeError, ValueError):
+                pass
+        for nested_key in ("raw_response", "details", "verdict_detail", "turns", "transcript"):
+            nested = tr.get(nested_key)
+            if nested is not None:
+                _collect_numeric_fields(
+                    nested,
+                    {"latency_ms", "duration_ms", "elapsed_ms", "turn_latency_ms"},
+                    latencies,
+                )
+    if not latencies:
+        return None
+    return sum(latencies) / len(latencies)
+
+
+def _read_json_file(path: Path) -> dict:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _safe_float(value: Any, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _add_counter(target: dict[str, int], key: Any, count: int = 1) -> None:
+    normalized = str(key or "unknown")
+    target[normalized] = target.get(normalized, 0) + count
+
+
+def _candidate_efficiency_sources(agent5_result: Any | None) -> list[dict]:
+    if not agent5_result:
+        return []
+    sources: list[dict] = []
+    for harness in (_safe_get(agent5_result, "harnesses", []) or []):
+        sources.append({
+            "candidate_name": str(_safe_get(harness, "candidate_name", "") or ""),
+            "harness_dir": _safe_get(harness, "harness_dir", None),
+            "source": "built",
+            "schema_turns": _safe_get(harness, "build_turns", None),
+            "schema_cost_usd": _safe_get(harness, "build_cost_usd", None),
+            "abandoned_reason": None,
+        })
+    for failed in (_safe_get(agent5_result, "failed_harnesses", []) or []):
+        failure_category = str(_safe_get(failed, "failure_category", "") or "")
+        failure_reason = str(_safe_get(failed, "failure_reason", "") or "")
+        gate_status = str(_safe_get(failed, "completion_gate_status", "") or "")
+        abandoned_reason = (
+            failure_category
+            if (
+                gate_status == "abandoned"
+                or failure_reason.lower().startswith("abandoned:")
+            )
+            else None
+        )
+        sources.append({
+            "candidate_name": str(_safe_get(failed, "candidate_name", "") or ""),
+            "harness_dir": _safe_get(failed, "harness_dir", None),
+            "source": "failed",
+            "schema_turns": _safe_get(failed, "turns_attempted", None),
+            "schema_cost_usd": _safe_get(failed, "build_cost_usd", None),
+            "failure_category": failure_category,
+            "abandoned_reason": abandoned_reason,
+        })
+    return sources
+
+
+def _build_efficiency_summary(
+    agent5_result: Any | None,
+    *,
+    total_cost_usd: float,
+) -> EfficiencySummary | None:
+    from puzzleeval import config
+
+    if not config.EFFICIENCY_SUMMARY_ENABLED:
+        return None
+
+    migration_flags = config.migration_flags_snapshot()
+    sources = _candidate_efficiency_sources(agent5_result)
+    turns_by_phase: dict[str, int] = {}
+    cost_by_phase_usd: dict[str, float] = {}
+    latency_by_phase_ms: dict[str, float] = {}
+    provider_statuses: dict[str, int] = {}
+    abandoned_reasons: dict[str, int] = {}
+    failure_categories: dict[str, int] = {}
+    candidates_summary: list[dict] = []
+    research_totals = {
+        "turns": 0,
+        "web_fetch_results": 0,
+        "empty_web_fetch_results": 0,
+        "web_fetch_errors": 0,
+        "web_search_results": 0,
+        "advisor_results": 0,
+        "debug_research_attempts": 0,
+        "cache_read_tokens": 0,
+        "total_billed_input": 0,
+        "turns_with_cache_write": 0,
+        "turns_with_cache_read_only": 0,
+    }
+    blocked_fetches = {
+        "web_fetch_blocks": _safe_int(_safe_get(agent5_result, "web_fetch_blocks", 0)),
+        "empty_web_fetch_results": 0,
+        "web_fetch_errors": 0,
+        "empty_web_fetch_by_url": {},
+        "web_fetch_error_codes": {},
+    }
+    artifact_overhead = {
+        "artifact_only_turns": 0,
+        "text_only_turns": 0,
+        "diagnostic_script_turns": 0,
+        "scaffold_write_turns": 0,
+        "single_file_scaffold_turns": 0,
+        "parallel_tool_turns": 0,
+        "total_tool_turns": 0,
+    }
+    failure_packets = {"count": 0, "by_category": {}}
+    total_turns_observed = 0
+
+    for item in sources:
+        harness_dir_raw = item.get("harness_dir")
+        harness_dir = Path(str(harness_dir_raw)) if harness_dir_raw else None
+        summary = (
+            _read_json_file(harness_dir / "conversation_summary.json")
+            if harness_dir else {}
+        )
+        runtime_state = (
+            _read_json_file(harness_dir / "_agent_state" / "runtime_state.json")
+            if harness_dir else {}
+        )
+        agent_state_dir = harness_dir / "_agent_state" if harness_dir else None
+        debug_ledger = (
+            _read_json_file(agent_state_dir / "debug_research_ledger.json")
+            if agent_state_dir else {}
+        )
+        debug_attempts = len(debug_ledger.get("attempts") or [])
+
+        phase_buckets = summary.get("build_phases")
+        if isinstance(phase_buckets, dict) and phase_buckets:
+            for phase, bucket in phase_buckets.items():
+                if not isinstance(bucket, dict):
+                    continue
+                phase_key = str(phase)
+                turns_by_phase[phase_key] = (
+                    turns_by_phase.get(phase_key, 0)
+                    + _safe_int(bucket.get("turns"))
+                )
+                cost_by_phase_usd[phase_key] = (
+                    cost_by_phase_usd.get(phase_key, 0.0)
+                    + _safe_float(bucket.get("cost_usd"))
+                )
+                latency_by_phase_ms[phase_key] = (
+                    latency_by_phase_ms.get(phase_key, 0.0)
+                    + _safe_float(bucket.get("latency_ms"))
+                )
+        else:
+            fallback_turns = _safe_int(item.get("schema_turns"))
+            fallback_cost = _safe_float(item.get("schema_cost_usd"))
+            if fallback_turns:
+                turns_by_phase["unknown"] = turns_by_phase.get("unknown", 0) + fallback_turns
+                cost_by_phase_usd["unknown"] = cost_by_phase_usd.get("unknown", 0.0) + fallback_cost
+
+        aggregate = summary.get("aggregate") if isinstance(summary.get("aggregate"), dict) else {}
+        total_turns = _safe_int(summary.get("total_turns"), _safe_int(item.get("schema_turns")))
+        total_turns_observed += total_turns
+        research = (
+            summary.get("efficiency_analysis", {}).get("research", {})
+            if isinstance(summary.get("efficiency_analysis"), dict)
+            else {}
+        )
+        if isinstance(research, dict):
+            for key in (
+                "turns",
+                "web_fetch_results",
+                "empty_web_fetch_results",
+                "web_fetch_errors",
+                "web_search_results",
+                "advisor_results",
+            ):
+                research_totals[key] += _safe_int(research.get(key))
+            blocked_fetches["empty_web_fetch_results"] += _safe_int(
+                research.get("empty_web_fetch_results")
+            )
+            blocked_fetches["web_fetch_errors"] += _safe_int(
+                research.get("web_fetch_errors")
+            )
+            for url, count in (research.get("empty_web_fetch_by_url") or {}).items():
+                _add_counter(blocked_fetches["empty_web_fetch_by_url"], url, _safe_int(count, 1))
+            for code, count in (research.get("web_fetch_error_codes") or {}).items():
+                _add_counter(blocked_fetches["web_fetch_error_codes"], code, _safe_int(count, 1))
+
+        research_totals["debug_research_attempts"] += debug_attempts
+        research_totals["cache_read_tokens"] += _safe_int(aggregate.get("cache_read_tokens"))
+        research_totals["total_billed_input"] += _safe_int(aggregate.get("total_billed_input"))
+        cache = summary.get("cache_analysis") if isinstance(summary.get("cache_analysis"), dict) else {}
+        research_totals["turns_with_cache_write"] += _safe_int(cache.get("turns_with_cache_write"))
+        research_totals["turns_with_cache_read_only"] += _safe_int(cache.get("turns_with_cache_read_only"))
+
+        efficiency = summary.get("efficiency_analysis")
+        if isinstance(efficiency, dict):
+            waste = efficiency.get("waste_signals") or {}
+            if isinstance(waste, dict):
+                for key in (
+                    "artifact_only_turns",
+                    "text_only_turns",
+                    "diagnostic_script_turns",
+                ):
+                    artifact_overhead[key] += _safe_int(waste.get(key))
+            for key in (
+                "scaffold_write_turns",
+                "single_file_scaffold_turns",
+                "parallel_tool_turns",
+                "total_tool_turns",
+            ):
+                artifact_overhead[key] += _safe_int(efficiency.get(key))
+
+        packet_summary = summary.get("failure_packets")
+        if isinstance(packet_summary, dict):
+            failure_packets["count"] += _safe_int(packet_summary.get("count"))
+            for category, count in (packet_summary.get("by_category") or {}).items():
+                _add_counter(failure_packets["by_category"], category, _safe_int(count, 1))
+
+        provider_status = runtime_state.get("external_provider_status")
+        if provider_status:
+            _add_counter(provider_statuses, provider_status)
+        abandoned_reason = item.get("abandoned_reason")
+        if abandoned_reason:
+            _add_counter(abandoned_reasons, abandoned_reason)
+        failure_category = item.get("failure_category")
+        if failure_category:
+            _add_counter(failure_categories, failure_category)
+
+        candidates_summary.append({
+            "candidate_name": item.get("candidate_name") or "unknown",
+            "source": item.get("source"),
+            "turns": total_turns,
+            "build_cost_usd": round(_safe_float(item.get("schema_cost_usd")), 4),
+            "build_phases": phase_buckets if isinstance(phase_buckets, dict) else {},
+            "cache_hit_pct": round(_safe_float(aggregate.get("cache_hit_pct")), 2),
+            "research_turns": _safe_int(research.get("turns")) if isinstance(research, dict) else 0,
+            "debug_research_attempts": debug_attempts,
+            "failure_packets": packet_summary if isinstance(packet_summary, dict) else {"count": 0},
+            "provider_status": provider_status,
+            "abandoned_reason": abandoned_reason,
+        })
+
+    total_billed = research_totals["total_billed_input"]
+    research_totals["cache_hit_pct"] = (
+        round(100.0 * research_totals["cache_read_tokens"] / total_billed, 2)
+        if total_billed > 0 else 0.0
+    )
+    cost_by_phase_usd = {
+        phase: round(cost, 4) for phase, cost in cost_by_phase_usd.items()
+    }
+    latency_by_phase_ms = {
+        phase: round(latency, 2) for phase, latency in latency_by_phase_ms.items()
+    }
+    total_build_cost = _safe_float(_safe_get(agent5_result, "total_build_cost_usd", 0.0))
+    total_test_cost = _safe_float(_safe_get(agent5_result, "total_test_cost_usd", 0.0))
+    raw_total_cost = _safe_float(total_cost_usd) or round(total_build_cost + total_test_cost, 6)
+
+    return EfficiencySummary(
+        migration_flags=migration_flags,
+        totals={
+            "candidates_attempted": len(sources),
+            "total_turns_observed": total_turns_observed,
+            "total_cost_usd": round(raw_total_cost, 6),
+            "agent5_build_cost_usd": round(total_build_cost, 6),
+            "agent5_test_cost_usd": round(total_test_cost, 6),
+        },
+        turns_by_phase=turns_by_phase,
+        cost_by_phase_usd=cost_by_phase_usd,
+        latency_by_phase_ms=latency_by_phase_ms,
+        research=research_totals,
+        blocked_fetches=blocked_fetches,
+        artifact_overhead=artifact_overhead,
+        failure_packets=failure_packets,
+        provider_health={
+            "status_counts": provider_statuses,
+            "failure_categories": failure_categories,
+        },
+        abandoned_candidates={
+            "count": sum(abandoned_reasons.values()),
+            "by_reason": abandoned_reasons,
+        },
+        candidates=candidates_summary,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Main assembler
 # ---------------------------------------------------------------------------
@@ -458,10 +851,18 @@ def assemble_report(
         if nm and nm not in pricing_by_name:
             pricing_by_name[nm] = _safe_get(c, "pricing_breakdown", None)
 
-    # Sort candidate runs by score (desc) for ranking
-    def _score_key(run: dict) -> float:
-        return float(_safe_get(run, "overall_score", None) or 0.0)
-    sorted_runs = sorted(candidate_runs, key=_score_key, reverse=True)
+    # Sort by outcome truth first. A 4/5 passing candidate should not lose
+    # to a 2/5 candidate because of a small average-score delta.
+    def _ranking_key(run: dict) -> tuple[float, float, float, float]:
+        trs = _safe_get(run, "test_results", []) or []
+        total = len(trs)
+        passed = sum(1 for tr in trs if _test_result_passed(_test_result_to_dict(tr)))
+        pass_rate_key = (passed / total) if total else 0.0
+        score_key = float(_safe_get(run, "overall_score", None) or 0.0)
+        cost_key = float(_safe_get(run, "cost_usd", None) or 0.0)
+        latency = _derive_avg_latency_ms(run, trs) or 0.0
+        return (pass_rate_key, score_key, -cost_key, -latency)
+    sorted_runs = sorted(candidate_runs, key=_ranking_key, reverse=True)
 
     for rank_idx, cr in enumerate(sorted_runs):
         name = str(_safe_get(cr, "candidate_name", "") or "")
@@ -474,7 +875,7 @@ def assemble_report(
         total_count = len(test_results)
         pass_rate = (passed_count / total_count) if total_count else 0.0
         overall_score = float(_safe_get(cr, "overall_score", None) or 0.0)
-        avg_latency = _safe_get(cr, "avg_latency_ms", None)
+        avg_latency = _derive_avg_latency_ms(cr, test_results)
         cost_per_call = _safe_get(cr, "cost_usd", None)
         if cost_per_call is not None and total_count:
             cost_per_call = float(cost_per_call) / total_count
@@ -486,6 +887,10 @@ def assemble_report(
         monthly_cost = _project_monthly_cost(pricing, monthly_volume)
 
         failures, successes = _extract_test_evidence(test_results)
+        test_evidence = sorted(
+            failures + successes,
+            key=lambda ev: (ev.test_case_id, not ev.passed),
+        )
         pros, cons = _derive_pros_cons(
             pass_rate=pass_rate, monthly_cost=monthly_cost,
             auth_method=str(_safe_get(cr, "auth_method", "") or "unknown"),
@@ -512,6 +917,7 @@ def assemble_report(
             sandbox_used=sandbox_used,
             failure_evidence=failures,
             success_evidence=successes,
+            test_evidence=test_evidence,
             pros=pros, cons=cons,
             coverage_gaps=[],
         ))
@@ -578,6 +984,35 @@ def assemble_report(
             if not f_name or f_name.lower() in already_reported:
                 continue
             failure_reason = str(_safe_get(fh, "failure_reason", "") or "unknown")
+            failure_category = str(_safe_get(fh, "failure_category", "") or "")
+            gate_status = _safe_get(fh, "completion_gate_status", None)
+            gate_issues = list(_safe_get(fh, "completion_gate_issues", []) or [])
+            abandoned_categories = {
+                "api_incompatible",
+                "credentials_unavailable",
+                "docs_missing",
+                "provider_blocked",
+                "quota_exhausted",
+                "test/fixture_mismatch_unfixable",
+            }
+            is_abandoned = (
+                gate_status == "abandoned"
+                or failure_category in abandoned_categories
+                or failure_reason.lower().startswith("abandoned:")
+            )
+            if is_abandoned:
+                abandon_reason = failure_category or "unknown"
+                critical = [f"abandoned={abandon_reason}"]
+                if failure_reason:
+                    critical.append(failure_reason)
+            else:
+                abandon_reason = None
+                critical = [failure_reason] if failure_reason else []
+                if failure_category:
+                    critical.append(f"failure_category={failure_category}")
+                if gate_status:
+                    critical.append(f"completion_gate_status={gate_status}")
+                critical.extend(str(issue) for issue in gate_issues[:5])
             forensics_tail = _read_forensics_tail(_safe_get(fh, "harness_dir", None))
             candidate_reports.append(CandidateReport(
                 name=f_name,
@@ -595,31 +1030,43 @@ def assemble_report(
                 auth_env_vars=[],
                 sandbox_used=False,
                 build_succeeded=False,
-                critical_failures=[failure_reason] if failure_reason else [],
+                abandoned=is_abandoned,
+                abandon_reason=abandon_reason,
+                critical_failures=critical,
                 forensics_tail=forensics_tail,
             ))
             already_reported.add(f_name.lower())
+            if is_abandoned:
+                advisories.append(
+                    f"{f_name}: abandoned ({abandon_reason}) after evidence showed "
+                    "more build-loop turns would not repair the candidate."
+                )
 
     # Per-scope winners: best (highest overall_score) candidate that
     # actually covers each scope.
+    eligible_reports = [
+        rep for rep in candidate_reports
+        if rep.build_succeeded and rep.total_count > 0
+    ]
     winners_by_scope: dict[str, str] = {}
     for sid in blueprint_steps:
         best_name: str | None = None
-        best_score = -1.0
-        for rep in candidate_reports:
+        best_key: tuple[float, float] = (-1.0, -1.0)
+        for rep in eligible_reports:
             cand = next(
                 (c for c in candidates if str(_safe_get(c, "name", "")).lower() == rep.name.lower()),
                 None,
             )
             if cand and sid in (_safe_get(cand, "covers_step_ids", []) or []):
-                if rep.overall_score > best_score:
-                    best_score = rep.overall_score
+                rep_key = (rep.pass_rate, rep.overall_score)
+                if rep_key > best_key:
+                    best_key = rep_key
                     best_name = rep.name
         if best_name:
             winners_by_scope[sid] = best_name
 
-    overall_winner = candidate_reports[0].name if candidate_reports else None
-    if not candidate_reports:
+    overall_winner = eligible_reports[0].name if eligible_reports else None
+    if not eligible_reports:
         advisories.append(
             "No harnesses successfully ran — every selected candidate failed "
             "to build, validate, or run. Check pipeline failure events for "
@@ -638,6 +1085,10 @@ def assemble_report(
         overall_winner=overall_winner,
         candidate_reports=candidate_reports,
         advisories=advisories,
+        efficiency_summary=_build_efficiency_summary(
+            agent5_result,
+            total_cost_usd=total_cost_usd,
+        ),
         scope_runs=_extract_scope_runs(agent5_result),
     )
 
@@ -673,6 +1124,7 @@ def report_to_dict(report: EvaluationReport) -> dict:
 __all__ = [
     "CandidateReport",
     "CoverageReport",
+    "EfficiencySummary",
     "EvaluationReport",
     "TestEvidence",
     "assemble_report",

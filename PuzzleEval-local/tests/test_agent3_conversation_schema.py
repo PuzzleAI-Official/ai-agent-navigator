@@ -99,7 +99,7 @@ class TestSchemaRoundtrip:
         assert tc.goal is None
         assert tc.rubric == []
         assert tc.constraints == []
-        assert tc.max_turns == 6
+        assert tc.max_turns == 4
         assert tc.evaluation_mode == "auto"
 
     def test_testcase_agentic_full_roundtrip(self):

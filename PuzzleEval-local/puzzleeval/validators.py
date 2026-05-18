@@ -133,12 +133,126 @@ _STOP_WORDS = frozenset({
     "can", "must", "should", "will", "also", "etc", "e.g", "i.e",
 })
 
+_CONVERSATIONAL_NEGATIVE_SETUP_MARKERS = (
+    "unavailable",
+    "not available",
+    "out of stock",
+    "out-of-stock",
+    "sold out",
+    "off menu",
+    "off-menu",
+    "not on the menu",
+    "outside service area",
+    "out of service area",
+    "out of scope",
+    "unsupported",
+    "cannot provide",
+    "can't provide",
+    "should decline",
+    "should refuse",
+    "must decline",
+    "must refuse",
+)
+
+_CONVERSATIONAL_SUCCESS_DEMAND_MARKERS = (
+    "book",
+    "schedule",
+    "reserve",
+    "place order",
+    "process order",
+    "take payment",
+    "dispatch",
+    "send technician",
+    "provide quote",
+)
+
+_CONVERSATIONAL_NEGATIVE_HANDLING_MARKERS = (
+    "decline",
+    "refuse",
+    "redirect",
+    "escalate",
+    "offer alternative",
+    "alternative",
+    "explain unavailable",
+    "explain that",
+    "cannot",
+    "can't",
+    "do not book",
+    "should not book",
+    "not complete",
+    "no booking",
+    "apologize",
+)
+
 
 def _significant_words(text: str) -> set[str]:
     """Extract significant lowercase words (3+ chars, not stop words)."""
     import re
     words = set(re.findall(r"[a-z][a-z0-9]+", text.lower()))
     return {w for w in words if len(w) >= 3 and w not in _STOP_WORDS}
+
+
+def _flatten_text(value) -> str:
+    """Flatten model/schema objects into lowercase text for lint heuristics."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.lower()
+    if isinstance(value, dict):
+        return " ".join(
+            f"{_flatten_text(k)} {_flatten_text(v)}"
+            for k, v in value.items()
+        )
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return " ".join(_flatten_text(v) for v in value)
+    if hasattr(value, "model_dump"):
+        try:
+            return _flatten_text(value.model_dump())
+        except Exception:
+            return str(value).lower()
+    return str(value).lower()
+
+
+def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
+    return any(marker in text for marker in markers)
+
+
+def _conversational_consistency_warning(tc) -> str | None:
+    """Catch obvious contradictions before bad tests corrupt scoring.
+
+    This is intentionally conservative: it only warns when the setup says
+    the requested outcome is unavailable/out-of-scope, while the scoring
+    side still appears to demand successful completion and does not mention
+    refusal, redirection, or alternatives.
+    """
+    setup_text = _flatten_text([
+        getattr(tc, "scenario", ""),
+        getattr(tc, "input_data", ""),
+        getattr(tc, "input_context", None),
+        getattr(tc, "constraints", []),
+    ])
+    if not _contains_any(setup_text, _CONVERSATIONAL_NEGATIVE_SETUP_MARKERS):
+        return None
+
+    scoring_text = _flatten_text([
+        getattr(tc, "goal", None),
+        getattr(tc, "expected_output", ""),
+        getattr(tc, "rubric", []),
+        getattr(tc, "judgement_criteria", []),
+    ])
+    if (
+        _contains_any(scoring_text, _CONVERSATIONAL_SUCCESS_DEMAND_MARKERS)
+        and not _contains_any(scoring_text, _CONVERSATIONAL_NEGATIVE_HANDLING_MARKERS)
+    ):
+        return (
+            f"Test case {tc.id} appears internally inconsistent: the "
+            "conversation setup marks the requested outcome as unavailable "
+            "or out-of-scope, but the goal/rubric seems to demand successful "
+            "completion rather than refusal, redirection, or an alternative. "
+            "Align the rubric with the expected behavior so a correct agent "
+            "is not penalized for declining impossible work."
+        )
+    return None
 
 
 def _check_pricing_breakdown(
@@ -149,9 +263,9 @@ def _check_pricing_breakdown(
     warnings: list[str],
 ) -> None:
     """
-    Phase 5 shared validator — call from Agent 2 / Agent 4 validators when
+    Shared validator - call from Agent 2 / Agent 4 validators when
     a candidate has a non-null `pricing_breakdown`. Silent when breakdown
-    is None (the overwhelmingly common case until Phase 6.5 ships).
+    is None (common when selected-candidate pricing metadata is unavailable).
 
     Structural checks (errors):
       - `tiers` must have >=1 entry
@@ -173,7 +287,7 @@ def _check_pricing_breakdown(
     if len(breakdown.tiers) == 0:
         errors.append(
             f"{prefix} has zero pricing tiers — candidates with no accessible "
-            "tier should be REJECTED by Phase 6.5, not emitted with an empty "
+            "tier should be rejected, not emitted with an empty "
             "pricing_breakdown"
         )
     if not breakdown.sources:
@@ -656,8 +770,8 @@ def validate_agent2_output(
     # ── Phase 4: WorkflowBlueprint scope coverage ──
     # When Agent 1 produced a blueprint, check that every scope has at least
     # one candidate claiming coverage. Thin pools (<3) are warnings; fully
-    # uncovered scopes are warnings too — Phase 6.5 still tries, but the
-    # scope will end up with fewer verified candidates after deep-verify.
+    # uncovered scopes are warnings too - selected-candidate verification
+    # can still run, but there will be fewer verified candidates afterward.
     #
     # Legacy flow (workflow=None or empty covers_step_ids everywhere) is
     # silent — the flat sub-task coverage check above already ran.
@@ -685,7 +799,8 @@ def validate_agent2_output(
             if uncovered_scopes:
                 warnings.append(
                     "Blueprint scopes NOT covered by any candidate "
-                    f"(Phase 6.5 will have nothing to deep-verify at these): "
+                    "(selected-candidate verification has no candidate "
+                    "surface at these): "
                     + ", ".join(
                         f"{sid} ({scope_role_by_id.get(sid, '?')})"
                         for sid in uncovered_scopes
@@ -695,14 +810,15 @@ def validate_agent2_output(
                 warnings.append(
                     f"Thin coverage at scope '{sid}' "
                     f"(role={scope_role_by_id.get(sid, '?')}): only {n} candidate(s) "
-                    "claim coverage. Target is >=3 per scope — expect fewer "
-                    "tested candidates here after Phase 6.5 deep-verify."
+                    "claim coverage. Target is >=3 per scope - expect fewer "
+                    "tested candidates here after selected-candidate verification."
                 )
 
             # Phase 5: structural checks on pricing_breakdown when present.
             # Agent 2 normally leaves this None; kicks in for candidates
-            # enriched after Phase 6.5 ships or for test fixtures that
-            # stamp pricing. Null-safe — no effect when breakdown is None.
+            # enriched by selected-candidate metadata/research or for test
+            # fixtures that stamp pricing. Null-safe - no effect when
+            # breakdown is None.
             for c in result.candidates:
                 _check_pricing_breakdown(
                     c.name, c.covers_step_ids, c.pricing_breakdown,
@@ -746,6 +862,7 @@ def validate_agent2_output(
 def validate_agent3_output(
     result: Agent3Result,
     agent1_output: UserUnderstandingOutput,
+    business_fixture: dict | None = None,
 ) -> ValidationResult:
     """
     Validate Agent 3's output quality.
@@ -759,6 +876,19 @@ def validate_agent3_output(
     """
     errors = []
     warnings = []
+    if business_fixture is None:
+        business_fixture = getattr(result, "business_fixture", None)
+    if business_fixture is None:
+        try:
+            from puzzleeval.agents.agent5.business_fixture import (
+                synthesize_business_fixture_from_user_understanding,
+            )
+
+            business_fixture = synthesize_business_fixture_from_user_understanding(
+                agent1_output
+            )
+        except Exception:
+            business_fixture = None
 
     if len(result.test_cases) == 0:
         errors.append("No test cases generated")
@@ -803,13 +933,22 @@ def validate_agent3_output(
     test_plan = getattr(agent1_output, "test_plan", None)
     if test_plan is not None:
         specs = getattr(test_plan, "scope_specs", None) or []
-        # Map scope_id → capability → sub_task description to tie a target back
-        # to each sub_task. Sub_tasks and scope_specs share capability strings.
+        workflow = getattr(agent1_output, "workflow", None)
+        scope_to_cap: dict[str, str] = {}
+        if workflow is not None:
+            scope_to_cap = {
+                step.id: step.capability
+                for step in getattr(workflow, "steps", []) or []
+                if getattr(step, "id", None) and getattr(step, "capability", None)
+            }
         cap_to_desc: dict[str, str] = {
-            st.capability: st.description for st in agent1_output.sub_tasks
+            st.capability: st.description
+            for st in agent1_output.sub_tasks
+            if getattr(st, "capability", None)
         }
         for spec in specs:
-            cap = getattr(spec, "capability", None)
+            scope_id = getattr(spec, "scope_id", None)
+            cap = scope_to_cap.get(scope_id) if scope_id else None
             target = getattr(spec, "test_count_target", None)
             if cap and target and cap in cap_to_desc:
                 target_by_subtask[cap_to_desc[cap]] = int(target)
@@ -916,6 +1055,30 @@ def validate_agent3_output(
         goal = getattr(tc, "goal", None)
         rubric = getattr(tc, "rubric", None) or []
         input_ctx = getattr(tc, "input_context", None) or {}
+
+        if conversational:
+            consistency_warning = _conversational_consistency_warning(tc)
+            if consistency_warning:
+                warnings.append(consistency_warning)
+            if business_fixture:
+                from puzzleeval.agents.agent5.business_fixture import (
+                    validate_text_against_business_fixture,
+                )
+
+                fixture_issues = validate_text_against_business_fixture(
+                    _flatten_text([
+                        getattr(tc, "scenario", ""),
+                        getattr(tc, "input_data", ""),
+                        getattr(tc, "expected_output", ""),
+                        getattr(tc, "rubric", []),
+                        getattr(tc, "judgement_criteria", []),
+                        getattr(tc, "goal", ""),
+                        input_ctx,
+                    ]),
+                    business_fixture,
+                    source_label=f"Test case {tc.id}",
+                )
+                errors.extend(fixture_issues)
 
         # --- Missing `input_context.instructions` on conversational ---
         # The agent's system prompt MUST come from input_context.
@@ -1027,11 +1190,11 @@ def validate_agent3_output(
                         )
 
         # max_turns sanity
-        max_t = getattr(tc, "max_turns", 6)
+        max_t = getattr(tc, "max_turns", 4)
         if conversational and (max_t < 1 or max_t > 50):
             warnings.append(
                 f"Test case {tc.id} has suspicious max_turns={max_t} "
-                f"(expected 2-12 for typical conversational scopes)"
+                f"(expected 2-6 for typical conversational scopes)"
             )
 
         # evaluation_mode enum
@@ -1142,11 +1305,10 @@ def validate_agent4_output(
             errors.append(f"{prefix} has empty data_format_notes — Agent 5 needs format info")
 
         # Phase 5: structural checks on pricing_breakdown when present.
-        # Until Phase 6.5's 4B extraction ships, pricing_breakdown is
-        # always None and this call is a no-op. ScreenedCandidate gains
-        # covers_step_ids in Phase 6.5 — for Phase 5a we pass frozenset()
-        # so the per_scope drift check is silently skipped (can't drift
-        # against an empty scope set).
+        # pricing_breakdown is optional selected-candidate metadata; when
+        # absent this call is a no-op. Older ScreenedCandidate fixtures may
+        # lack covers_step_ids, so the per_scope drift check is skipped
+        # against an empty scope set.
         vc_covers = getattr(vc, "covers_step_ids", frozenset())
         _check_pricing_breakdown(
             vc.name, vc_covers, vc.pricing_breakdown, errors, warnings,
@@ -1202,6 +1364,9 @@ def validate_agent4_output(
 VALID_FAILURE_CATEGORIES = {
     "docs_unusable", "auth_blocked", "api_incompatible",
     "build_timeout", "dependency_failure", "unknown",
+    "provider_blocked", "credentials_unavailable", "docs_missing",
+    "quota_exhausted", "test/fixture_mismatch_unfixable",
+    "implementation_plan_invalid",
 }
 
 
@@ -1270,7 +1435,7 @@ def validate_agent5_output(
 
         if not h.smoke_test_passed:
             warnings.append(
-                f"{prefix} smoke test did not pass — harness may not work correctly"
+                f"{prefix} optional offline smoke test/check did not pass or was not run"
             )
 
         if not h.requirements:
@@ -1356,66 +1521,3 @@ def validate_agent5_output(
     return ValidationResult(passed=len(errors) == 0, errors=errors, warnings=warnings)
 
 
-# ============================================================================
-# Phase 2B Gate G-A4 — Verified-Pass-needs-non-negotiables
-# ============================================================================
-#
-# This is a standalone validator (not a Pydantic model_validator) because
-# the verdict context (Verified Pass / Inconclusive / Verified Reject)
-# isn't available on BuildReadinessChecklist itself — it's assigned by
-# Agent 4 at a later boundary. Agent 4 calls this function at the
-# verdict-assignment point.
-#
-# Severity: WARN. Bypass: PUZZLEEVAL_GATE_CHECKLIST_VERIFIED_PASS=0.
-# OOD recovery: future flow where Verified Pass can be issued with
-# conditional fields unconfirmed: warn fires, no behavior change.
-
-def validate_checklist_for_verified_pass(
-    checklist,
-    *,
-    candidate_name: str | None = None,
-    trace_id: str | None = None,
-) -> list[str]:
-    """Return the names of non-negotiable fields that are `unknown` on
-    a checklist being granted Verified Pass.
-
-    Caller (Agent 4 deep-verify) invokes this only when assigning the
-    Verified Pass verdict. If the returned list is non-empty, a
-    `gate_fired` log line is emitted (severity=WARN). The caller can
-    still proceed with Verified Pass — this is observability for
-    false-pass detection, not blocking enforcement. Agent 5's deep-verify
-    gate catches the same issue at build-readiness time.
-
-    The four non-negotiables are imported lazily from
-    `puzzleeval.schemas` to avoid circular imports.
-    """
-    import logging
-    import os
-
-    if os.environ.get("PUZZLEEVAL_GATE_CHECKLIST_VERIFIED_PASS", "1") == "0":
-        return []
-
-    from puzzleeval.schemas import NON_NEGOTIABLE_FIELDS
-
-    unknowns: list[str] = []
-    for field_name in NON_NEGOTIABLE_FIELDS:
-        field_obj = getattr(checklist, field_name, None)
-        if field_obj is not None and getattr(field_obj, "status", None) == "unknown":
-            unknowns.append(field_name)
-
-    if unknowns:
-        logger = logging.getLogger("puzzleeval.validators")
-        logger.warning(
-            "gate_fired",
-            extra={
-                "operation": "gate_fired",
-                "gate_name": "checklist_verified_pass_non_negotiables",
-                "severity": "WARN",
-                "rejected": False,
-                "unknown_non_negotiables": unknowns,
-                "candidate_name": candidate_name,
-                "trace_id": trace_id,
-            },
-        )
-
-    return unknowns

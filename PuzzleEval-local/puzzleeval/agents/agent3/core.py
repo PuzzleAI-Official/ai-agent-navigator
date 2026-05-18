@@ -28,7 +28,7 @@
 # │       a. client = anthropic.Anthropic(...)                      │
 # │       b. message = _build_generation_message(input)             │
 # │       c. response = client.messages.parse(                      │
-# │            output_format=Agent3Result)           ★ SINGLE CALL  │
+# │            output_format=Agent3GenerationResult) ★ SINGLE CALL  │
 # │       d. return response.parsed_output                          │
 # │                                                                 │
 # │  Everything else is logging, error handling, and cost tracking  │
@@ -37,6 +37,7 @@
 # ============================================================================
 
 import time
+from typing import Any
 
 import anthropic
 
@@ -47,13 +48,24 @@ from puzzleeval.config import (
     ANTHROPIC_API_KEY,
     DEFAULT_MODEL,
 )
+from puzzleeval.anthropic_client import (
+    AGENT3_GENERATION_MAX_RETRIES,
+    AGENT3_GENERATION_TIMEOUT_S,
+    AGENT3_TRANSIENT_RETRY_ATTEMPTS,
+    build_client,
+)
 from puzzleeval.exceptions import (
     AgentAPIError,
     AgentOutputError,
     AgentRateLimitError,
 )
 from puzzleeval.logging_setup import get_logger, log_llm_call
-from puzzleeval.schemas import Agent3Input, Agent3Result, UserUnderstandingOutput
+from puzzleeval.schemas import (
+    Agent3GenerationResult,
+    Agent3Input,
+    Agent3Result,
+    UserUnderstandingOutput,
+)
 
 
 # ============================================================================
@@ -91,6 +103,27 @@ CACHING_ENABLED = False
 # Max tokens for the generation call. Test cases with detailed criteria
 # and realistic input data produce substantial output.
 GENERATION_MAX_TOKENS = 16384
+
+
+def _attach_business_fixture(
+    result: Agent3GenerationResult | Agent3Result | None,
+    business_fixture: dict | None,
+) -> Agent3Result | None:
+    """Attach orchestrator-owned fixture metadata after model generation.
+
+    The LLM must not be asked to emit ``business_fixture``. It is an
+    open-ended ``dict[str, Any]`` and belongs to the orchestrator, not to
+    Claude's structured-output schema. Keep it out of Agent3GenerationResult,
+    then attach it here for persisted Agent3Result consumers.
+    """
+    if result is None:
+        return None
+    if isinstance(result, Agent3Result):
+        result.business_fixture = business_fixture
+        return result
+    data = result.model_dump()
+    data["business_fixture"] = business_fixture
+    return Agent3Result(**data)
 
 
 # ============================================================================
@@ -471,7 +504,36 @@ def _format_workflow_architecture(workflow) -> str:
     return "\n".join(lines)
 
 
-def _build_generation_message(user_understanding: UserUnderstandingOutput) -> str:
+def _format_business_fixture_for_prompt(fixture: dict | None) -> str:
+    if not fixture:
+        return (
+            "## Canonical Business Fixture\n"
+            "No canonical business fixture was provided. Do not invent exact "
+            "prices, hours, menu items, policies, or service-area facts unless "
+            "the user request explicitly supplies them."
+        )
+    facts = fixture.get("canonical_facts") or []
+    fact_lines = "\n".join(f"- {str(f)[:500]}" for f in facts[:20]) or "- (none)"
+    synthetic = "yes" if fixture.get("synthetic") else "no"
+    return (
+        "## Canonical Business Fixture (AUTHORITATIVE)\n"
+        f"- synthetic_gap_marker: {synthetic}\n"
+        f"- source: {fixture.get('source', 'unknown')}\n"
+        f"- domain: {fixture.get('domain', 'unknown')}\n"
+        "\nCanonical facts:\n"
+        f"{fact_lines}\n\n"
+        "Rules:\n"
+        "- Generate tests, rubrics, goals, and expected behavior against these facts.\n"
+        "- Do not introduce menu items, prices, hours, service areas, policies, or appointment constraints absent from this fixture.\n"
+        "- If the fixture is synthetic or marks missing facts, test refusal/clarification rather than exact totals or unavailable facts.\n"
+        "- Negative/off-menu scenarios may mention absent facts only when the rubric rewards decline, redirect, escalation, or alternatives."
+    )
+
+
+def _build_generation_message(
+    user_understanding: UserUnderstandingOutput,
+    business_fixture: dict | None = None,
+) -> str:
     """
     Convert Agent 1's structured output into a test generation request.
 
@@ -568,6 +630,8 @@ def _build_generation_message(user_understanding: UserUnderstandingOutput) -> st
 
 {test_plan_section}
 
+{_format_business_fixture_for_prompt(business_fixture)}
+
 ## Target
 Generate approximately {target_total} test cases total ({base_per_subtask + workflow_bonus} per sub-task).
 Ensure every sub-task is covered across all 6 testing dimensions.
@@ -587,7 +651,7 @@ IMPORTANT: When a Test Plan is provided above, it is AUTHORITATIVE — follow th
 # but not for understanding what Agent 3 does.
 #
 # SINGLE API CALL:
-#   client.messages.parse() with output_format=Agent3Result
+#   client.messages.parse() with output_format=Agent3GenerationResult
 #   → guaranteed structured JSON matching our Pydantic schema
 #
 # ============================================================================
@@ -599,12 +663,17 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
     judgement criteria.
 
     Single-step process:
-      client.messages.parse() with output_format=Agent3Result
+      client.messages.parse() with output_format=Agent3GenerationResult
     """
     # ★ CORE LINE 1: Create the API client
-    # Central factory — 120 s timeout + max_retries=3 (see anthropic_client.py).
-    from puzzleeval.anthropic_client import build_client
-    client = build_client(api_key=ANTHROPIC_API_KEY)
+    # Agent 3 has a dedicated long-generation profile: large voice fixtures
+    # and weighted rubrics can legitimately run longer than the generic
+    # 120 s structured-output timeout.
+    client = build_client(
+        api_key=ANTHROPIC_API_KEY,
+        timeout=AGENT3_GENERATION_TIMEOUT_S,
+        max_retries=AGENT3_GENERATION_MAX_RETRIES,
+    )
 
     # [logging] Set up logger for this agent
     logger = get_logger("agent_3_synthetic_tests")
@@ -613,7 +682,10 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
     })
 
     # ★ CORE LINE 2: Build the generation request message
-    generation_message = _build_generation_message(input_data.user_understanding)
+    generation_message = _build_generation_message(
+        input_data.user_understanding,
+        input_data.business_fixture,
+    )
 
     # ======================================================================
     # Generate test cases via structured output
@@ -633,9 +705,11 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
             max_tokens=GENERATION_MAX_TOKENS,
             system=[{"type": "text", "text": with_preamble(SYSTEM_PROMPT)}],
             messages=[{"role": "user", "content": generation_message}],
-            output_format=Agent3Result,
+            output_format=Agent3GenerationResult,
             extra={},
             trace_id=input_data.trace_id,
+            transient_max_attempts=AGENT3_TRANSIENT_RETRY_ATTEMPTS,
+            fallback_on_strict_transient_error=True,
         )
 
     # [error handling] Same pattern as Agent 1 and Agent 2
@@ -675,7 +749,13 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
     )
 
     # ★ CORE LINE 4: Return the parsed result
-    result = response.parsed_output
+    result = _attach_business_fixture(
+        response.parsed_output,
+        input_data.business_fixture,
+    )
+    structured_output_telemetry = (
+        getattr(response, "structured_output_telemetry", None) or {}
+    )
 
     # [error handling] Defensive check for truncated/refused responses
     if result is None:
@@ -694,6 +774,14 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
 
     # [cost tracking] Set cost on the result
     result.cost_usd = call_cost
+    result.business_fixture = input_data.business_fixture
+    result.structured_output_mode = structured_output_telemetry.get("mode")
+    result.structured_output_fallback_reason = (
+        structured_output_telemetry.get("fallback_reason")
+    )
+    result.structured_output_schema_repair_attempts = int(
+        structured_output_telemetry.get("schema_repair_attempts") or 0
+    )
 
     # ── Deterministic auto-fill: input_context.instructions for conversational tests ──
     # AD-007 contract enforcement: prompt-level rules telling Agent 3 to
@@ -765,6 +853,13 @@ def run_synthetic_tests_agent(input_data: Agent3Input) -> Agent3Result:
         "trace_id": input_data.trace_id,
         "test_case_count": len(result.test_cases),
         "subtasks_covered": len(result.coverage_summary),
+        "structured_output_mode": result.structured_output_mode,
+        "structured_output_fallback_reason": (
+            result.structured_output_fallback_reason
+        ),
+        "structured_output_schema_repair_attempts": (
+            result.structured_output_schema_repair_attempts
+        ),
     })
 
     return result
@@ -824,6 +919,8 @@ def _retry_empty_generation(
         "for each case's sub_task_ref so validation can map them.",
         "",
     ]
+    fixture_block = _format_business_fixture_for_prompt(input_data.business_fixture)
+    lines.extend([fixture_block, ""])
     for st in uo.sub_tasks:
         target = specs_by_cap.get(st.capability, 5)
         lines.append(f"- sub_task_ref: {st.description!r}")
@@ -841,9 +938,11 @@ def _retry_empty_generation(
             max_tokens=GENERATION_MAX_TOKENS,
             system=[{"type": "text", "text": with_preamble(SYSTEM_PROMPT)}],
             messages=[{"role": "user", "content": "\n".join(lines)}],
-            output_format=Agent3Result,
+            output_format=Agent3GenerationResult,
             extra={},
             trace_id=input_data.trace_id,
+            transient_max_attempts=AGENT3_TRANSIENT_RETRY_ATTEMPTS,
+            fallback_on_strict_transient_error=True,
         )
     except Exception as exc:  # noqa: BLE001
         logger.warning(
@@ -858,7 +957,10 @@ def _retry_empty_generation(
         trace_id=input_data.trace_id, start_time=time.time(),
         operation="synthetic_tests_empty_retry",
     )
-    retried = response.parsed_output
+    retried = _attach_business_fixture(
+        response.parsed_output,
+        input_data.business_fixture,
+    )
     if retried is None or not retried.test_cases:
         logger.warning(
             "Agent 3 empty-retry still returned no cases — escalating to validator",
@@ -1088,6 +1190,11 @@ def _topup_undergenerated_subtasks(
                 lines.append(f"  - {cap}: +{n} cases")
             lines.append("")
 
+        lines.extend([
+            _format_business_fixture_for_prompt(input_data.business_fixture),
+            "",
+        ])
+
         for cap, desc, actual, target in shortfalls:
             gap = target - actual
             missing = sorted(missing_dims.get(cap, set()))
@@ -1110,9 +1217,11 @@ def _topup_undergenerated_subtasks(
                 max_tokens=GENERATION_MAX_TOKENS,
                 system=[{"type": "text", "text": with_preamble(SYSTEM_PROMPT)}],
                 messages=[{"role": "user", "content": prompt}],
-                output_format=Agent3Result,
+                output_format=Agent3GenerationResult,
                 extra={},
                 trace_id=input_data.trace_id,
+                transient_max_attempts=AGENT3_TRANSIENT_RETRY_ATTEMPTS,
+                fallback_on_strict_transient_error=True,
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -1122,7 +1231,10 @@ def _topup_undergenerated_subtasks(
             )
             break
 
-        topup = response.parsed_output
+        topup = _attach_business_fixture(
+            response.parsed_output,
+            input_data.business_fixture,
+        )
         attempt_cost = log_llm_call(
             logger=logger, response=response, model=DEFAULT_MODEL,
             trace_id=input_data.trace_id, start_time=time.time(),

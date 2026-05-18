@@ -1,7 +1,6 @@
 import asyncio
 import json
 import logging
-import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -45,6 +44,7 @@ def _load_mock(filename: str) -> dict:
 def _kick_off_venv_precreate(
     state: RunState,
     selected_candidates: list[dict],
+    runs_root: Path | str | None = None,
 ) -> None:
     """Fire-and-forget background task that pre-creates venvs in
     parallel with Agent 4 verification.
@@ -96,6 +96,7 @@ def _kick_off_venv_precreate(
         candidate_names,
         state.trace_id,
         logger,
+        runs_root=runs_root,
     ))
     logger.info(
         f"venv pre-create kicked off for {len(candidate_names)} candidate(s) "
@@ -719,7 +720,7 @@ async def run_pipeline(state: RunState):
             # This provides the DEFAULT picks the SelectionPanel shows.
             # User picks (Phase 6) OVERRIDE these. When Phase 6 is
             # disabled (--no-interactive / flag off), these ARE the final
-            # picks that go to deep-verify.
+            # picks that go to selected-candidate verification.
             from puzzleeval.selection import select_scope_candidate_pairs
             from puzzleeval.schemas import Candidate as CandidateModel
             from services.billing import scope_candidates_cap
@@ -886,7 +887,7 @@ async def run_pipeline(state: RunState):
                 # only runs for SELECTED candidates (the post-Phase-6
                 # filtered list). Agent 5's _create_venv short-circuits
                 # via per-sandbox lock when it sees an existing venv.
-                _kick_off_venv_precreate(state, filtered_candidates)
+                _kick_off_venv_precreate(state, filtered_candidates, runs_root=runs_dir)
             elif programmatic_picks and bp_steps_for_selection:
                 # Phase 6 disabled but Phase 7 computed picks → apply
                 # programmatic top-K as the selection (auto-run path).
@@ -907,7 +908,9 @@ async def run_pipeline(state: RunState):
                 # Same venv pre-creation hook as the user-selection branch.
                 # Auto-pick path benefits identically.
                 _kick_off_venv_precreate(
-                    state, state.agent2_result.get("candidates", []),
+                    state,
+                    state.agent2_result.get("candidates", []),
+                    runs_root=runs_dir,
                 )
 
             # Billing gate: Agent 4 requires the "testing" feature. In default
@@ -1116,17 +1119,20 @@ async def run_pipeline(state: RunState):
             state.agent5_result = _load_mock("agent_5_output.json")
             selected_names = [h.get("candidate_name", "") for h in state.agent5_result.get("harnesses", [])]
             selected_names += [h.get("candidate_name", "") for h in state.agent5_result.get("failed_harnesses", [])]
-            emit("candidates_selected", {"selected": selected_names})
+            emit("candidates_selected", {
+                "selected": selected_names,
+                "blocked_missing_docs": [],
+                "blocked_missing_credentials": [],
+                "dropped_by_rank": [],
+            })
             emit("agent_activity", {"agent": "agent_5", "message": f"Selected top {len(selected_names)} candidates for testing", "status": "info"})
             await asyncio.sleep(0.5)
             await _emit_mock_agent5_progress(state, emit)
         else:
             emit("agent_activity", {"agent": "agent_5", "message": "Building test harnesses and running evaluations..."})
-            # DON'T predict which candidates Agent 5 selects — it sorts by
-            # credentials first, then relevance_score (different from our sort).
-            # Instead, we'll emit candidates_selected AFTER Agent 5 finishes,
-            # based on which candidates actually got harnesses built.
-            # The harness_started callbacks will show progress in real-time.
+            # The orchestrator emits candidates_selected before Agent 5 starts.
+            # Agent 5 receives only build-ready candidates and does not filter
+            # or re-rank them internally.
 
             # Define progress callback that emits SSE events
             def _agent5_progress(event_type: str, data: dict):
@@ -1141,7 +1147,9 @@ async def run_pipeline(state: RunState):
                     cumulative_cost = data.get("cumulative_cost_usd", 0)
                     latency_ms = data.get("latency_ms", 0)
                     tool_calls_detail = data.get("tool_calls_detail", [])
+                    tool_results_detail = data.get("tool_results_detail", [])
                     text_preview = data.get("text_preview", "")
+                    iteration_summary = data.get("iteration_summary", {}) or {}
 
                     phase_labels = {
                         "researching": "Researching",
@@ -1154,8 +1162,8 @@ async def run_pipeline(state: RunState):
                     # Claude touched this turn instead of a generic
                     # "searching web" badge. Without this the operator has
                     # no way to know mid-build whether Claude is making
-                    # progress toward api_spec.txt or just spinning on the
-                    # same docs page repeatedly.
+                    # progress toward research_synthesis/implementation_plan
+                    # or just spinning on the same docs page repeatedly.
                     tool_summaries = []
                     for tc in tool_calls_detail[:3]:  # cap at 3 to keep msg readable
                         tname = tc.get("tool", "?")
@@ -1183,6 +1191,24 @@ async def run_pipeline(state: RunState):
                     if len(tool_calls_detail) > 3:
                         tool_summaries.append(f"+{len(tool_calls_detail) - 3} more")
 
+                    # Server-side web_fetch / web_search results can be the
+                    # expensive part of a turn but do not always appear as
+                    # normal tool calls. Surface compact result evidence so a
+                    # 4-minute research turn explains itself after it lands.
+                    for tr in tool_results_detail[:2]:
+                        tname = tr.get("tool", "?")
+                        tsum = tr.get("summary", "")
+                        if tname in ("web_fetch", "web_search") and tsum:
+                            tool_summaries.append(f"{tname} result: {tsum[:70]}")
+
+                    iter_count = int(iteration_summary.get("count", 0) or 0)
+                    advisor_count = int(iteration_summary.get("advisor_count", 0) or 0)
+                    if iter_count > 1:
+                        tool_summaries.append(
+                            f"{iter_count} internal model steps"
+                            + (f", {advisor_count} advisor" if advisor_count else "")
+                        )
+
                     tool_desc = (" — " + " | ".join(tool_summaries)) if tool_summaries else ""
                     # If Claude only emitted text this turn (no tools), surface
                     # the first 100 chars as a sign of forward progress (e.g.
@@ -1197,7 +1223,7 @@ async def run_pipeline(state: RunState):
                         "message": (
                             f"{name}: Turn {turn_num}/{max_turns} — {phase_label}"
                             f"{tool_desc}"
-                            f" ({cost * 20:.2f}cr/{latency_s:.1f}s, total {cumulative_cost * 20:.1f}cr)"
+                            f" (${cost:.2f}/{latency_s:.1f}s, total ${cumulative_cost:.2f})"
                         ),
                         "candidate_name": name,
                         # Pass structured data through too — frontend can render
@@ -1207,29 +1233,83 @@ async def run_pipeline(state: RunState):
                             "max_turns": max_turns,
                             "phase": phase,
                             "tool_calls": tool_calls_detail,
+                            "tool_results": tool_results_detail,
                             "text_preview": text_preview,
                             "cost_usd": cost,
                             "cumulative_cost_usd": cumulative_cost,
                             "latency_ms": latency_ms,
+                            "iteration_summary": iteration_summary,
+                            "server_tool_usage": data.get("server_tool_usage", {}),
                         },
                     })
                     return
 
-                # Structural events — emit both the typed event AND activity
-                emit(event_type, data)
+                if event_type in ("build_turn_started", "build_turn_heartbeat"):
+                    emit(event_type, data)
+                    return
 
+                if event_type in ("build_tool_started", "build_tool_heartbeat", "build_tool_completed"):
+                    emit(event_type, data)
+                    return
+
+                if event_type in {
+                    "simulator_turn_started",
+                    "provider_turn_completed",
+                    "rubric_judge_started",
+                    "rubric_judge_completed",
+                    "merge_submitted",
+                    "test_case_timeout",
+                }:
+                    emit(event_type, data)
+                    tc = data.get("test_case_id", "test")
+                    turn = data.get("turn_index")
+                    if event_type == "simulator_turn_started":
+                        msg = f"{name}: {tc} simulator turn {turn} started"
+                    elif event_type == "provider_turn_completed":
+                        msg = f"{name}: {tc} provider turn {turn} completed"
+                    elif event_type == "rubric_judge_started":
+                        msg = f"{name}: {tc} rubric judge started"
+                    elif event_type == "rubric_judge_completed":
+                        status = "failed" if data.get("judge_failed") else "completed"
+                        msg = f"{name}: {tc} rubric judge {status}"
+                    elif event_type == "merge_submitted":
+                        msg = f"{name}: {tc} conversation audio merge submitted"
+                    else:
+                        msg = f"{name}: {tc} timed out after {data.get('timeout_s')}s"
+                    emit("agent_activity", {
+                        "agent": "agent_5",
+                        "message": msg,
+                        "candidate_name": data.get("candidate_name") or name,
+                        "test_case_id": tc,
+                        "status": "failure" if event_type == "test_case_timeout" else "progress",
+                    })
+                    return
+
+                # Structural events — emit both the typed event AND activity
                 if event_type == "candidates_selected":
-                    # Authoritative selection from Agent 5's internal logic
+                    # Authoritative orchestrator-owned Agent 5 build list.
                     emit("candidates_selected", data)
                     selected = data.get("selected", [])
-                    emit("agent_activity", {"agent": "agent_5", "message": f"Selected {len(selected)} candidates: {', '.join(selected)}", "status": "info"})
+                    blocked_docs = data.get("blocked_missing_docs", [])
+                    blocked_creds = data.get("blocked_missing_credentials", [])
+                    pieces = [f"Selected {len(selected)} candidates: {', '.join(selected)}"]
+                    if blocked_docs:
+                        pieces.append(f"docs-blocked: {', '.join(blocked_docs)}")
+                    if blocked_creds:
+                        pieces.append(f"credential-blocked: {', '.join(blocked_creds)}")
+                    emit("agent_activity", {
+                        "agent": "agent_5",
+                        "message": " | ".join(pieces),
+                        "status": "info",
+                    })
                     return
-                elif event_type == "harness_started":
+                emit(event_type, data)
+                if event_type == "harness_started":
                     emit("agent_activity", {"agent": "agent_5", "message": f"Building harness for {name}...", "candidate_name": name})
                 elif event_type == "harness_completed":
                     turns = data.get("build_turns", 0)
                     cost = data.get("build_cost_usd", 0)
-                    emit("agent_activity", {"agent": "agent_5", "message": f"Harness built for {name} ({turns} turns, {cost * 20:.2f} credits)", "candidate_name": name, "status": "success"})
+                    emit("agent_activity", {"agent": "agent_5", "message": f"Harness built for {name} ({turns} turns, ${cost:.2f})", "candidate_name": name, "status": "success"})
                 elif event_type == "harness_failed":
                     reason = data.get("failure_reason", "")[:80]
                     emit("agent_activity", {"agent": "agent_5", "message": f"Build failed for {name}: {reason}", "candidate_name": name, "status": "failure"})
@@ -1379,14 +1459,41 @@ async def _emit_mock_agent5_progress(state: RunState, emit):
         turns = h.get("build_turns", 0)
         cost = h.get("build_cost_usd", 0)
         emit("harness_completed", {"candidate_name": name, "success": True, "build_turns": turns, "build_cost_usd": cost})
-        emit("agent_activity", {"agent": "agent_5", "message": f"Harness built for {name} ({turns} turns, {cost * 20:.2f} credits)", "candidate_name": name, "status": "success"})
+        emit("agent_activity", {"agent": "agent_5", "message": f"Harness built for {name} ({turns} turns, ${cost:.2f})", "candidate_name": name, "status": "success"})
         await asyncio.sleep(0.3)
 
     for fh in state.agent5_result.get("failed_harnesses", []):
         name = fh.get("candidate_name", "")
         reason = fh.get("failure_reason", "unknown")
-        emit("harness_failed", {"candidate_name": name, "failure_reason": reason})
-        emit("agent_activity", {"agent": "agent_5", "message": f"Build failed for {name}: {reason[:80]}", "candidate_name": name, "status": "failure"})
+        category = fh.get("failure_category", "")
+        abandoned = (
+            fh.get("completion_gate_status") == "abandoned"
+            or category in {
+                "api_incompatible",
+                "credentials_unavailable",
+                "docs_missing",
+                "provider_blocked",
+                "quota_exhausted",
+                "test/fixture_mismatch_unfixable",
+            }
+            or str(reason).lower().startswith("abandoned:")
+        )
+        emit("harness_failed", {
+            "candidate_name": name,
+            "failure_reason": reason,
+            "failure_category": category,
+            "abandoned": abandoned,
+        })
+        emit("agent_activity", {
+            "agent": "agent_5",
+            "message": (
+                f"Abandoned {name}: {str(reason)[:80]}"
+                if abandoned
+                else f"Build failed for {name}: {str(reason)[:80]}"
+            ),
+            "candidate_name": name,
+            "status": "failure",
+        })
 
     for cr in candidate_runs:
         name = cr.get("candidate_name", "")
@@ -1442,8 +1549,32 @@ def _emit_agent5_results(state: RunState, emit):
 
     for fh in result.get("failed_harnesses", []):
         name = fh.get("candidate_name", "")
-        emit("harness_failed", {"candidate_name": name, "failure_reason": fh.get("failure_reason", "")})
-        emit("agent_activity", {"agent": "agent_5", "message": f"Build failed for {name}", "candidate_name": name, "status": "failure"})
+        reason = fh.get("failure_reason", "")
+        category = fh.get("failure_category", "")
+        abandoned = (
+            fh.get("completion_gate_status") == "abandoned"
+            or category in {
+                "api_incompatible",
+                "credentials_unavailable",
+                "docs_missing",
+                "provider_blocked",
+                "quota_exhausted",
+                "test/fixture_mismatch_unfixable",
+            }
+            or str(reason).lower().startswith("abandoned:")
+        )
+        emit("harness_failed", {
+            "candidate_name": name,
+            "failure_reason": reason,
+            "failure_category": category,
+            "abandoned": abandoned,
+        })
+        emit("agent_activity", {
+            "agent": "agent_5",
+            "message": f"{'Abandoned' if abandoned else 'Build failed for'} {name}",
+            "candidate_name": name,
+            "status": "failure",
+        })
 
     for cr in result.get("candidate_runs", []):
         name = cr.get("candidate_name", "")
@@ -1504,6 +1635,9 @@ async def _run_real_agent3(state: RunState, user_understanding):
     )
     from puzzleeval.agents.synthetic_tests import run_synthetic_tests_agent
     from puzzleeval.agents.synthetic_tests_file import run_file_tests_agent
+    from puzzleeval.agents.agent5.business_fixture import (
+        synthesize_business_fixture_from_user_understanding,
+    )
 
     test_file_paths = [f.get("path") for f in state.uploaded_files if f.get("path")]
     has_files = bool(test_file_paths)
@@ -1600,6 +1734,9 @@ async def _run_real_agent3(state: RunState, user_understanding):
 
     file_result = None
     text_result = None
+    business_fixture = synthesize_business_fixture_from_user_understanding(
+        user_understanding
+    )
 
     # Agent 3F: file-based sub-tasks (only when files provided)
     if file_subtasks and has_files:
@@ -1608,6 +1745,7 @@ async def _run_real_agent3(state: RunState, user_understanding):
             user_understanding=file_uo,
             trace_id=state.trace_id,
             test_file_paths=test_file_paths,
+            business_fixture=business_fixture,
         )
         file_result = await asyncio.to_thread(run_file_tests_agent, a3f_input)
 
@@ -1621,6 +1759,7 @@ async def _run_real_agent3(state: RunState, user_understanding):
         a3_input = Agent3Input(
             user_understanding=synth_uo,
             trace_id=state.trace_id,
+            business_fixture=business_fixture,
         )
         text_result = await asyncio.to_thread(run_synthetic_tests_agent, a3_input)
 
@@ -1645,6 +1784,7 @@ async def _run_real_agent3(state: RunState, user_understanding):
             ),
             coverage_summary=merged_coverage,
             cost_usd=file_result.cost_usd + text_result.cost_usd,
+            business_fixture=business_fixture,
         )
     elif file_result:
         result = file_result
@@ -1653,8 +1793,9 @@ async def _run_real_agent3(state: RunState, user_understanding):
     else:
         result = Agent3Result(
             test_cases=[], generation_notes="No test cases generated.",
-            coverage_summary={}, cost_usd=0.0,
+            coverage_summary={}, cost_usd=0.0, business_fixture=business_fixture,
         )
+    result.business_fixture = business_fixture
 
     result_dict = result.model_dump()
     return result_dict, result
@@ -1679,6 +1820,7 @@ async def _run_real_agent4(state: RunState, user_understanding):
         candidates=agent2_result_model,  # FULL Agent2Result, NOT .candidates list
         user_understanding=user_understanding,
         trace_id=state.trace_id,
+        runs_root=str(API_ROOT / "runs"),
     )
 
     result = await asyncio.to_thread(run_screening_agent, agent4_input)
@@ -1690,13 +1832,15 @@ async def _run_real_agent5(state: RunState, user_understanding, progress_callbac
     """Run real Agent 5 (Build + Test). Returns dict.
 
     CRITICAL points:
-    - CWD must be set so runs/{trace_id}/harnesses/ resolves correctly
+    - runs_root is passed explicitly so overlapping runs never depend on CWD
     - provider_credentials must be loaded from registry with candidate matching
     - test_file_paths must be absolute
     """
+    from puzzleeval.config import AGENT5_MAX_CANDIDATES
     from puzzleeval.schemas import Agent5Input, Agent3Result, ScreenedCandidate
     from puzzleeval.agents.implement_test_env import run_implement_test_env_agent
     from puzzleeval.provider_registry import load_registry, get_all_credentials
+    from puzzleeval.selection import select_agent5_build_candidates
 
     # Reconstruct Pydantic models from dicts for Agent5Input type safety
     validated_dicts = state.agent4_result.get("validated_candidates", [])
@@ -1711,25 +1855,41 @@ async def _run_real_agent5(state: RunState, user_understanding, progress_callbac
     registry = load_registry()
     provider_creds = get_all_credentials(registry, validated_models)
 
+    selection = select_agent5_build_candidates(
+        validated_models,
+        trace_id=state.trace_id,
+        runs_root=str(API_ROOT / "runs"),
+        provider_credentials=provider_creds,
+        max_candidates=AGENT5_MAX_CANDIDATES,
+    )
+    state.agent5_candidate_selection = selection.audit_payload
+    try:
+        selection_path = (
+            API_ROOT / "runs" / state.trace_id / "agent5_candidate_selection.json"
+        )
+        selection_path.parent.mkdir(parents=True, exist_ok=True)
+        selection_path.write_text(
+            json.dumps(selection.audit_payload, indent=2, default=str),
+            encoding="utf-8",
+        )
+    except Exception:  # noqa: BLE001 - observability only
+        pass
+    if progress_callback:
+        progress_callback("candidates_selected", selection.event_payload())
+
     agent5_input = Agent5Input(
-        validated_candidates=validated_models,
+        validated_candidates=selection.selected,
         user_understanding=user_understanding,
         test_cases=agent3_result_model,
         trace_id=state.trace_id,
+        runs_root=str(API_ROOT / "runs"),
         provider_credentials=provider_creds,
     )
 
-    # Agent 5 creates runs/{trace_id}/harnesses/ relative to CWD
-    # Set CWD to API root so harnesses go to puzzleeval-api/runs/
-    original_cwd = os.getcwd()
-
-    def _run_agent5_with_cwd():
-        os.chdir(str(API_ROOT))
-        try:
-            return run_implement_test_env_agent(agent5_input, progress_callback=progress_callback)
-        finally:
-            os.chdir(original_cwd)
-
-    result = await asyncio.to_thread(_run_agent5_with_cwd)
+    result = await asyncio.to_thread(
+        run_implement_test_env_agent,
+        agent5_input,
+        progress_callback=progress_callback,
+    )
     result_dict = result.model_dump()
     return result_dict

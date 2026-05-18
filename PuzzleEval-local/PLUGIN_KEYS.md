@@ -302,7 +302,8 @@ These environmental defaults are already sane for local development. Raise / low
 
 # Plugin port overrides — change only if the default ports conflict with
 # something else on your host. See BACKEND_ARCHITECTURE.md §19 for the full
-# list (webhook 8765, smtp 2525, slack mock 8766, sms mock 8767, voice 8768).
+# list (webhook 8765, smtp 2525, slack mock 8766, sms mock 8767; voice uses
+# an isolated loopback port unless PUZZLEEVAL_VOICE_PORT is explicitly set).
 
 # Frontend: point at a different backend URL without rebuilding the SPA
 # VITE_API_BASE=http://localhost:8001/api

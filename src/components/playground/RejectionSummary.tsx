@@ -1,14 +1,14 @@
 // ============================================================================
-// RejectionSummary — per-scope rejection counts from deep-verify
+// RejectionSummary - per-scope rejection counts from selected-candidate verification
 // ============================================================================
-// Shows per-scope rejection counts + expandable detail after the Phase 6.5
-// deep-verify pass. Null-safe: renders nothing when `rejections` is empty
-// (e.g. every selected candidate passed deep-verify).
+// Shows per-scope rejection counts + expandable detail after selected-candidate
+// verification. Null-safe: renders nothing when `rejections` is empty
+// (e.g. every selected candidate passed verification).
 //
 // Data arrives via `candidate_rejected` SSE events:
 //   - Collapsed header: "2 rejections across 3 scopes"
 //   - Expanded: per-scope grouped list with reason category + one-line
-//     explanation so the user sees exactly why a pick failed deep-verify
+//     explanation so the user sees exactly why a pick failed verification
 //     and wasn't tested (no silent substitution).
 // ============================================================================
 

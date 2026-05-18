@@ -179,6 +179,13 @@ class TestFileTestsAgent:
 
         assert len(result.test_cases) == 1
         assert result.test_cases[0].test_file_path == "/uploads/invoice_001.pdf"
+        from puzzleeval.anthropic_client import (
+            AGENT3_GENERATION_MAX_RETRIES,
+            AGENT3_GENERATION_TIMEOUT_S,
+        )
+        client_call = mock_anthropic_class.call_args
+        assert client_call.kwargs.get("timeout") == AGENT3_GENERATION_TIMEOUT_S
+        assert client_call.kwargs.get("max_retries") == AGENT3_GENERATION_MAX_RETRIES
 
     @patch("puzzleeval.agents.synthetic_tests.run_synthetic_tests_agent")
     def test_no_files_falls_back_to_text_only_agent3(self, mock_text_agent):

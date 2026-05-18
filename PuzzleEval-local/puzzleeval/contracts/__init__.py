@@ -2,7 +2,7 @@
 
 The canonical owner of:
   * Contract loading from `puzzleeval/capability_playbooks/*.md`.
-  * Selection (multi-layer: always-on + deterministic + LLM-routed).
+  * Selection (multi-layer: always-on + deterministic).
   * Coverage validation against per-task-type requirements.
   * Conflict detection and resolution.
   * Runtime gates (AD-007 — gates are Python, not markdown-controlled).

@@ -207,8 +207,8 @@ export function CandidateCard({ candidate: c, index, workflowSteps }: Props) {
           </div>
         )}
 
-        {/* Structured pricing block — hidden when pricing_breakdown is null
-            (deep-verify 4B extraction hasn't run for this candidate yet).
+        {/* Structured pricing block - hidden when pricing_breakdown is null
+            (selected-candidate pricing metadata/research is unavailable).
             When data arrives, shows "From $X/mo" with expandable tier
             details and source links. */}
         {c.pricing_breakdown && (
@@ -271,7 +271,7 @@ export function CandidateCard({ candidate: c, index, workflowSteps }: Props) {
 
         {isBuilt && c.build_turns != null && (
           <div className="mt-2.5 text-[11px] text-white/30 font-mono">
-            {c.build_turns} turns · {((c.build_cost_usd ?? 0) * 20).toFixed(2)} credits
+            {c.build_turns} turns · ${(c.build_cost_usd ?? 0).toFixed(2)}
           </div>
         )}
 

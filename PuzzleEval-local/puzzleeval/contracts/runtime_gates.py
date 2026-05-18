@@ -132,8 +132,8 @@ class VoiceHarnessGate(ContractGate):
       Shape B: ``raw_response.audio_path`` (on-disk path).
 
     Hard rules from voice.md (encoded here as gate predicates):
-      1. raw_response must contain EITHER audio_bytes OR audio_path. Never
-         both. Never neither (unless explicitly text-only path).
+      1. A successful voice response's raw_response must contain EITHER
+         audio_bytes OR audio_path. Never both. Never neither.
       2. Forbidden keys (audio_url, audio_b64, audio_data, audio,
          audio_file) cause silent fall-through in the plugin.
     """
@@ -164,17 +164,16 @@ class VoiceHarnessGate(ContractGate):
         """Validate ``state`` (a harness response dict).
 
         Pass conditions:
-          * raw_response has either audio_bytes OR audio_path (not both).
+          * Failed voice calls return success=False cleanly, with or without audio.
+          * Successful voice calls have raw_response with either audio_bytes OR
+            audio_path (not both).
           * No forbidden keys.
 
         Fail conditions:
+          * Successful voice call has no raw_response audio evidence.
           * Both audio_bytes AND audio_path present.
           * Neither present AND a forbidden key is present (silent failure
-            mode the plugin can't recover from).
-
-        Pass-through (not a hard fail):
-          * Neither audio_bytes nor audio_path AND no forbidden keys —
-            the response is text-only, which is valid per voice.md rule 6.
+             mode the plugin can't recover from).
         """
         if not isinstance(state, dict):
             return GateResult.fail(
@@ -183,11 +182,16 @@ class VoiceHarnessGate(ContractGate):
                 state_type=type(state).__name__,
             )
 
+        if state.get("success") is False:
+            return GateResult.pass_(self.name, shape="clean_failure")
+
         raw_response = state.get("raw_response")
         if not isinstance(raw_response, dict):
-            # Text-only response with no raw_response is valid per
-            # voice.md rule 6 (text fallback path).
-            return GateResult.pass_(self.name, fallback="no raw_response (text-only)")
+            return GateResult.fail(
+                self.name,
+                "successful voice response has no raw_response audio evidence",
+                state_success=state.get("success"),
+            )
 
         has_bytes = "audio_bytes" in raw_response and raw_response.get("audio_bytes") is not None
         has_path = "audio_path" in raw_response and raw_response.get("audio_path") is not None
@@ -213,9 +217,16 @@ class VoiceHarnessGate(ContractGate):
                 forbidden_keys=sorted(forbidden_present),
             )
 
+        if not (has_bytes or has_path):
+            return GateResult.fail(
+                self.name,
+                "successful voice response has no audio_bytes or audio_path",
+                raw_response_keys=sorted(raw_response.keys()),
+            )
+
         return GateResult.pass_(
             self.name,
-            shape="A" if has_bytes else ("B" if has_path else "text"),
+            shape="A" if has_bytes else "B",
         )
 
 

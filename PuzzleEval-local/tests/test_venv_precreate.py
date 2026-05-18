@@ -339,16 +339,65 @@ class TestCreateVenvShortCircuits:
         sandbox_dir.mkdir(parents=True)
         _seed_existing_venv(sandbox_dir)
 
+        from unittest.mock import MagicMock
+        pip_ok = MagicMock(returncode=0, stderr="", stdout="pip 24.0")
         with patch(
             "puzzleeval.agents.implement_test_env.subprocess.run",
+            return_value=pip_ok,
         ) as mock_run:
             ok = _create_venv(sandbox_dir, quiet_logger, "trace-test", "TestCand")
 
         assert ok is True
-        mock_run.assert_not_called(), (
-            "Short-circuit failed — _create_venv ran subprocess.run "
+        venv_create_calls = [
+            call for call in mock_run.call_args_list
+            if "-m" in call.args[0] and "venv" in call.args[0]
+        ]
+        assert not venv_create_calls, (
+            "Short-circuit failed — _create_venv ran python -m venv "
             "even though the venv python already exists."
         )
+
+    def test_repairs_partial_venv_when_create_command_fails(
+        self, tmp_path, quiet_logger,
+    ):
+        """Windows+Anaconda can return non-zero from `python -m venv` while
+        still leaving a usable python.exe behind. If ensurepip can repair
+        pip, create_venv should treat the partial venv as usable instead of
+        surfacing an infrastructure false failure."""
+        from puzzleeval.agents.implement_test_env import _create_venv
+
+        sandbox_dir = tmp_path / "harnesses" / "partial_cand"
+        sandbox_dir.mkdir(parents=True)
+
+        from unittest.mock import MagicMock
+
+        def fake_run(cmd, *args, **kwargs):
+            result = MagicMock()
+            result.stderr = ""
+            result.stdout = ""
+            if "-m" in cmd and "venv" in cmd:
+                _seed_existing_venv(sandbox_dir)
+                result.returncode = 1
+                result.stderr = "ensurepip failed during venv creation"
+            elif "-m" in cmd and "pip" in cmd:
+                result.returncode = 0
+                result.stdout = "pip 24.0"
+            elif "-m" in cmd and "ensurepip" in cmd:
+                result.returncode = 0
+                result.stdout = "Successfully installed pip"
+            else:
+                result.returncode = 0
+            return result
+
+        with patch(
+            "puzzleeval.agents.implement_test_env.subprocess.run",
+            side_effect=fake_run,
+        ), patch.dict(
+            "os.environ", {"PUZZLEEVAL_VENV_PREINSTALL": "0"},
+        ):
+            ok = _create_venv(sandbox_dir, quiet_logger, "trace-test", "Partial")
+
+        assert ok is True
 
     def test_creates_fresh_venv_when_absent(
         self, tmp_path, quiet_logger,
@@ -504,10 +553,15 @@ class TestPipelineRunnerHookWired:
             "services" / "pipeline_runner.py"
         ).read_text(encoding="utf-8")
         # Find the user-selection branch's hook call
-        idx = src.find("_kick_off_venv_precreate(state, filtered_candidates)")
+        idx = src.find("_kick_off_venv_precreate(state, filtered_candidates")
         assert idx != -1, (
             "User-selection branch must pass `filtered_candidates` "
             "(post-Phase-6 filter) to the pre-create hook."
+        )
+        call_tail = src[idx:src.find("\n", idx)]
+        assert "runs_root=runs_dir" in call_tail, (
+            "Pre-create must use the same explicit runs root as Agent 4/5 "
+            "so venvs land in the candidate sandbox Agent 5 will use."
         )
 
 

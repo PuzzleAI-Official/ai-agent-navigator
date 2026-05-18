@@ -11,7 +11,7 @@
 
 ---
 
-## Current Architecture (2026-04-10)
+## Current Architecture (2026-05 recovery)
 
 ### Cleanup Boundary (2026-04-26)
 
@@ -40,20 +40,24 @@ Steps 3-4 are owned by Agent 5 because:
 ### The Flow Per Candidate
 
 ```
-Phase 1 (Sonnet 4.6): Server-side web_search/web_fetch for API docs → write api_spec.txt
-  ↓ [model switch when api_spec.txt written]
-Phase 2 (Opus 4.7): Build thin API client harness.py + smoke test (ask_research for debugging)
-  ↓ [smoke passes → milestone message]
-Phase 3 (Opus 4.7): Live API validation required (credentials + test files staged in sandbox)
-  ↓ [HARNESS_COMPLETE]
-Post-loop (Python, parallel across candidates): Run ALL test cases → LLM judge eval (raw response truncated to 15K) → aggregate metrics
+Agent 4 (Sonnet 4.6): verify the official docs entrypoint and lightweight
+  auth/access/pricing metadata.
+Orchestrator: select only Agent-4-validated, docs-ready, credential-ready
+  candidates for Agent 5 and persist agent5_candidate_selection.json.
+Agent 5 lead (Opus 4.7 from turn 0): start from docs_entrypoint, write
+  research_plan.json, fan out scoped Sonnet research workers, consolidate
+  research_synthesis.json, write implementation_plan.json, then build/debug
+  the harness after the implementation-plan gate accepts.
+Post-loop (Python, parallel across candidates): run test cases, judge raw
+  responses, and aggregate metrics.
 ```
 
 ### Model Strategy
-- **Sonnet 4.6** for Phase 1 research (server-side web_search/web_fetch, cheap, I/O-heavy)
-- **Opus 4.7** for Phase 2-3 build/validate (needs strong reasoning)
-- **Opus 4.7 Advisor** available in all phases via `advisor-tool-2026-03-01`
-- **Sonnet 4.6** for `ask_research` (Phase 2+ debugging, targeted web search, doesn't need Opus)
+- **Opus 4.7** for the Agent 5 lead from turn 0: research planning, synthesis, implementation planning, build, debug, and completion reasoning.
+- **Sonnet 4.6** only for bounded research workers: planned research tasks and scoped `ask_research`.
+- **Reviewer/advisor model** remains optional strategic review; use sparingly and do not treat it as the normal research path.
+- To change the lead model for emergency cost/capacity reasons, set
+  `PUZZLEEVAL_BUILDER_MODEL`; there is no supported model-transition path.
 
 ### Key Design Principles (Lessons Learned)
 1. **Thin API client, not full parser.** The harness sends requests and returns raw responses. The LLM judge handles all evaluation intelligence.
@@ -61,7 +65,7 @@ Post-loop (Python, parallel across candidates): Run ALL test cases → LLM judge
 3. **Let the agent do what it's good at.** Research, code, debug. Let infrastructure do loops and metrics.
 4. **Behavioral instructions over prescriptive rules.** Shape reasoning patterns, don't write recipes.
 5. **Live validation IS verification.** If the live API call works, accept the harness. No separate verification scripts or cosmetic code review.
-6. **Comprehensive research output.** api_spec.txt includes INPUT_COMPATIBILITY, ROUTING_TABLE, WORKING_EXAMPLE (any language — Python / curl / JS / Go / raw HTTP), DOC_REFERENCES, DOC_MAP, API_LIMITATIONS — everything downstream needs.
+6. **Comprehensive research output.** `_agent_state/research_synthesis.json` includes INPUT_COMPATIBILITY, ROUTING_TABLE, WORKING_EXAMPLES, ERRORS/LIMITS, SDK_PACKAGE, provider doc map, cited facts, assumptions, and risks; `_agent_state/implementation_plan.json` is the active build gate.
 7. **Context engineering.** `max_content_tokens: 15000` on web_fetch, server-side `clear_tool_uses` + `compact`, automatic prompt caching (83-86% hit rate).
 8. **Accurate cost tracking.** Uses `response.usage.iterations[]` to track executor vs advisor costs separately.
 9. **Credentials flow to build sandbox.** Test files staged before build, credentials injected into sandbox env vars. The builder agent can run live API calls during Phase 3.
@@ -73,12 +77,14 @@ Post-loop (Python, parallel across candidates): Run ALL test cases → LLM judge
 - `<do_not_re_read>` — don't re-read unchanged files
 - `<investigate_comprehensively>` — one comprehensive script, not five minimal ones
 - `<think_before_acting>` — verify unknowns before writing code
-- `<verify_against_docs>` — read code back and compare to api_spec before running
+- `<verify_against_docs>` — read code back and compare to research_synthesis, implementation_plan, and cited docs before running
 - `<reason_about_errors>` — reason about root cause, don't follow recipes
 - `<be_resourceful>` — create local files when URLs fail
 
 ### What Was Removed (and Why)
-- **Research sub-agent:** Merged into builder's Phase 1. Eliminates knowledge handoff loss.
+- **Broad research sub-agent:** Replaced by Agent-5-owned research planning
+  plus bounded Sonnet research workers whose findings persist to
+  `_agent_state/research_findings`.
 - **live_test_logic.py / live_test.py:** Replaced by Phase 3 live API validation with credentials injected into build sandbox.
 - **_inject_live_test_script / _run_live_validation:** Removed entirely. The agent validates with real API calls.
 - **Manual context reset (PLAN detection):** Replaced by server-side context management. No fragile keyword matching.
@@ -825,16 +831,15 @@ coding, making it easy to verify against the docs.
 1. WRITE harness.py implementing run() based on Phase 1 plan
 2. WRITE requirements.txt with pip dependencies
 3. RUN `pip install -r requirements.txt` (installs into the candidate's venv)
-4. WRITE smoke_test.py using the structural validation template
-5. RUN `python smoke_test.py`
-6. If it fails, read the error, fix the code, re-run, repeat
+4. OPTIONALLY write smoke_test.py only for fast offline mechanical checks
+5. Run the cheapest useful check, then validate the final harness on representative real inputs
 
 **PHASE 3: VALIDATE** — Live API validation required
 
 1. **LIVE VALIDATION**: Credentials are injected into the build sandbox as environment variables. Test files are staged in the sandbox before the build starts. The agent runs real API calls to validate the harness works end-to-end.
 2. If the live call fails (401 = wrong auth, 404 = wrong endpoint, 400 = wrong request format), fix the harness and re-run. `ask_research` is available for debugging.
 
-**Why credentials in the sandbox?** Credentials flow to the build sandbox so the agent can validate with real API calls during building, not just post-loop. Test files are also staged before the build so the agent can use them for live validation. Live validation IS verification — no separate verification scripts needed.
+**Why credentials in the sandbox?** Credentials flow to the build sandbox so the agent can validate with real API calls during building, not just post-loop. Test files are also staged before the build so the agent can use them for live validation. The production-equivalence proof is the final harness running representative Agent 3 test data through the evaluator/plugin path; smoke is only optional offline feedback.
 
 **PHASE 4: COMPLETION CHECKLIST** — Before signaling HARNESS_COMPLETE
 
@@ -844,8 +849,8 @@ Eight items Claude must mentally verify:
 3. Request body structure matches docs
 4. Response parsing handles the actual JSON structure from docs
 5. Error handling catches all exceptions, returns success=False, never raises
-6. smoke_test.py passes
-7. live_test.py passes (if it exists) OR live_test.py does not exist
+6. harness.py imports and exposes the required run(input_data) contract
+7. representative probe passes or records a genuine external provider block
 8. requirements.txt lists ALL dependencies
 
 If ANY item fails, Claude must go back and fix it. Do NOT signal complete with
@@ -867,8 +872,8 @@ has its own venv.
 hardcode keys, handle ALL errors, use requests/httpx/official SDK, measure
 latency, keep it simple, include docstring).
 
-**"## Smoke Test Template"** — A complete Python smoke test that Claude should
-adapt. Ensures every harness is validated against the SAME criteria.
+**"## Optional Smoke Check"** — Smoke can be used for offline mechanical checks
+only. It is not the completion proof and must not call live providers.
 
 **"## WHEN YOU HIT A BUG — Reference Chain"** — Teaches Claude to check fixes
 in cheapest-first order: (1) check PLAN notes (already in context), (2)
@@ -1017,15 +1022,16 @@ When Claude includes "HARNESS_COMPLETE" in its response:
          - success=True or soft error (400 = endpoint+auth work) -> PASS
          - Hard failure (401, 404, connection refused) -> FAIL
 
-  2. If issues found AND verification_attempts < MAX_VERIFICATION_RETRIES (2):
-     -> Format issues as a feedback message
-     -> Append to conversation: assistant response + user feedback
-     -> verification_attempts += 1
-     -> Continue loop (Claude fixes and re-signals)
+  2. If issues found:
+     -> Classify the current issue key (reflection_missing,
+        reflection_evidence, voice_live_contract, forensics_coverage, etc.)
+     -> If that current issue still has repair budget, append feedback
+        and continue loop (Claude fixes and re-signals)
+     -> If that same issue exhausted repair budget, reject the build
 
-  3. If no issues OR retries exhausted:
+  3. If no issues:
      -> Break loop
-     -> verification_passed = True if clean, False if retries exhausted
+     -> verification_passed = True
 ```
 
 ### Why Inside the Loop?
@@ -1299,8 +1305,12 @@ and 4 into a formatted markdown message.
 
 ### `_dispatch_tool(tool_name, tool_input, sandbox_dir) -> str`
 
-**Routes custom tool calls to their handlers.** Only handles tools in
-`CUSTOM_TOOL_NAMES` = {"write_file", "run_code", "read_file"}.
+**Routes custom tool calls to their handlers.** The canonical custom-tool
+policy lives in `agent5/tools.py::CUSTOM_TOOL_NAMES` and currently includes
+`write_file`, `patch_file`, `run_code`, `read_file`, `read_file_range`,
+`ask_research`, `read_forensics`, `summarize_forensics`, and
+`summarize_build_state`. Legacy wrappers must import that set rather than
+re-declaring it.
 
 ### `_tool_write_file(tool_input, sandbox_dir) -> str`
 
@@ -1412,7 +1422,7 @@ API docs pages) attempt to:
 
   Step 2: Check extension: "" not in ALLOWED_EXTENSIONS -> REJECTED
 
-  ALLOWED_EXTENSIONS = {".py", ".txt", ".json", ".cfg", ".toml", ".sh", ".yaml", ".yml"}
+  ALLOWED_EXTENSIONS = {".py", ".txt", ".json", ".cfg", ".toml", ".sh", ".yaml", ".yml", ".md"}
 
   Result: "Error: file extension '' not allowed."
 ```
@@ -1552,14 +1562,14 @@ variable override.
 ### AGENT5_BUILDER_MODEL
 
 ```
-Default: RESEARCH_MODEL (Sonnet 4.6)
+Default: claude-opus-4-7
 Env var: PUZZLEEVAL_BUILDER_MODEL
 ```
 
-The model used for the builder agent. Sonnet 4.6 was chosen because:
-- Same price as Sonnet 4.5 ($3/$15 per MTok)
-- Handles web content (fetched API docs) better than 4.5
-- Good at code generation (the primary task)
+The Agent 5 lead model. It is used from turn 0 for research planning,
+research synthesis, implementation planning, build, debug, and completion
+reasoning. Bounded research workers use `PUZZLEEVAL_RESEARCH_MODEL`
+instead.
 
 ### AGENT5_MAX_TURNS
 
@@ -1820,7 +1830,7 @@ work is fundamentally different.
 |---|---|---|
 | **Per-candidate work** | Single-shot: search + maybe fetch + verdict | Multi-turn: read docs, write code, test, verify, fix, repeat |
 | **API calls per candidate** | 1 (one client.messages.create) | 5-15 (multi-turn conversation loop with verification) |
-| **Tools** | web_search + web_fetch (server only) | web_search + web_fetch (server) + write_file + run_code + read_file (custom) |
+| **Tools** | web_search + web_fetch (server only) | web_search + web_fetch (server) + Agent 5 custom tools from `agent5/tools.py::CUSTOM_TOOL_NAMES` |
 | **Local side effects** | None (purely informational) | Creates venv, files on disk (harness.py, requirements.txt, smoke_test.py, live_test.py) |
 | **Verification** | N/A (single-shot) | In-loop verification gate with retries |
 | **Output determination** | Claude writes a text verdict, structuring call formats it | Programmatic: check harness.py on disk, read smoke test output, verification status |

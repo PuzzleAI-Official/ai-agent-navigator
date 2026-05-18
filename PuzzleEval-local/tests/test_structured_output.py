@@ -87,6 +87,8 @@ def test_strict_path_success_pass_through():
         output_format=_SmallResult, extra={"thinking": {"type": "adaptive"}},
     )
     assert out is expected_response
+    assert out.structured_output_telemetry["mode"] == "strict"
+    assert out.structured_output_telemetry["schema_repair_attempts"] == 0
     client.messages.parse.assert_called_once()
     client.messages.create.assert_not_called()
 
@@ -139,6 +141,68 @@ def test_fallback_validates_returned_json_through_pydantic():
     )
     assert isinstance(out.parsed_output, _SmallResult)
     assert out.parsed_output.note == "needs more info"
+
+
+def test_agent3_non_strict_serializes_structured_input_data_payloads():
+    """Strict grammar enforces Agent 3 string fields; non-strict must too.
+
+    Voice/conversation and webhook test cases often carry JSON text in
+    ``input_data``. If the non-strict tool emits the equivalent raw object,
+    TestCase normalizes it instead of crashing the whole test-generation
+    branch.
+    """
+    import json
+
+    from puzzleeval.schemas import Agent3GenerationResult
+
+    client = MagicMock()
+    client.messages.parse.side_effect = _make_grammar_400("compiled grammar is too large")
+    client.messages.create.return_value = _stub_tool_use_response(
+        {
+            "test_cases": [
+                {
+                    "id": "tc-voice-001",
+                    "sub_task_ref": "Handle inbound cafe calls",
+                    "scenario": "Caller asks about ordering by phone",
+                    "input_type": "voice_conversation",
+                    "input_data": {"shape": "twilio"},
+                    "input_context": {"instructions": "You are Bean & Brew."},
+                    "output_type": "voice_conversation",
+                    "expected_output": {"expected": "helpful voice response"},
+                    "judgement_criteria": [
+                        {
+                            "criterion": "Must answer the caller",
+                            "weight": 0.5,
+                            "eval_type": "semantic_similarity",
+                        },
+                        {
+                            "criterion": "Must stay within cafe policy",
+                            "weight": 0.5,
+                            "eval_type": "contains_key_info",
+                        },
+                    ],
+                    "difficulty": "easy",
+                    "tags": ["happy_path"],
+                    "evaluation_mode": "agentic",
+                }
+            ],
+            "generation_notes": "one case",
+            "coverage_summary": {"Handle inbound cafe calls": 1},
+        }
+    )
+
+    out = parse_with_fallback(
+        client=client,
+        model="x",
+        max_tokens=100,
+        system=[],
+        messages=[],
+        output_format=Agent3GenerationResult,
+    )
+
+    tc = out.parsed_output.test_cases[0]
+    assert json.loads(tc.input_data) == {"shape": "twilio"}
+    assert json.loads(tc.expected_output) == {"expected": "helpful voice response"}
 
 
 def test_fallback_drops_thinking_and_output_config():
@@ -363,6 +427,69 @@ def test_strict_path_gives_up_after_max_transient_retries(monkeypatch):
         )
     # Exactly _TRANSIENT_RETRY_MAX_ATTEMPTS calls
     assert client.messages.parse.call_count == so._TRANSIENT_RETRY_MAX_ATTEMPTS
+
+
+def test_transient_max_attempts_caps_strict_retry_count(monkeypatch):
+    """Long-running callers such as Agent 3 can reduce this module's outer
+    retry count so read timeouts don't multiply into many minutes of
+    repeated doomed calls."""
+    import puzzleeval.structured_output as so
+    monkeypatch.setattr(so, "_sleep", lambda *_a, **_k: None)
+
+    client = MagicMock()
+    client.messages.parse.side_effect = [_make_500() for _ in range(10)]
+    with pytest.raises(anthropic.InternalServerError):
+        parse_with_fallback(
+            client=client, model="claude-test", max_tokens=100,
+            system=[], messages=[], output_format=_SmallResult,
+            transient_max_attempts=2,
+        )
+    assert client.messages.parse.call_count == 2
+
+
+def test_strict_5xx_can_fall_back_to_non_strict_after_retry(monkeypatch):
+    """Large schemas can hit strict-parser server errors. Opted-in callers
+    should recover through the non-strict validated tool path instead of
+    failing the whole pipeline after strict retry exhaustion."""
+    import puzzleeval.structured_output as so
+    monkeypatch.setattr(so, "_sleep", lambda *_a, **_k: None)
+
+    client = MagicMock()
+    client.messages.parse.side_effect = [_make_500(), _make_500()]
+    client.messages.create.return_value = _stub_tool_use_response(
+        {"is_clear": True, "note": "fallback"}
+    )
+
+    out = parse_with_fallback(
+        client=client, model="claude-test", max_tokens=100,
+        system=[], messages=[], output_format=_SmallResult,
+        transient_max_attempts=2,
+        fallback_on_strict_transient_error=True,
+    )
+
+    assert out.parsed_output.is_clear is True
+    assert out.parsed_output.note == "fallback"
+    assert client.messages.parse.call_count == 2
+    client.messages.create.assert_called_once()
+
+
+def test_strict_5xx_does_not_fall_back_without_opt_in(monkeypatch):
+    """Default behavior stays unchanged for existing callers."""
+    import puzzleeval.structured_output as so
+    monkeypatch.setattr(so, "_sleep", lambda *_a, **_k: None)
+
+    client = MagicMock()
+    client.messages.parse.side_effect = [_make_500(), _make_500()]
+
+    with pytest.raises(anthropic.InternalServerError):
+        parse_with_fallback(
+            client=client, model="claude-test", max_tokens=100,
+            system=[], messages=[], output_format=_SmallResult,
+            transient_max_attempts=2,
+        )
+
+    assert client.messages.parse.call_count == 2
+    client.messages.create.assert_not_called()
 
 
 def test_non_transient_400_not_retried():
@@ -636,6 +763,37 @@ def test_pydantic_validation_failure_raises_structured_output_fallback_error():
     msg = str(ei.value)
     assert "pydantic validation failed" in msg
     assert "_SmallResult" in msg
+
+
+def test_non_strict_validation_failure_gets_one_schema_repair_retry():
+    """Malformed non-strict tool input gets one corrective retry.
+
+    This protects shared Agent 1/2/3 fallback calls from transient model
+    outputs like {"$PARAMETER_NAME": "unused"} after strict grammar fails.
+    """
+    client = MagicMock()
+    client.messages.create.side_effect = [
+        _stub_tool_use_response({"$PARAMETER_NAME": "unused"}),
+        _stub_tool_use_response({"is_clear": True, "note": "repaired"}),
+    ]
+
+    out = parse_with_fallback(
+        client=client, model="x", max_tokens=100,
+        system=[], messages=[{"role": "user", "content": "make result"}],
+        output_format=_SmallResult,
+        prefer_non_strict=True,
+    )
+
+    assert out.parsed_output.is_clear is True
+    assert out.parsed_output.note == "repaired"
+    assert out.structured_output_telemetry["mode"] == "non_strict"
+    assert out.structured_output_telemetry["schema_repair_attempts"] == 1
+    assert client.messages.create.call_count == 2
+    repair_messages = client.messages.create.call_args.kwargs["messages"]
+    assert "did not match the required structured output schema" in (
+        repair_messages[-1]["content"]
+    )
+    assert "$PARAMETER_NAME" in repair_messages[-1]["content"]
 
 
 def test_pydantic_validation_failure_includes_schema_name_in_error():

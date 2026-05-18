@@ -37,13 +37,17 @@ hard.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import random
 import time
 from typing import Any, Callable
 
-import anthropic
+try:
+    import anthropic
+except ModuleNotFoundError:  # pragma: no cover - exercised in minimal test envs
+    from puzzleeval.anthropic_client import anthropic  # type: ignore
 from pydantic import TypeAdapter
 
 logger = logging.getLogger(__name__)
@@ -110,6 +114,9 @@ _GRAMMAR_FALLBACK_TRIGGERS = (
 _TRANSIENT_RETRY_MAX_ATTEMPTS = 4   # after SDK's 3 = 7 total attempts
 _TRANSIENT_RETRY_BASE_DELAY_S = 4.0  # 4, 8, 16, 32s with jitter
 _TRANSIENT_RETRY_JITTER_S = 1.5
+_NON_STRICT_SCHEMA_REPAIR_ATTEMPTS = int(
+    os.environ.get("PUZZLEEVAL_STRUCTURED_OUTPUT_REPAIR_ATTEMPTS", "1")
+)
 
 
 def _is_transient_server_error(exc: Exception) -> bool:
@@ -282,6 +289,41 @@ def _unwrap_overnested_input(
     return tool_input
 
 
+def _compact_json_for_feedback(value: Any, *, limit: int = 1200) -> str:
+    try:
+        text = json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        text = repr(value)
+    if len(text) > limit:
+        return text[:limit] + "... [truncated]"
+    return text
+
+
+def _messages_with_schema_repair_feedback(
+    messages: list[dict[str, Any]],
+    *,
+    schema_name: str,
+    required_keys: set[str],
+    observed_input: Any,
+    validation_error: str,
+) -> list[dict[str, Any]]:
+    """Add one corrective turn for malformed non-strict tool output."""
+
+    required = ", ".join(sorted(required_keys)) or "(none)"
+    content = (
+        "Your previous forced tool call did not match the required structured "
+        f"output schema `{schema_name}`.\n\n"
+        f"Required top-level keys include: {required}.\n"
+        f"Validation error: {validation_error[:1200]}\n"
+        f"Previous tool input: {_compact_json_for_feedback(observed_input)}\n\n"
+        "Call the forced tool again with the actual result object. Do not use "
+        "placeholder keys such as `$PARAMETER_NAME`, do not wrap the result "
+        "under an extra key unless the schema explicitly requires it, and do "
+        "not emit prose outside the tool call."
+    )
+    return [*messages, {"role": "user", "content": content}]
+
+
 class _ShimResponse:
     """Mirrors the ``messages.parse`` response shape so callers don't branch."""
     parsed_output: Any = None
@@ -290,6 +332,41 @@ class _ShimResponse:
     id: str | None = None
     model: str = ""
     content: list[Any] = []
+    structured_output_telemetry: dict[str, Any] | None = None
+
+
+def _with_structured_output_telemetry(
+    response: Any,
+    telemetry: dict[str, Any],
+) -> Any:
+    """Attach parse-path metadata without changing caller-facing fields."""
+
+    try:
+        setattr(response, "structured_output_telemetry", telemetry)
+        return response
+    except Exception:
+        shim = _ShimResponse()
+        shim.parsed_output = getattr(response, "parsed_output", None)
+        shim.stop_reason = getattr(response, "stop_reason", None)
+        shim.usage = getattr(response, "usage", None)
+        shim.id = getattr(response, "id", None)
+        shim.model = getattr(response, "model", None)
+        shim.content = getattr(response, "content", None)
+        shim.structured_output_telemetry = telemetry
+        return shim
+
+
+def _extract_forced_tool_input(
+    raw: Any,
+    fallback_tool_name: str,
+) -> dict[str, Any] | None:
+    for block in (getattr(raw, "content", None) or []):
+        if (
+            getattr(block, "type", "") == "tool_use"
+            and getattr(block, "name", "") == fallback_tool_name
+        ):
+            return block.input  # type: ignore[return-value]
+    return None
 
 
 def _run_non_strict(
@@ -303,6 +380,9 @@ def _run_non_strict(
     extra: dict[str, Any],
     trace_id: str,
     fallback_tool_name: str,
+    transient_max_attempts: int = _TRANSIENT_RETRY_MAX_ATTEMPTS,
+    schema_repair_attempts: int = _NON_STRICT_SCHEMA_REPAIR_ATTEMPTS,
+    fallback_reason: str = "preferred_non_strict",
 ) -> Any:
     """Run the non-strict tool path and return a shim mirroring messages.parse.
 
@@ -333,6 +413,7 @@ def _run_non_strict(
         k: v for k, v in extra.items()
         if k not in ("output_config", "thinking")
     }
+    schema_required = set(schema.get("required") or [])
     # Wrap the non-strict path in the transient-5xx retry — Anthropic
     # blips happen on this path too.
     def _call():
@@ -347,8 +428,10 @@ def _run_non_strict(
         _call,
         operation_label="structured_output.non_strict",
         trace_id=trace_id,
+        max_attempts=transient_max_attempts,
     )
 
+    repair_attempts_used = 0
     tool_input: dict[str, Any] | None = None
     for block in (raw.content or []):
         if (
@@ -358,12 +441,57 @@ def _run_non_strict(
             tool_input = block.input  # type: ignore[assignment]
             break
     if tool_input is None:
-        raise StructuredOutputFallbackError(
-            f"non-strict path: model returned no `{fallback_tool_name}` "
-            f"tool_use block. stop_reason={getattr(raw, 'stop_reason', None)}"
-        )
+        if schema_repair_attempts > 0:
+            repair_attempts_used += 1
+            logger.warning(
+                "structured_output: non-strict returned no tool input; "
+                "retrying with repair feedback",
+                extra={
+                    "operation": "structured_output_non_strict_schema_repair",
+                    "trace_id": trace_id,
+                    "schema": output_format.__name__,
+                    "attempt": 1,
+                    "max_attempts": schema_repair_attempts + 1,
+                },
+            )
+            repair_messages = _messages_with_schema_repair_feedback(
+                messages,
+                schema_name=output_format.__name__,
+                required_keys=schema_required,
+                observed_input={"stop_reason": getattr(raw, "stop_reason", None)},
+                validation_error=(
+                    f"model returned no `{fallback_tool_name}` tool_use block"
+                ),
+            )
 
-    schema_required = set(schema.get("required") or [])
+            def _repair_call():
+                return client.messages.create(
+                    model=model, max_tokens=max_tokens,
+                    system=system, messages=repair_messages,
+                    tools=[tool_def],
+                    tool_choice={"type": "tool", "name": fallback_tool_name},
+                    **fallback_extra,
+                )
+
+            raw = _retry_transient(
+                _repair_call,
+                operation_label="structured_output.non_strict",
+                trace_id=trace_id,
+                max_attempts=transient_max_attempts,
+            )
+            for block in (raw.content or []):
+                if (
+                    getattr(block, "type", "") == "tool_use"
+                    and getattr(block, "name", "") == fallback_tool_name
+                ):
+                    tool_input = block.input  # type: ignore[assignment]
+                    break
+        if tool_input is None:
+            raise StructuredOutputFallbackError(
+                f"non-strict path: model returned no `{fallback_tool_name}` "
+                f"tool_use block. stop_reason={getattr(raw, 'stop_reason', None)}"
+            )
+
     tool_input = _unwrap_overnested_input(tool_input, schema_required, trace_id)
     # Defense against Python repr strings in array-typed fields. Cheap pass,
     # no-op when the model emits properly.
@@ -377,17 +505,99 @@ def _run_non_strict(
     # `pydantic.ValidationError` that would crash the agent. Defense in
     # depth — the strict-grammar path prevents this at the API level when
     # available; the non-strict path needs us to enforce it post-hoc.
+    parsed = None
+    validation_exc: Exception | None = None
     try:
         parsed = TypeAdapter(output_format).validate_python(tool_input)
     except Exception as exc:  # noqa: BLE001 — pydantic.ValidationError is the common case
+        validation_exc = exc
         # Truncate the error message — pydantic's full validation report
         # can be 1000+ chars listing every field issue. The first 500
         # chars give the caller enough to diagnose without flooding logs.
+        if repair_attempts_used < schema_repair_attempts:
+            repair_attempts_used += 1
+            logger.warning(
+                "structured_output: non-strict tool input failed schema "
+                "validation; retrying with repair feedback",
+                extra={
+                    "operation": "structured_output_non_strict_schema_repair",
+                    "trace_id": trace_id,
+                    "schema": output_format.__name__,
+                    "attempt": repair_attempts_used,
+                    "max_attempts": schema_repair_attempts + 1,
+                },
+            )
+            repair_messages = _messages_with_schema_repair_feedback(
+                messages,
+                schema_name=output_format.__name__,
+                required_keys=schema_required,
+                observed_input=tool_input,
+                validation_error=f"{type(exc).__name__}: {str(exc)}",
+            )
+
+            def _repair_call():
+                return client.messages.create(
+                    model=model, max_tokens=max_tokens,
+                    system=system, messages=repair_messages,
+                    tools=[tool_def],
+                    tool_choice={"type": "tool", "name": fallback_tool_name},
+                    **fallback_extra,
+                )
+
+            raw = _retry_transient(
+                _repair_call,
+                operation_label="structured_output.non_strict",
+                trace_id=trace_id,
+                max_attempts=transient_max_attempts,
+            )
+            repaired_input: dict[str, Any] | None = None
+            for block in (raw.content or []):
+                if (
+                    getattr(block, "type", "") == "tool_use"
+                    and getattr(block, "name", "") == fallback_tool_name
+                ):
+                    repaired_input = block.input  # type: ignore[assignment]
+                    break
+            if repaired_input is not None:
+                repaired_input = _unwrap_overnested_input(
+                    repaired_input, schema_required, trace_id
+                )
+                repaired_input = _coerce_repr_strings_to_lists(repaired_input)
+                try:
+                    parsed = TypeAdapter(output_format).validate_python(
+                        repaired_input
+                    )
+                    tool_input = repaired_input
+                except Exception as repair_exc:  # noqa: BLE001
+                    raise StructuredOutputFallbackError(
+                        f"non-strict path: pydantic validation failed for "
+                        f"{output_format.__name__}: "
+                        f"{type(repair_exc).__name__}: "
+                        f"{str(repair_exc)[:500]}"
+                    ) from repair_exc
+                else:
+                    repaired_input = None
+            if repaired_input is None and 'parsed' in locals():
+                pass
+            else:
+                raise StructuredOutputFallbackError(
+                    f"non-strict schema repair returned no valid "
+                    f"`{fallback_tool_name}` tool input. "
+                    f"stop_reason={getattr(raw, 'stop_reason', None)}"
+                ) from exc
+        else:
+            raise StructuredOutputFallbackError(
+                f"non-strict path: pydantic validation failed for "
+                f"{output_format.__name__}: {type(exc).__name__}: "
+                f"{str(exc)[:500]}"
+            ) from exc
+    if parsed is None:
         raise StructuredOutputFallbackError(
             f"non-strict path: pydantic validation failed for "
-            f"{output_format.__name__}: {type(exc).__name__}: "
-            f"{str(exc)[:500]}"
-        ) from exc
+            f"{output_format.__name__}: "
+            f"{type(validation_exc).__name__ if validation_exc else 'unknown'}: "
+            f"{str(validation_exc)[:500] if validation_exc else 'no parsed output'}"
+        ) from validation_exc
 
     shim = _ShimResponse()
     shim.parsed_output = parsed
@@ -396,6 +606,12 @@ def _run_non_strict(
     shim.id = getattr(raw, "id", None)
     shim.model = getattr(raw, "model", model)
     shim.content = getattr(raw, "content", [])
+    shim.structured_output_telemetry = {
+        "mode": "non_strict",
+        "schema": output_format.__name__,
+        "fallback_reason": fallback_reason,
+        "schema_repair_attempts": repair_attempts_used,
+    }
     return shim
 
 
@@ -411,6 +627,8 @@ def parse_with_fallback(
     trace_id: str = "",
     fallback_tool_name: str = "emit_result",
     prefer_non_strict: bool = False,
+    transient_max_attempts: int = _TRANSIENT_RETRY_MAX_ATTEMPTS,
+    fallback_on_strict_transient_error: bool = False,
 ) -> Any:
     """Strict-grammar parse with non-strict tool fallback on grammar errors.
 
@@ -423,16 +641,28 @@ def parse_with_fallback(
     ``prefer_non_strict`` (default False): when True, skips the strict
     attempt entirely and goes straight to the non-strict tool path.
     Use this for schemas KNOWN to overflow Anthropic's compiled-grammar
-    budget — currently `Agent2Result` and `Agent4Result` (the latter
-    with the BuildReadinessChecklist additions). Saves ~30-60s + one
+    budget — currently `Agent2Result` and `Agent4Result`. Saves ~30-60s + one
     doomed API call per invocation by skipping the strict attempt that
     will reliably 400 with "compiled grammar is too large." The
     non-strict path produces an identical shim object, so callers don't
     branch on the choice. Default unchanged: agents whose schemas fit
     strict (Agent 1, Agent 3, Agent 5 evaluator) benefit from strict's
     free correctness guarantees.
+
+    ``transient_max_attempts`` lets call sites cap this module's outer
+    retry loop. Use it for long-running single-shot generations where a
+    read timeout is more likely to mean "the request exceeded the call's
+    wall-clock budget" than a cheap transient blip worth retrying four
+    times.
+
+    ``fallback_on_strict_transient_error`` lets large structured-output
+    callers recover when Anthropic's strict grammar path repeatedly returns
+    server-side 5xx. The fallback only applies to status-style server errors,
+    not connection/read timeouts; we do not want a timed-out long request to
+    start another long request automatically.
     """
     extra = dict(extra or {})
+    fallback_reason = "strict_grammar_error"
 
     # ── Fast path: caller knows the schema overflows; skip strict ──
     if prefer_non_strict:
@@ -441,6 +671,7 @@ def parse_with_fallback(
             system=system, messages=messages,
             output_format=output_format, extra=extra,
             trace_id=trace_id, fallback_tool_name=fallback_tool_name,
+            transient_max_attempts=transient_max_attempts,
         )
 
     # Wrap the strict parse in a transient-error retry loop. This is the
@@ -455,10 +686,20 @@ def parse_with_fallback(
             **extra,
         )
     try:
-        return _retry_transient(
+        response = _retry_transient(
             _strict_call,
             operation_label="structured_output.strict_parse",
             trace_id=trace_id,
+            max_attempts=transient_max_attempts,
+        )
+        return _with_structured_output_telemetry(
+            response,
+            {
+                "mode": "strict",
+                "schema": output_format.__name__,
+                "fallback_reason": None,
+                "schema_repair_attempts": 0,
+            },
         )
     except anthropic.BadRequestError as exc:
         if not _should_fall_back(exc):
@@ -472,6 +713,26 @@ def parse_with_fallback(
                 "trace_id": trace_id,
             },
         )
+    except anthropic.APIStatusError as exc:
+        status = getattr(exc, "status_code", None)
+        if not (
+            fallback_on_strict_transient_error
+            and status is not None
+            and 500 <= status <= 599
+        ):
+            raise
+        logger.warning(
+            "structured_output: strict-grammar path returned server %s after "
+            "retry, falling back to non-strict tool",
+            status,
+            extra={
+                "operation": "structured_output_fallback_after_strict_5xx",
+                "trace_id": trace_id,
+                "status": status,
+                "error_type": type(exc).__name__,
+            },
+        )
+        fallback_reason = "strict_5xx"
 
     # ── Non-strict fallback path (after strict 400'd) ──
     return _run_non_strict(
@@ -479,6 +740,8 @@ def parse_with_fallback(
         system=system, messages=messages,
         output_format=output_format, extra=extra,
         trace_id=trace_id, fallback_tool_name=fallback_tool_name,
+        transient_max_attempts=transient_max_attempts,
+        fallback_reason=fallback_reason,
     )
 
 

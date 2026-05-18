@@ -10,9 +10,10 @@
 # structured output. Good descriptions = better results.
 # ============================================================================
 
+import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 # ============================================================================
@@ -841,8 +842,9 @@ class Agent2Input(BaseModel):
     )
 
 
+
 # ============================================================================
-# Phase 5: PricingBreakdown — structured pricing (populated by Phase 6.5)
+# Structured pricing metadata for selected candidates
 # ============================================================================
 # Agent 2's loose `pricing_model` / `pricing_details` strings are fine for
 # surveying the landscape but useless for "how much will this actually cost
@@ -850,15 +852,14 @@ class Agent2Input(BaseModel):
 # overage costs, and per-scope-unit rates when the provider charges
 # differently across scopes (e.g. OCR per page vs sync per event).
 #
-# Phase 6.5's 4B extraction populates this during deep-verify, at the
-# same time it extracts endpoints — no separate research call. For
-# candidates that never reach deep-verify (rejected, or user never picked
-# them), pricing_breakdown stays None and downstream falls back to the
-# legacy pricing_model / pricing_details strings.
+# Selected-candidate docs/access screening can populate this alongside
+# docs-entrypoint metadata. For candidates that never reach verification
+# (rejected, or user never picked them), pricing_breakdown stays None and
+# downstream falls back to the legacy pricing_model / pricing_details strings.
 #
 # The `sources` field is load-bearing: the UI surfaces it so users can
-# verify pricing themselves, and Phase 6.5's 4B prompt is instructed to
-# only populate a tier when it has a source URL backing it.
+# verify pricing themselves, and any pricing extraction should only populate
+# a tier when it has a source URL backing it.
 # ============================================================================
 
 
@@ -912,15 +913,15 @@ class PricingTier(BaseModel):
 
 class PricingBreakdown(BaseModel):
     """
-    Structured pricing for a candidate. Populated by Phase 6.5's 4B
-    extraction turn-phase; null for candidates never deep-verified.
+    Structured pricing for a candidate. Optional selected-candidate metadata;
+    null for candidates never verified.
     """
 
     tiers: list[PricingTier] = Field(
         description=(
             "Pricing tiers, ordered CHEAPEST FIRST. Must have at least one "
             "entry — a candidate that offers only 'enterprise contact sales' "
-            "should be REJECTED in Phase 6.5 as enterprise_only, not have an "
+            "should be rejected as enterprise_only, not have an "
             "empty tier list here."
         )
     )
@@ -985,7 +986,7 @@ class PricingBreakdown(BaseModel):
             'table), "medium" (tiers inferred from marketing copy or partial '
             'docs), "low" (couldn\'t find a pricing page; numbers are guesses '
             "from roundup articles). A run with many 'low' entries is a "
-            "signal that Phase 6.5's 4B pricing hunt is underperforming."
+            "signal that pricing research/extraction is underperforming."
         ),
     )
 
@@ -1004,8 +1005,8 @@ class PricingBreakdown(BaseModel):
 # Different APIs return results in fundamentally different shapes. A single
 # enum field cannot express "supports BOTH sync AND async" or "provides SSE
 # streaming for one endpoint but polling for another". The structured model
-# below lets Phase 6.5 populate whatever combination the actual docs describe.
-# Agent 5's harness template branches on these booleans to emit the right
+# below lets selected-candidate research populate whatever combination the
+# actual docs describe. Agent 5's harness template branches on these booleans to emit the right
 # client code (poll helper, SSE reader, webhook receiver stub, batch uploader).
 # ============================================================================
 
@@ -1013,7 +1014,7 @@ class PricingBreakdown(BaseModel):
 class UserSelectableParam(BaseModel):
     """A single call-level knob the user can tune on this API.
 
-    Captured per-candidate by Phase 6.5 (Agent 4). Agent 5 uses the full
+    Captured per-candidate from selected-candidate docs/research. Agent 5 uses the full
     param surface to generate test variations that exercise realistic user
     configurations, not just defaults.
     """
@@ -1131,8 +1132,8 @@ class UserAddedCandidate(BaseModel):
     api_docs_url: str | None = Field(
         default=None,
         description=(
-            "Optional URL to API docs. When provided, Phase 6.5's deep-verify "
-            "loop starts here. When null, Phase 6.5 does its own discovery "
+            "Optional URL to API docs. When provided, selected-candidate "
+            "docs-entrypoint verification starts here. When null, discovery "
             "pass via web_search."
         ),
     )
@@ -1298,7 +1299,7 @@ class Candidate(BaseModel):
 
     # ── Phase 4: arbitrary-coverage scope sets ──
     # These two fields are the contract between Agent 2 (dual search) and
-    # Phase 7 (per-scope top-K selection) / Phase 6.5 (deep verify). They
+    # Per-scope top-K selection / selected-candidate verification. They
     # replace the old concept of "workflow_role" / simple-grouping — every
     # candidate is just a coverage SET, arbitrary in shape.
     covers_step_ids: list[str] = Field(
@@ -1314,17 +1315,17 @@ class Candidate(BaseModel):
             "scope it claims. Dedup happens by candidate name: a tool "
             "surfaced in multiple searches merges its claimed scope sets. "
             "Empty frozenset for legacy flat flow (no blueprint, or dual "
-            "search disabled). Phase 6.5's Agent 4 deep-verify is "
-            "AUTHORITATIVE — it can remove unverifiable scopes from this "
-            "set and upgrade verified ones in coverage_confidence."
+            "search disabled). Selected-candidate verification can remove "
+            "unverifiable scopes from this set and upgrade verified ones in "
+            "coverage_confidence."
         ),
     )
     coverage_confidence: dict[str, str] = Field(
         default_factory=dict,
         description=(
             "Per-scope-id confidence tag. Values: 'claimed' (Agent 2's "
-            "initial guess from search snippets) or 'verified' (Phase "
-            "6.5 confirmed from docs). Keys align with covers_step_ids. "
+            "initial guess from search snippets) or 'verified' (confirmed "
+            "from selected-candidate docs/research). Keys align with covers_step_ids. "
             "All Agent 2 output is 'claimed'; the UI shows a small "
             "unverified dot next to such scopes so the user sees what "
             "still has to be validated. Empty dict mirrors empty "
@@ -1332,16 +1333,16 @@ class Candidate(BaseModel):
         ),
     )
 
-    # ── Phase 5: structured pricing (populated by Phase 6.5's 4B extraction) ──
-    # Agent 2 never fills this — it's None until Phase 6.5 deep-verifies the
+    # Structured pricing populated by selected-candidate metadata/research.
+    # Agent 2 never fills this - it's None until selected-candidate verification.
     # candidate. The legacy `pricing_model` / `pricing_details` strings above
-    # remain authoritative for candidates that never reach deep-verify.
+    # remain authoritative for candidates that never reach verification.
     pricing_breakdown: PricingBreakdown | None = Field(
         default=None,
         description=(
-            "Structured pricing populated by Phase 6.5's 4B extraction. "
+            "Structured pricing populated by selected-candidate metadata/research. "
             "None for Agent 2 output and for any candidate that never "
-            "reaches deep-verify (rejected, or user never picked them). "
+            "reaches verification/research (rejected, or user never picked them). "
             "When present, takes precedence over pricing_model / "
             "pricing_details for per-scope cost summaries and monthly "
             "budget estimates."
@@ -1349,7 +1350,7 @@ class Candidate(BaseModel):
     )
 
     # Interaction model — HOW the API returns results to the caller. Free-text
-    # enum-lite for Agent 2's best guess from snippets; Phase 6.5 captures the
+    # enum-lite for Agent 2's best guess from snippets; selected-candidate research captures the
     # richer structured form (see ScreenedCandidate.interaction_model). The
     # answer space for "how does this API deliver results" is open-ended —
     # sync, async-polling, webhook callback, SSE streaming, batch upload, event
@@ -1374,8 +1375,8 @@ class Candidate(BaseModel):
             "signal to select the WebSocket harness pattern instead of REST), "
             "'other' (Agent 2 saw evidence of a non-sync/non-polling pattern "
             "but lacks enough detail to characterize it from snippets), "
-            "'unknown' (insufficient signal). This is a HINT. Phase 6.5's "
-            "deep verify reads the real docs and populates the richer "
+            "'unknown' (insufficient signal). This is a HINT. "
+            "Selected-candidate research reads the real docs and populates the richer "
             "ScreenedCandidate.interaction_model. Agent 5 reads the rich form "
             "when available, this hint otherwise. Any string other than the "
             "six above is coerced to 'unknown' by the validator."
@@ -1571,6 +1572,16 @@ class Agent3Input(BaseModel):
             "generates test cases using them as inputs. When None or empty, "
             "Agent 3 generates synthetic text-based test data."
         )
+    )
+
+    business_fixture: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Canonical domain facts generated before Agent 3 when the task "
+            "depends on menu/prices/hours/policies/service areas. Agent 3 "
+            "must generate tests and rubrics against these facts instead of "
+            "inventing a parallel fixture."
+        ),
     )
 
 
@@ -2049,6 +2060,8 @@ class TestCase(BaseModel):
     input_data: str = Field(
         description=(
             "The actual test input content, always as text. "
+            "When the test payload is structured, this must be a JSON-encoded "
+            "string rather than a raw object. "
             "For text-based tests: the synthetic input (chat message, query, data). "
             "For file-based tests: text description of the file content "
             "(extracted by reading the user's uploaded file). Used as context "
@@ -2103,10 +2116,28 @@ class TestCase(BaseModel):
     expected_output: str = Field(
         description=(
             "The ground truth / ideal response. For structured outputs, this "
-            "is the expected JSON. For free text, this is an ideal response "
-            "that Agent 7 compares against using the judgement criteria."
+            "is expected JSON encoded as a string. For free text, this is an "
+            "ideal response that Agent 7 compares against using the judgement "
+            "criteria."
         )
     )
+
+    @field_validator("input_data", "expected_output", mode="before")
+    @classmethod
+    def _coerce_structured_payload_to_json_string(cls, value: Any) -> Any:
+        """Keep Agent 3's public contract stable across strict/non-strict paths.
+
+        ``input_data`` and ``expected_output`` are text fields, but many
+        modalities use JSON text inside those fields. Anthropic's strict
+        structured-output path enforces the string type. The non-strict tool
+        fallback can emit the semantically equivalent raw JSON object/list, so
+        serialize only those structured values here. Other scalar mismatches
+        still fail Pydantic validation.
+        """
+
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, sort_keys=True)
+        return value
 
     # ── Judgement ──
 
@@ -2138,11 +2169,12 @@ class TestCase(BaseModel):
     #
     #   - If `evaluation_mode` is "agentic" AND persona+goal+rubric are
     #     populated → run user_simulator + rubric_judge
-    #   - If `evaluation_mode` is "scripted" → use legacy input_data
-    #     static-script path (preserves today's behavior)
+    #   - If `evaluation_mode` is "scripted" → use input_data
+    #     static-script path; deterministic checks are evidence signals
+    #     and production evaluators can require semantic review
     #   - If unset, plugin AUTO-DETECTS: persona+goal+rubric present →
-    #     agentic; static-script present → scripted; else substring-match
-    #     fallback on expected_output
+    #     agentic; static-script present → scripted; else legacy simple
+    #     expected_output evidence check
 
     persona: Persona | None = Field(
         default=None,
@@ -2187,13 +2219,13 @@ class TestCase(BaseModel):
     )
 
     max_turns: int = Field(
-        default=6,
+        default=4,
         description=(
             "Hard cap on conversation length. Plugin breaks loop when "
             "turn_index reaches this, forcing a max_turns end_reason. "
             "Tuning: shorter scopes (info requests) use 3-4; complex "
-            "scopes (booking flows) use 6-8. Clamped by "
-            "CONVERSATION_MAX_TURNS_CEILING config (default 12)."
+            "scopes use 5-6 only when the scenario truly requires it. "
+            "Clamped by CONVERSATION_MAX_TURNS_CEILING config (default 6)."
         ),
     )
 
@@ -2221,8 +2253,8 @@ class TestCase(BaseModel):
             "compat only, for existing test fixtures that pre-date the "
             "agentic pipeline. 'auto' (default) = plugin picks based on "
             "which fields are populated: persona+goal+rubric → agentic; "
-            "static script → scripted; neither → legacy substring on "
-            "expected_output. Overridden by "
+            "static script → scripted; neither → legacy expected_output "
+            "evidence check. Overridden by "
             "PUZZLEEVAL_CONVERSATION_EVAL_MODE env when set."
         ),
     )
@@ -2288,15 +2320,20 @@ class TestCase(BaseModel):
         return self
 
 
-class Agent3Result(BaseModel):
+class Agent3GenerationResult(BaseModel):
     """
-    Agent 3's complete output. Contains test cases ready for
-    Agent 5 (Integration) to run against candidate AI services.
+    Agent 3's LLM-emitted output. This is intentionally limited to fields
+    Claude should generate.
 
     WHY DYNAMIC COUNT?
     Fixed counts (like 20) undertest complex requests and overtest simple
     ones. We scale with sub-task count: 5-8 cases per sub-task, with
     bonus cases when workflow data is available for grounding.
+
+    NOTE: Do not add orchestrator-owned metadata here. In particular,
+    business_fixture stays on Agent3Input/Agent3Result only. Adding an
+    arbitrary dict[str, Any] to this schema creates an open-ended structured
+    output grammar and can make Agent 3 slower or flakier.
     """
 
     test_cases: list[TestCase] = Field(
@@ -2329,6 +2366,47 @@ class Agent3Result(BaseModel):
     )
 
 
+class Agent3Result(Agent3GenerationResult):
+    """
+    Agent 3's complete persisted output. Contains generated test cases plus
+    orchestrator-owned metadata used by Agent 5 and reporting.
+    """
+
+    business_fixture: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Canonical fixture used while generating these tests. Agent 5 "
+            "stages the same fixture so live tests, objectives, and rubrics "
+            "share one source of truth."
+        ),
+    )
+
+    structured_output_mode: str | None = Field(
+        default=None,
+        description=(
+            "Internal telemetry for how Agent 3 parsed the model response: "
+            "'strict' when Anthropic grammar-constrained output succeeded, "
+            "or 'non_strict' when the tool fallback path was used."
+        ),
+    )
+
+    structured_output_fallback_reason: str | None = Field(
+        default=None,
+        description=(
+            "Internal telemetry explaining why non-strict structured output "
+            "was used, for example strict_grammar_error or strict_5xx."
+        ),
+    )
+
+    structured_output_schema_repair_attempts: int = Field(
+        default=0,
+        description=(
+            "Internal telemetry: number of corrective retries needed after "
+            "the non-strict tool path returned missing or schema-invalid input."
+        ),
+    )
+
+
 # ============================================================================
 # Agent 4 Input Schema
 # ============================================================================
@@ -2355,417 +2433,14 @@ class Agent4Input(BaseModel):
         description="UUID for correlating logs across the entire pipeline"
     )
 
-
-# ============================================================================
-# Build-Readiness Checklist (Agent 4 → Agent 5 handoff contract)
-# ============================================================================
-# The checklist is the structured artifact that flows from Agent 4 to
-# Agent 5 alongside (and eventually replacing) the unstructured doc dump.
-# It answers the only question that matters at the handoff: "do we have
-# what a HARNESS BUILDER needs?"
-#
-# Design principles:
-#   - Enumerable. Ten fields cover every question a builder must answer
-#     to write working code. New questions = new fields, not new
-#     branching logic.
-#   - Status is first-class. Each field carries `confirmed | inferred |
-#     unknown`; "we don't know" is a legitimate, recorded answer (not a
-#     silent gap that surfaces later as a mystery test failure).
-#   - Source-anchored. Every `confirmed` field MUST carry a source_url
-#     pointing at the doc that confirms it; Agent 5 can cross-check.
-#   - Per-test-case relevance. Agent 5 doesn't need every field for
-#     every test — a 2-second sync read needs four; an async streaming
-#     test with retry needs more. The checklist enumerates what's
-#     POSSIBLE; Phase B in Agent 5 enumerates what's NEEDED here-and-now.
-#   - Sentinel-friendly. When Agent 4 fails (parse error / crash /
-#     timeout), `default_unknown_checklist()` returns an all-`unknown`
-#     fallback so Agent 5 can still proceed in full-research mode.
-#     Rejecting candidates for system failure is forbidden.
-#
-# See PLAN_AGENT5_RESEARCH_AGENCY.md for the full design rationale.
-# ============================================================================
-
-
-class EndpointSummary(BaseModel):
-    """One endpoint in a provider's API surface, as seen by Agent 4."""
-
-    name: str = Field(
-        description=(
-            "Short identifier of the endpoint, e.g., 'POST /v1/audio/speech', "
-            "'WebSocket /v1/realtime', 'sdk.transcribe.start()'. Use the "
-            "form the docs use; this is for reading, not parsing."
-        ),
-    )
-
-    purpose: str = Field(
-        description=(
-            "One-sentence description of what this endpoint does. "
-            "Example: 'Synthesize speech from text input, returns audio bytes.'"
-        ),
-    )
-
-    relevance_to_use_case: Literal["primary", "alternative", "unrelated"] = Field(
-        description=(
-            "How this endpoint relates to the workflow step we're verifying. "
-            "'primary' = best fit and the one we selected. "
-            "'alternative' = could plausibly cover the same step but we picked "
-            "another. 'unrelated' = exists in this provider's surface but "
-            "doesn't cover the step (still listed for reviewer transparency)."
-        ),
-    )
-
-    selection_note: str | None = Field(
+    runs_root: str | None = Field(
         default=None,
         description=(
-            "Optional one-line note on WHY this endpoint was chosen / "
-            "rejected. For 'primary': 'matches use case best because X'. "
-            "For 'alternative': 'rejected because X'. For 'unrelated': "
-            "may be omitted or note 'unrelated, listed for completeness'."
+            "Optional absolute/relative runs directory used by API orchestrators. "
+            "When omitted, Agent 4 writes docs handoff artifacts under ./runs."
         ),
     )
 
-
-class FieldStatus(BaseModel):
-    """One build-readiness field's value and provenance.
-
-    The status enum is first-class. `unknown` is a legitimate, recorded
-    answer that flows downstream — not a silent gap.
-    """
-
-    status: Literal["confirmed", "inferred", "unknown"] = Field(
-        description=(
-            "How well this field is known. "
-            "'confirmed' = answered from authoritative docs with source_url. "
-            "'inferred' = best guess from available context, with reasoning. "
-            "'unknown' = explicitly flagged; docs didn't cover it."
-        ),
-    )
-
-    value: str | None = Field(
-        default=None,
-        description=(
-            "The actual content when known (status='confirmed' or 'inferred'). "
-            "May be a short string ('Bearer token in Authorization header') or "
-            "a longer JSON skeleton ('{\"model\":\"...\",\"messages\":[...]}'). "
-            "Null when status='unknown'."
-        ),
-    )
-
-    source_url: str | None = Field(
-        default=None,
-        description=(
-            "Authoritative doc URL backing this field when status='confirmed'. "
-            "Optional for 'inferred' (where reasoning matters more than source). "
-            "Null for 'unknown'. Agent 5 can cross-check the URL contents "
-            "against `value` to spot stale or hallucinated confirmations."
-        ),
-    )
-
-    reasoning: str | None = Field(
-        default=None,
-        description=(
-            "Why this field is 'inferred' or 'unknown'. For 'inferred': what "
-            "evidence supported the guess. For 'unknown': why the docs didn't "
-            "answer ('docs paywalled', 'not documented in any reference page', "
-            "'sparse SDK-only docs without HTTP-level detail'). Optional but "
-            "strongly encouraged for non-confirmed states."
-        ),
-    )
-
-
-class BuildReadinessChecklist(BaseModel):
-    """The Agent 4 → Agent 5 contract: provider surface + ten build-readiness fields.
-
-    Populated incrementally:
-      - Agent 4 fills `provider_surface`, `selection_justification`, and as
-        many of the ten fields as it can from authoritative docs.
-      - Agent 5 inherits the checklist, identifies which fields its specific
-        test case needs (Phase B trigger rules), researches gaps to flip
-        `unknown` → `confirmed`, and updates the checklist in place.
-
-    Field ordering reflects the natural authoring flow: surface first
-    (what can this provider do at all?), then the four non-negotiables
-    (the four checks that determine "can we make a successful call at
-    all?"), then the conditional six (only matter for some test cases).
-    """
-
-    # ── Provider capability surface (Agent 4 fills) ─────────────────────────
-
-    provider_surface: list[EndpointSummary] = Field(
-        default_factory=list,
-        description=(
-            "All endpoints in this provider's API surface that plausibly relate "
-            "to the user's use case, with `relevance_to_use_case` tagging which "
-            "is primary, which are alternatives, which are unrelated. At least "
-            "one entry SHOULD be tagged 'primary'. Empty list signals Agent 4 "
-            "couldn't survey the surface (rare; usually means docs were "
-            "completely inaccessible)."
-        ),
-    )
-
-    selected_endpoint: str = Field(
-        default="",
-        description=(
-            "The endpoint name (matching one entry in `provider_surface`) "
-            "Agent 4 picked as the primary candidate for this workflow step. "
-            "Empty string when no primary endpoint could be selected."
-        ),
-    )
-
-    selection_justification: str = Field(
-        default="",
-        description=(
-            "One-paragraph explanation of WHY `selected_endpoint` was chosen "
-            "over the alternatives in `provider_surface`. Should reference "
-            "the workflow step's role and any relevant alternatives. Empty "
-            "when no selection was possible."
-        ),
-    )
-
-    # ── Build-readiness fields (Agent 4 best-effort; Agent 5 closes gaps) ──
-    # The first four are NON-NEGOTIABLE for Agent 4: a candidate must
-    # have these `confirmed` to be passed to Agent 5 as a Verified Pass.
-    # If they can't be confirmed, the candidate routes to Inconclusive
-    # (still passed through; Agent 5 attempts its own research).
-
-    endpoint_path: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "Where to send the request. Concrete URL or URL template "
-            "('https://api.example.com/v1/foo' or 'wss://stream.example.com'). "
-            "NON-NEGOTIABLE: must be 'confirmed' for Verified Pass."
-        ),
-    )
-
-    auth_method: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "How to authenticate the request. Examples: 'Bearer token in "
-            "Authorization header', 'X-API-Key header', 'OAuth2 client_credentials "
-            "with scope X'. NON-NEGOTIABLE: must be 'confirmed' for Verified Pass."
-        ),
-    )
-
-    request_body_shape: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "JSON skeleton of a valid request body (or multipart form-field "
-            "list, or query-param list, depending on the API). NON-NEGOTIABLE: "
-            "must be 'confirmed' for Verified Pass."
-        ),
-    )
-
-    response_body_shape: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "JSON skeleton of a successful response, including the path to "
-            "the primary output field. NON-NEGOTIABLE: must be 'confirmed' "
-            "for Verified Pass."
-        ),
-    )
-
-    # ── Conditional fields (only required when the test case exercises them) ──
-    # See Agent 5 Phase B trigger rules in implement_test_env.py.
-
-    auth_refresh: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "How to refresh / rotate auth if the test runs long. Examples: "
-            "'OAuth refresh_token at /oauth/token', 'API key static (no refresh)'. "
-            "Required only when test sessions exceed ~10 min."
-        ),
-    )
-
-    error_response_schema: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "Shape of common 4xx / 5xx error responses, at minimum the auth "
-            "401 and rate-limit 429 cases. Required when the test case "
-            "exercises retry or failure paths."
-        ),
-    )
-
-    rate_limit_signal: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "How the API signals rate limiting: header name (X-RateLimit-Remaining, "
-            "Retry-After), 429 status, custom error code. Required when the test "
-            "case exercises retry behavior or runs at non-trivial throughput."
-        ),
-    )
-
-    async_pattern: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "Sync, polling, streaming, or webhook? Plus the protocol details: "
-            "for polling, the status endpoint and poll cadence; for streaming, "
-            "the chunk format (SSE 'data:' lines, JSON-per-line, WebSocket "
-            "frames); for webhook, the callback URL convention. Required when "
-            "the API is async or streaming."
-        ),
-    )
-
-    content_type_quirks: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "Non-standard content-type details: multipart/form-data field names, "
-            "SSE framing, binary content boundaries, application/x-ndjson "
-            "expectations. Required when the API uses non-JSON content types or "
-            "has framing quirks."
-        ),
-    )
-
-    sandbox_availability: FieldStatus = Field(
-        default_factory=lambda: FieldStatus(status="unknown"),
-        description=(
-            "Sandbox / test base URL when the candidate has side-effects "
-            "(creates / modifies / deletes records). Examples: 'sandbox.api.com', "
-            "'dashboard test mode'. Required when the candidate's matched "
-            "workflow step has side_effects != 'read_only'."
-        ),
-    )
-
-    # ── Meta ────────────────────────────────────────────────────────────────
-
-    populated_by: Literal[
-        "agent_4",
-        "agent_5",
-        "agent_5_after_research",
-        "system_failure",
-    ] = Field(
-        default="agent_4",
-        description=(
-            "Provenance: which agent wrote this checklist last. "
-            "'agent_4' = initial population from screening. "
-            "'agent_5' = inherited unchanged. "
-            "'agent_5_after_research' = Agent 5 researched gaps and updated. "
-            "'system_failure' = Agent 4 sentinel after parse/crash/timeout; "
-            "Agent 5 should treat as full-research starting state."
-        ),
-    )
-
-    last_updated_at: str = Field(
-        default="",
-        description=(
-            "ISO 8601 timestamp of the last update to this checklist. Empty "
-            "string allowed for cached / pre-checklist runs."
-        ),
-    )
-
-    # ── Helpers (not serialized; not Pydantic Fields) ───────────────────────
-
-    def is_verified_pass(self) -> bool:
-        """True when the four non-negotiables are all `confirmed`."""
-        return all(
-            getattr(self, name).status == "confirmed"
-            for name in (
-                "endpoint_path",
-                "auth_method",
-                "request_body_shape",
-                "response_body_shape",
-            )
-        )
-
-    def has_provider_surface(self) -> bool:
-        """True when `provider_surface` has at least one 'primary' entry
-        AND `selection_justification` is non-empty."""
-        if not self.selection_justification.strip():
-            return False
-        return any(
-            ep.relevance_to_use_case == "primary"
-            for ep in self.provider_surface
-        )
-
-    def fields_with_status(self, status: str) -> list[str]:
-        """Return the names of build-readiness fields with a given status.
-        Used by Agent 5 Phase B to identify which fields are gaps for THIS
-        test case."""
-        names = (
-            "endpoint_path",
-            "auth_method",
-            "auth_refresh",
-            "request_body_shape",
-            "response_body_shape",
-            "error_response_schema",
-            "rate_limit_signal",
-            "async_pattern",
-            "content_type_quirks",
-            "sandbox_availability",
-        )
-        return [n for n in names if getattr(self, n).status == status]
-
-
-# Names of the four non-negotiable build-readiness fields. Centralized
-# so prompts, validators, and Agent 5 trigger rules all read the same
-# truth (no drift across consumers).
-NON_NEGOTIABLE_FIELDS: tuple[str, ...] = (
-    "endpoint_path",
-    "auth_method",
-    "request_body_shape",
-    "response_body_shape",
-)
-
-# Names of the conditional fields (the six that only matter for some
-# test cases). Phase B trigger rules in Agent 5 decide when each fires.
-CONDITIONAL_FIELDS: tuple[str, ...] = (
-    "auth_refresh",
-    "error_response_schema",
-    "rate_limit_signal",
-    "async_pattern",
-    "content_type_quirks",
-    "sandbox_availability",
-)
-
-# All ten build-readiness field names in canonical order. The order is
-# load-bearing for prompts and tests — non-negotiables first, then the
-# conditionals.
-BUILD_READINESS_FIELDS: tuple[str, ...] = NON_NEGOTIABLE_FIELDS + CONDITIONAL_FIELDS
-
-
-def default_unknown_checklist(
-    reason: str = "agent 4 produced no parseable checklist",
-    populated_by: Literal[
-        "agent_4",
-        "agent_5",
-        "agent_5_after_research",
-        "system_failure",
-    ] = "system_failure",
-) -> BuildReadinessChecklist:
-    """Build an all-`unknown` sentinel checklist.
-
-    Used when Agent 4's structured output couldn't be parsed (malformed
-    JSON, missing fields), when Agent 4 crashed, or when Agent 4 timed
-    out. The candidate is NEVER rejected for system failure (per the
-    three-state rejection model in PLAN_AGENT5_RESEARCH_AGENCY.md §Q4):
-    instead, this sentinel checklist propagates and Agent 5 falls back
-    to full-research mode.
-
-    `reason` is recorded as the `reasoning` on every field so Agent 5
-    can see why the checklist is empty.
-    """
-    fs = lambda: FieldStatus(status="unknown", reasoning=reason)  # noqa: E731
-    return BuildReadinessChecklist(
-        provider_surface=[],
-        selected_endpoint="",
-        selection_justification="",
-        endpoint_path=fs(),
-        auth_method=fs(),
-        auth_refresh=fs(),
-        request_body_shape=fs(),
-        response_body_shape=fs(),
-        error_response_schema=fs(),
-        rate_limit_signal=fs(),
-        async_pattern=fs(),
-        content_type_quirks=fs(),
-        sandbox_availability=fs(),
-        populated_by=populated_by,
-        last_updated_at="",
-    )
-
-
-# ============================================================================
-# Agent 4 Output Schemas
-# ============================================================================
 
 class ScreenedCandidate(BaseModel):
     """
@@ -2837,9 +2512,10 @@ class ScreenedCandidate(BaseModel):
     verified_api_docs_url: str = Field(
         description=(
             "The URL to API documentation that was CONFIRMED to exist and contain "
-            "real API documentation (endpoints, authentication, SDKs). This URL "
-            "was verified by fetching or searching during screening. Agent 5 uses "
-            "this as its starting point for building test harnesses."
+            "real API documentation (endpoints, authentication, SDKs) by a "
+            "successful fetch during screening. Search snippets may suggest what "
+            "to fetch, but they are not enough to populate this field. Agent 5 "
+            "uses this as its starting point for building test harnesses."
         )
     )
 
@@ -2901,22 +2577,12 @@ class ScreenedCandidate(BaseModel):
         )
     )
 
-    # ── Phase 6.5: deep-verify enrichments ──
-    api_spec_path: str | None = Field(
-        default=None,
-        description=(
-            "Absolute path to api_spec.txt produced by Phase 6.5 deep-verify. "
-            "Agent 5 reads this at build time instead of re-researching. "
-            "None for candidates not deep-verified (rejected or never selected)."
-        ),
-    )
-
     covers_step_ids: list[str] = Field(
         default_factory=list,
         description=(
-            "Blueprint step IDs this candidate covers. Phase 6.5 OVERWRITES "
-            "with verified truth — scopes that couldn't be verified in 4C "
-            "are REMOVED from this list. Empty list for legacy flow. "
+            "Blueprint step IDs this candidate covers. Selected-candidate "
+            "verification writes verified truth; scopes that cannot be "
+            "verified are REMOVED from this list. Empty list for legacy flow. "
             "Stored as list[str] (not frozenset/set) because LLM structured "
             "output can't natively emit frozensets — JSON Schema only knows "
             "arrays. Caller-side de-dup is enforced by validators.py."
@@ -2927,23 +2593,20 @@ class ScreenedCandidate(BaseModel):
         default_factory=dict,
         description=(
             "Per-scope confidence: 'claimed' (from Agent 2) or 'verified' "
-            "(confirmed by Phase 6.5's 4C). Keys align with covers_step_ids."
+            "(confirmed by selected-candidate docs/research). Keys align with covers_step_ids."
         ),
     )
 
-    # ── Phase 5: structured pricing (populated by Phase 6.5's 4B extraction) ──
-    # When Phase 6.5 lands, 4B extracts pricing at the same time as endpoints
-    # (same provider domain, often same page). Until 6.5 is live this stays
-    # None on every ScreenedCandidate — the field exists so consumers don't
-    # have to null-check against a missing attribute, only against a None
-    # value.
+    # Structured pricing, when selected-candidate metadata/research finds it.
+    # None is valid; the field exists so consumers don't have to null-check
+    # against a missing attribute, only against a None value.
     pricing_breakdown: PricingBreakdown | None = Field(
         default=None,
         description=(
-            "Structured pricing. Populated by Phase 6.5's 4B extraction "
-            "turn-phase at the same time as endpoints. None when the "
-            "pricing page couldn't be found or parsed, when Phase 6.5 "
-            "hasn't shipped yet, or when the candidate predates Phase 5."
+            "Structured pricing. Populated by selected-candidate "
+            "metadata/research when pricing is found. None when the "
+            "pricing page couldn't be found or parsed, or when the "
+            "candidate predates this metadata."
         ),
     )
 
@@ -2966,7 +2629,7 @@ class ScreenedCandidate(BaseModel):
     )
 
     # Structured interaction model — how this API delivers results. Populated
-    # by Phase 6.5. When both this field AND the cruder
+    # by selected-candidate metadata/research. When both this field AND the cruder
     # Candidate.api_interaction_pattern_hint are present, Agent 5's harness
     # template reads THIS one (richer, comes from real docs).
     interaction_model: InteractionModel = Field(
@@ -2974,8 +2637,9 @@ class ScreenedCandidate(BaseModel):
         description=(
             "Structured flags describing how the API delivers results. "
             "Multiple flags can be True when different endpoints use "
-            "different patterns. Default all-False means Phase 6.5 didn't "
-            "populate it and Agent 5 should fall back to the cruder hint."
+            "different patterns. Default all-False means selected-candidate "
+            "metadata/research didn't populate it and Agent 5 should fall "
+            "back to the cruder hint."
         ),
     )
 
@@ -2986,7 +2650,7 @@ class ScreenedCandidate(BaseModel):
         description=(
             "All documented call-level knobs the user can tune. Empty list "
             "when the API has no tunable params beyond input data, or when "
-            "Phase 6.5 couldn't fetch full docs. Applies to every API class "
+            "full docs could not be fetched. Applies to every API class "
             "(OCR region, transcription language, translation formality, "
             "image size/quality, chat temperature, code-gen variant, etc.)."
         ),
@@ -2996,7 +2660,7 @@ class ScreenedCandidate(BaseModel):
     sandbox_available: bool = Field(
         default=False,
         description=(
-            "True when Phase 6.5 found a documented sandbox / test / "
+            "True when selected-candidate verification found a documented sandbox / test / "
             "dev-mode base URL for this API (Stripe, Plaid, QuickBooks all "
             "expose one). Populated only for candidates whose matched "
             "workflow step has side_effects != 'read_only'. Agent 5 "
@@ -3013,30 +2677,6 @@ class ScreenedCandidate(BaseModel):
             "sandbox_available=False or when docs weren't discoverable."
         ),
     )
-
-    # ── Build-readiness checklist (Agent 4 → Agent 5 contract) ──────────
-    # Populated by Agent 4's verification call. Optional for back-compat:
-    # cached candidates from runs predating this schema parse fine. When
-    # None, Agent 5 treats the candidate as "Agent 4 didn't run" and
-    # falls back to full-research mode (same behavior as the prior
-    # density-injection era). When present, Agent 5 reads it during
-    # Phase A (Inventory) and uses Phase B trigger rules to identify
-    # which `unknown` / `inferred` fields actually matter for the test
-    # case being built. See PLAN_AGENT5_RESEARCH_AGENCY.md.
-    checklist: BuildReadinessChecklist | None = Field(
-        default=None,
-        description=(
-            "Structured handoff to Agent 5: provider surface + ten "
-            "build-readiness fields (each with confirmed/inferred/unknown "
-            "status). Populated by Agent 4 during verification. None for "
-            "candidates from runs predating the checklist schema; Agent 5 "
-            "treats None as 'do full research'. When present, Agent 5 "
-            "reads it during Phase A and updates `unknown` fields it "
-            "researches in Phase C (setting populated_by to "
-            "'agent_5_after_research')."
-        ),
-    )
-
 
 class RejectedCandidate(BaseModel):
     """
@@ -3082,7 +2722,7 @@ class RejectedCandidate(BaseModel):
 
 
 class FailedToVerify(BaseModel):
-    """Phase 6.5: a candidate that failed deep-verify for a specific scope."""
+    """Candidate that failed selected-candidate verification for a scope."""
     name: str = Field(description="Service/product name that failed verification")
     provider: str = Field(description="Company behind the service")
     scope_id: str = Field(description="Which scope slot this verification attempt was for")
@@ -3163,8 +2803,8 @@ class Agent4Result(BaseModel):
     failed_to_verify: list[FailedToVerify] = Field(
         default_factory=list,
         description=(
-            "Phase 6.5: candidates that failed deep-verify, with per-scope "
-            "rejection reasons. Empty for legacy shallow verification."
+            "Candidates that failed selected-candidate verification, with "
+            "per-scope rejection reasons. Empty for legacy shallow verification."
         ),
     )
 
@@ -3231,6 +2871,14 @@ class Agent5Input(BaseModel):
 
     trace_id: str = Field(
         description="UUID for log correlation across the entire pipeline"
+    )
+
+    runs_root: str | None = Field(
+        default=None,
+        description=(
+            "Optional absolute/relative runs directory for harness sandboxes. "
+            "When omitted, Agent 5 writes under ./runs for CLI compatibility."
+        ),
     )
 
     provider_credentials: dict[str, dict[str, str]] | None = Field(
@@ -3384,11 +3032,9 @@ class TestHarness(BaseModel):
     api_knowledge: str | None = Field(
         default=None,
         description=(
-            "Comprehensive API understanding from Agent 5's research sub-agent. "
-            "Contains the full api_spec with INPUT_COMPATIBILITY matrix, "
-            "API_LIMITATIONS, ROUTING_TABLE, and DOC_MAP sections. Agent 5 "
-            "reads this directly for test classification — no file I/O or "
-            "re-research needed. None if research phase was skipped."
+            "Comprehensive API understanding from Agent 5. Preferably contains "
+            "research_synthesis.json and implementation_plan.json content. None "
+            "if no durable research artifact was available."
         )
     )
 
@@ -3466,8 +3112,14 @@ class FailedHarness(BaseModel):
             "'docs_unusable' (API docs too vague, inaccessible, or incomplete), "
             "'auth_blocked' (cannot set up auth without paid account/manual approval), "
             "'api_incompatible' (API exists but doesn't support needed operations), "
+            "'provider_blocked' (provider/account blocks testing), "
+            "'credentials_unavailable' (required credentials are absent or rejected), "
+            "'docs_missing' (no usable official docs could be found), "
+            "'quota_exhausted' (provider quota or credits exhausted), "
+            "'test/fixture_mismatch_unfixable' (immutable task/test contradiction), "
             "'build_timeout' (exceeded max turns or budget without passing smoke test), "
             "'dependency_failure' (required packages cannot be installed), "
+            "'implementation_plan_invalid' (implementation plan revision budget exhausted), "
             "'unknown' (unexpected failure not fitting other categories)"
         )
     )
@@ -3520,6 +3172,25 @@ class FailedHarness(BaseModel):
         ),
     )
 
+    completion_gate_status: str | None = Field(
+        default=None,
+        description=(
+            "Final Agent 5 completion-gate verdict. Expected values include "
+            "'passed' for a harness that went through structural, forensics, "
+            "and reflection checks, or a failure label such as "
+            "'not_signaled'/'failed' when the build did not reach the gate."
+        ),
+    )
+
+    completion_gate_issues: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Completion-gate issues observed before acceptance. Empty for a "
+            "clean pass. Non-empty values are surfaced for telemetry and "
+            "postmortem analysis."
+        ),
+    )
+
     harness_dir: str | None = Field(
         default=None,
         description=(
@@ -3528,7 +3199,6 @@ class FailedHarness(BaseModel):
             "events instead of surfacing an opaque build failure."
         ),
     )
-
 
 class ScopeTestRun(BaseModel):
     """Phase 9: test results for one scope in a multi-scope workflow."""
@@ -3870,6 +3540,23 @@ class TestCaseResult(BaseModel):
             "Drives the 'Rubric breakdown' UI card on conversational "
             "result rows — per-criterion scores + reasoning + "
             "conversation_summary."
+        ),
+    )
+
+    judge_failed: bool = Field(
+        default=False,
+        description=(
+            "True when a conversational rubric judge was expected but failed "
+            "to produce a verdict. Prevents null rubric_verdict from being "
+            "silently interpreted as an ordinary 0.0-quality result."
+        ),
+    )
+
+    judge_failure_reason: str | None = Field(
+        default=None,
+        description=(
+            "Human-readable reason the conversational rubric judge failed, "
+            "when judge_failed=True."
         ),
     )
 

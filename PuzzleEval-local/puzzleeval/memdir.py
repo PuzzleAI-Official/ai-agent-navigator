@@ -2,16 +2,16 @@
 
 Modeled on Claude Code's `src/memdir/` pattern: persistent files written by
 agents during one run that future runs can recall semantically. Without
-this, every Phase 6.5 deep-verify of a provider re-researches the same
-docs from scratch — even when yesterday's run already fetched them.
+this, selected-candidate provider research re-reads the same docs from
+scratch - even when yesterday's run already fetched them.
 
 Two concrete use-cases this enables today:
 
-  1. **API spec memos.** Phase 6.5 saves `api_spec.txt` per candidate. Today
-     these live under `runs/{trace_id}/harnesses/{slug}/`. By also writing
-     them to a stable cross-run location keyed by candidate name + docs URL,
-     future runs of the same candidate can SKIP the deep-verify research
-     turns entirely (they still verify the cached spec is fresh).
+  1. **Provider research memos.** Agent 5 saves durable research synthesis
+     and implementation-plan facts per candidate. By also writing selected
+     stable facts to a cross-run location keyed by candidate name + docs URL,
+     future runs can avoid repeating already-verified docs research while
+     still checking that cached facts are fresh.
 
   2. **API quirk notes.** When Agent 5 discovers that "Provider X's response
      uses snake_case keys, not camelCase" or "Provider Y requires multipart
@@ -25,7 +25,7 @@ own discretion.
 Storage layout:
 
   ~/.puzzleeval/memdir/
-    api_specs/
+    api_specs/                                  # legacy category name
       <provider_slug>__<docs_url_hash>.md       # frontmatter + body
     quirks/
       <provider_slug>.md

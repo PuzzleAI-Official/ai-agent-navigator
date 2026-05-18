@@ -135,9 +135,10 @@ class TestBuildLoopStateDefaults:
         assert state.patch_fragmentation_nudged_files == set()
         assert state.build_read_state == {}
 
-    def test_phase_transition_flag_starts_false(self):
+    def test_build_gate_flags_start_false(self):
         state = BuildLoopState()
-        assert state.api_spec_written is False
+        assert state.build_gate_accepted is False
+        assert state.implementation_plan_accepted is False
 
     def test_smoke_pass_flags_default(self):
         state = BuildLoopState()
@@ -178,8 +179,10 @@ class TestBuildLoopStateMutability:
         assert state.turn == 5
         state.accumulated_cost = 1.234
         assert state.accumulated_cost == 1.234
-        state.api_spec_written = True
-        assert state.api_spec_written is True
+        state.build_gate_accepted = True
+        state.implementation_plan_accepted = True
+        assert state.build_gate_accepted is True
+        assert state.implementation_plan_accepted is True
 
     def test_independent_collections_per_instance(self):
         # default_factory creates a NEW collection per instance —
@@ -288,14 +291,12 @@ class TestInitializeLoopState:
     """Verify the state-seed function produces equivalent state to the
     inline initialization in ``_build_single_harness``."""
 
-    def _make_setup(self, pre_rendered_spec=None, credentials=None,
-                    staged_test_cases=None):
+    def _make_setup(self, credentials=None, staged_test_cases=None):
         """Mock BuildSetupSuccess shape — only the attributes
         _initialize_loop_state reads."""
         setup = MagicMock()
         setup.credentials = credentials or {}
         setup.staged_test_cases = staged_test_cases or []
-        setup.pre_rendered_spec = pre_rendered_spec
         return setup
 
     def test_returns_buildloopstate(self, tmp_path, monkeypatch):
@@ -385,23 +386,6 @@ class TestInitializeLoopState:
         # Must be > 0 (monotonic time, post-init)
         assert state.build_start_time > 0.0
 
-    def test_pre_render_log_fires_when_pre_rendered_spec_present(
-        self, tmp_path, monkeypatch,
-    ):
-        from puzzleeval.agents.agent5.build_loop import (
-            _initialize_loop_state,
-        )
-
-        monkeypatch.setattr(
-            "puzzleeval.agents.implement_test_env._build_initial_message",
-            lambda *a, **kw: "prompt",
-        )
-        ctx = _make_ctx(sandbox_dir=tmp_path)
-        setup = self._make_setup(pre_rendered_spec="some spec text")
-        _initialize_loop_state(ctx, setup)
-        # Logger.info called (at least once for pre-render boundary)
-        assert ctx.logger.info.called
-
     def test_other_state_fields_remain_at_defaults(
         self, tmp_path, monkeypatch,
     ):
@@ -421,7 +405,8 @@ class TestInitializeLoopState:
         # All these are dataclass defaults that the inline code preserved
         assert state.turn == 0
         assert state.accumulated_cost == 0.0
-        assert state.api_spec_written is False
+        assert state.build_gate_accepted is False
+        assert state.implementation_plan_accepted is False
         assert state.smoke_ever_passed is False
         assert state.consecutive_errors == 0
         assert state.verification_attempts == 0

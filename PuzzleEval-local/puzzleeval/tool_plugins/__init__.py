@@ -44,6 +44,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+HARNESS_EXECUTION_SINGLE_CALL = "single_call"
+HARNESS_EXECUTION_PERSISTENT_WORKER = "persistent_worker"
+# Phase 5 compatibility shims. Serialized conversation is an interaction
+# pattern inside implementation_plan.json, not a runtime primitive; it runs
+# through the single-call subprocess primitive unless the plan says the harness
+# process owns state. The old names remain importable during rollout.
+HARNESS_EXECUTION_MULTI_TURN_SERIALIZED = HARNESS_EXECUTION_SINGLE_CALL
+HARNESS_EXECUTION_MULTI_TURN_PERSISTENT = HARNESS_EXECUTION_PERSISTENT_WORKER
+
 
 # ---------------------------------------------------------------------------
 # Plugin interface
@@ -66,8 +75,13 @@ class PluginCapabilities:
     ``evaluate_output`` so it can invoke the candidate's harness.run()
     once per turn / once per sub-call. Agent 5's test-execution loop
     uses this flag to decide whether to build + inject a runner closure.
-    Without the flag, Agent 5 sends ``response`` + ``expected`` as
-    usual and the plugin scores what it's given.
+    The process-lifecycle choice is separate: ``harness_execution_mode``
+    decides whether those calls use ``single_call`` or ``persistent_worker``.
+    Multi-turn serialized/provider-held context is represented by
+    implementation_plan.json's interaction pattern, not by another runtime
+    primitive.
+    Without ``requires_harness_runner``, Agent 5 sends ``response`` +
+    ``expected`` as usual and the plugin scores what it's given.
 
     This is the general replacement for the prior hardcoded
     ``if evaluator.name == 'conversation_simulator'`` check — any plugin
@@ -82,6 +96,9 @@ class PluginCapabilities:
     evaluates_output: bool = False
     requires_credentials: list[str] = field(default_factory=list)
     requires_harness_runner: bool = False
+    # How Agent 5 invokes harness.run() for plugins that drive the
+    # harness. Runtime primitives are binary: single_call or persistent_worker.
+    harness_execution_mode: str = HARNESS_EXECUTION_SINGLE_CALL
     # `provisions_remote_session_per_call` declares that a single
     # ``harness.run()`` call provisions a billable provider-side resource
     # (e.g., ElevenLabs Conversational AI agent, OpenAI Realtime session)
@@ -117,6 +134,15 @@ class EvaluationResult:
     fallback_reason: str | None = None  # Set when plugin couldn't run; caller may fall back to LLM judge
 
 
+@dataclass
+class ProviderHealthResult:
+    """Optional plugin-level provider/account health preflight result."""
+
+    status: str = "unsupported"  # healthy | external_provider_blocked | unsupported
+    reason: str = ""
+    evidence: dict[str, Any] = field(default_factory=dict)
+
+
 class ToolPlugin(ABC):
     """Base class for every tool plugin.
 
@@ -132,6 +158,20 @@ class ToolPlugin(ABC):
     def capabilities(self) -> PluginCapabilities:
         """Return what this plugin can do."""
         raise NotImplementedError
+
+    def health_check(
+        self,
+        credentials: dict[str, str] | None = None,
+        candidate_context: dict[str, Any] | None = None,
+    ) -> ProviderHealthResult:
+        """Optional provider/account preflight.
+
+        Plugins override this when they can cheaply distinguish harness bugs
+        from external account/provider blockers (quota exhaustion, auth denial,
+        no output-bearing stream, provider outage). Unsupported means "use the
+        normal live-test path."
+        """
+        return ProviderHealthResult()
 
     def is_available(self) -> tuple[bool, str]:
         """Self-check: can this plugin actually run in the current env?
@@ -273,7 +313,12 @@ for _name in (
 
 __all__ = [
     "EvaluationResult",
+    "HARNESS_EXECUTION_MULTI_TURN_PERSISTENT",
+    "HARNESS_EXECUTION_MULTI_TURN_SERIALIZED",
+    "HARNESS_EXECUTION_PERSISTENT_WORKER",
+    "HARNESS_EXECUTION_SINGLE_CALL",
     "PluginCapabilities",
+    "ProviderHealthResult",
     "SynthesisResult",
     "ToolPlugin",
     "find_plugins_for_input_type",

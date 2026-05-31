@@ -63,7 +63,7 @@ const About = () => {
         </motion.div>
 
         <div className="space-y-0">
-          {articles.map((article, i) => (
+          {[...articles].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()).map((article, i) => (
             <motion.div
               key={article.slug}
               initial={{ opacity: 0, y: 16 }}

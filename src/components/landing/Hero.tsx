@@ -198,7 +198,7 @@ const Hero = () => {
             className="text-center mb-10"
           >
             <h1 className="font-display leading-[1] tracking-[-0.03em] text-foreground mb-4 font-serif font-normal text-5xl">
-              FIND YOUR LAST PUZZLE
+              FIND YOUR LAST PUZZLE PIECE
             </h1>
           </motion.div>
 
@@ -282,7 +282,7 @@ const Hero = () => {
               {[
                 { stat: "6%", label: "reach maturity" },
                 { stat: "88%", label: "adoption rate" },
-                { stat: "7000+", label: "new tools / mo" },
+                { stat: "$7.2M+", label: "average annual cost of failed AI initiatives for enterprises " },
               ].map((item, i) => (
                 <motion.div
                   key={item.stat}

@@ -92,9 +92,9 @@ const BlogPost = () => {
               // Detect section headers (short lines without periods, typically under 60 chars)
               const isHeader = trimmed.length < 80 && !trimmed.includes('.') && !trimmed.includes('?') && !trimmed.includes('—') && trimmed === trimmed.replace(/\n/g, '');
               if (isHeader) {
-                return <h2 key={i} className="font-display text-xl md:text-2xl tracking-[-0.02em] text-foreground mt-4">{trimmed}</h2>;
+                return <h2 key={i} className="font-display md:text-2xl tracking-[-0.02em] text-foreground mt-4 text-2xl">— {trimmed} —</h2>;
               }
-              return <p key={i}>{trimmed}</p>;
+              return <p key={i} className="pl-6">{trimmed}</p>;
             })}
           </div>
         </motion.div>

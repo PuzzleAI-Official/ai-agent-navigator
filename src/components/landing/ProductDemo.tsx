@@ -73,9 +73,9 @@ const ProductDemo = () => {
   const [activeProvider, setActiveProvider] = useState(0);
 
   const providers = [
-    { name: "Claude 3.5 Sonnet", perf: 94, speed: 0.9, cost: 0.005, verdict: "Best overall", tests: "47/50" },
-    { name: "GPT-4o", perf: 89, speed: 1.2, cost: 0.003, verdict: "Best value", tests: "44/50" },
-    { name: "Gemini Pro 1.5", perf: 76, speed: 1.8, cost: 0.001, verdict: "Most affordable", tests: "38/50" },
+    { name: "Claude 4.6 Sonnet", perf: 94, speed: 0.9, cost: 0.005, verdict: "Best overall", tests: "47/50" },
+    { name: "GPT-5.4", perf: 89, speed: 1.2, cost: 0.003, verdict: "Best value", tests: "44/50" },
+    { name: "Gemini 3.1 Pro", perf: 76, speed: 1.8, cost: 0.001, verdict: "Most affordable", tests: "38/50" },
   ];
 
   return (
@@ -133,7 +133,7 @@ const ProductDemo = () => {
                 {[
                   { val: 200, suffix: "+", label: "AI solutions" },
                   { val: 50, suffix: "k", label: "Tests run" },
-                  { val: 4, suffix: "min", label: "Avg. time" },
+                  { val: 9, suffix: "min", label: "Avg. time" },
                 ].map((s) => (
                   <div key={s.label}>
                     <div className="font-display text-3xl md:text-4xl tracking-tight">

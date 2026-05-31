@@ -61,10 +61,10 @@ const CTASection = () => {
               <h2 className="font-display text-[clamp(3rem,7vw,7rem)] leading-[0.9] tracking-[-0.03em] mb-6">
                 Stop guessing.
                 <br />
-                Start <span className="italic text-gradient">deciding</span>.
+                Start <span className="italic text-gradient">hiring</span>.
               </h2>
               <p className="text-muted-foreground max-w-lg mx-auto mb-12 leading-relaxed">
-                Describe what you need. Test 200+ AI tools with your own data in minutes.
+                Describe what you need. Puzzle HR agent screen 200+ AI tools with your own data in minutes.
                 Compare real results, not marketing pages. Choose with proof, not gut feel.
               </p>
               <div className="flex items-center justify-center">

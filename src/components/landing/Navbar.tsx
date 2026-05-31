@@ -37,7 +37,7 @@ const Navbar = () => {
           {[
             { label: "Home", href: "/" },
             { label: "Feature", href: "/feature" },
-            { label: "API", href: "/alpha-api" },
+            { label: "API", href: "/api" },
             { label: "About", href: "/about" },
           ].map((item) => (
             <a

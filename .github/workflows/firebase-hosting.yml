@@ -1,0 +1,105 @@
+name: Deploy Website To Firebase Hosting
+
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: Deploy target.
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - live
+      preview_channel_id:
+        description: Firebase preview channel ID. Used only when channel is preview.
+        required: false
+        default: alpha-docs
+        type: string
+      preview_expires:
+        description: Preview channel lifetime. Used only when channel is preview.
+        required: false
+        default: 7d
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: firebase-hosting-${{ github.ref }}-${{ inputs.channel }}
+  cancel-in-progress: false
+
+env:
+  FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID || 'puzzle-476822' }}
+  GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  NODE_VERSION: "22"
+
+jobs:
+  deploy:
+    name: Build And Deploy
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.channel == 'live' && 'production' || 'preview' }}
+    steps:
+      - name: Check Required Configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${FIREBASE_PROJECT_ID}" ]]; then
+            echo "FIREBASE_PROJECT_ID is required. Set it as a GitHub repository variable."
+            exit 1
+          fi
+          if [[ -z "${GCP_SERVICE_ACCOUNT}" ]]; then
+            echo "GCP_SERVICE_ACCOUNT is required. Set it as a GitHub repository variable."
+            exit 1
+          fi
+          if [[ -z "${GCP_WORKLOAD_IDENTITY_PROVIDER}" ]]; then
+            echo "GCP_WORKLOAD_IDENTITY_PROVIDER is required. Set it as a GitHub repository variable."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node
+        uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install Dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Authenticate To Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ env.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ env.GCP_SERVICE_ACCOUNT }}
+
+      - name: Deploy Preview Channel
+        if: ${{ inputs.channel == 'preview' }}
+        run: >
+          npx --yes firebase-tools@latest
+          hosting:channel:deploy "${{ inputs.preview_channel_id }}"
+          --project "${FIREBASE_PROJECT_ID}"
+          --expires "${{ inputs.preview_expires }}"
+          --non-interactive
+
+      - name: Deploy Live Site
+        if: ${{ inputs.channel == 'live' }}
+        run: >
+          npx --yes firebase-tools@latest
+          deploy
+          --project "${FIREBASE_PROJECT_ID}"
+          --only hosting
+          --non-interactive

@@ -37,7 +37,9 @@ const MOCK_CANDIDATES: Candidate[] = [
 
 const Playground = () => {
   const location = useLocation();
-  const initialMessage = (location.state as any)?.initialMessage || "";
+  const initialMessage = typeof location.state === "object" && location.state !== null && "initialMessage" in location.state
+    ? String(location.state.initialMessage ?? "")
+    : "";
   const [stage, setStage] = useState<Stage>("describe");
   const [messages, setMessages] = useState<Message[]>([
     {

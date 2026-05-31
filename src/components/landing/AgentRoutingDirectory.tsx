@@ -1,8 +1,11 @@
 import { motion } from "framer-motion";
 import { useState } from "react";
 import buddyproLogo from "@/assets/buddypro-logo.png";
+import elevenlabsLogo from "@/assets/elevenlabs-logo.svg";
+import geminiLogo from "@/assets/gemini-logo.svg";
 import hermesLogo from "@/assets/hermes-logo.png";
 import llamaindexLogo from "@/assets/llamaindex-logo.png";
+import openaiLogo from "@/assets/openai-logo.svg";
 import manusLogo from "@/assets/manus-logo.png";
 import mindeeLogo from "@/assets/mindee-logo.png";
 import nanonetsLogo from "@/assets/nanonets-logo.png";
@@ -74,18 +77,21 @@ const CATEGORIES: { key: string; title: string; blurb: string; agents: Agent[] }
         name: "GPT-Realtime",
         provider: "OpenAI",
         note: "Native speech-to-speech",
+        logo: openaiLogo,
       },
       {
         rank: 2,
         name: "ElevenLabs",
         provider: "ElevenLabs",
         note: "Ultra-realistic TTS voices",
+        logo: elevenlabsLogo,
       },
       {
         rank: 3,
         name: "Gemini 3.1 Flash TTS",
         provider: "Google",
         note: "Cheap, fast multilingual TTS",
+        logo: geminiLogo,
       },
       {
         rank: 4,

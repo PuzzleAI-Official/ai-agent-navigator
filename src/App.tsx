@@ -6,7 +6,7 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import PasswordGate from "@/components/PasswordGate";
 import Index from "./pages/Index.tsx";
 import NotFound from "./pages/NotFound.tsx";
-import Playground from "./pages/Playground.tsx";
+import Maintenance from "./pages/Maintenance.tsx";
 import Feature from "./pages/Feature.tsx";
 import ApiDocs from "./pages/ApiDocs.tsx";
 import AlphaApiDocs from "./pages/AlphaApiDocs.tsx";
@@ -25,7 +25,7 @@ const App = () => (
         <BrowserRouter>
           <Routes>
             <Route path="/" element={<Index />} />
-            <Route path="/playground" element={<Playground />} />
+            <Route path="/playground" element={<Maintenance />} />
             <Route path="/feature" element={<Feature />} />
             <Route path="/api" element={<ApiDocs />} />
             <Route path="/alpha-api" element={<AlphaApiDocs />} />

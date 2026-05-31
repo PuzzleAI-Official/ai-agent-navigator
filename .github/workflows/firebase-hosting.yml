@@ -32,8 +32,8 @@ concurrency:
 
 env:
   FIREBASE_PROJECT_ID: ${{ vars.FIREBASE_PROJECT_ID || 'puzzle-476822' }}
-  GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT }}
-  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+  GCP_SERVICE_ACCOUNT: ${{ vars.GCP_SERVICE_ACCOUNT || 'puzzle-website-deploy@puzzle-476822.iam.gserviceaccount.com' }}
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER || 'projects/358736973935/locations/global/workloadIdentityPools/github-puzzleai/providers/github-ai-agent-navigator' }}
   NODE_VERSION: "22"
 
 jobs:

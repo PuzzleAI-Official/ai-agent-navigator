@@ -31,11 +31,13 @@ npx firebase-tools@latest deploy --only hosting
 
 The workflow `.github/workflows/firebase-hosting.yml` deploys manually through GitHub Actions.
 
-Required repository variables:
+The workflow has safe defaults for this repository:
 
 - `FIREBASE_PROJECT_ID`: `puzzle-476822`
-- `GCP_SERVICE_ACCOUNT`: deploy service account email
-- `GCP_WORKLOAD_IDENTITY_PROVIDER`: GitHub Workload Identity provider resource name
+- `GCP_SERVICE_ACCOUNT`: `puzzle-website-deploy@puzzle-476822.iam.gserviceaccount.com`
+- `GCP_WORKLOAD_IDENTITY_PROVIDER`: `projects/358736973935/locations/global/workloadIdentityPools/github-puzzleai/providers/github-ai-agent-navigator`
+
+These values are non-secret deployment identifiers. They may be overridden with GitHub repository variables if the infrastructure changes later.
 
 The workflow uses Google Workload Identity Federation. Do not store service-account JSON keys or Firebase tokens in GitHub.
 

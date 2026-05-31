@@ -1,40 +1,48 @@
 import { useState, useEffect, useRef } from "react";
 
 const CODE_LINES = [
-  { text: "# When your agent needs to hire another agent.", type: "comment" },
-  { text: "# This is what that looks like.", type: "comment" },
+  { text: "# Hand Puzzle a document. Get back normalized, structured data.", type: "comment" },
+  { text: "# One API, many verified provider services behind it.", type: "comment" },
   { text: "", type: "blank" },
-  { text: "from puzzleai import AgentHR", type: "import" },
+  { text: "from puzzleai import Client", type: "import" },
   { text: "", type: "blank" },
-  { text: "# Your orchestrator agent describes what it needs", type: "comment" },
-  { text: 'hr = AgentHR(protocol="a2a")', type: "code" },
-  { text: "", type: "blank" },
-  { text: "# 1. Scout — discover agents via A2A Agent Cards", type: "comment" },
-  { text: "candidates = hr.discover(", type: "code" },
-  { text: '    role="Translate customer tickets from JP → EN,', type: "string" },
-  { text: '          then route by urgency",', type: "string" },
-  { text: '    requirements=["multilingual", "sub-2s latency", "pii-safe"],', type: "code" },
-  { text: '    budget="$0.02/ticket"', type: "string" },
-  { text: ") # → 12 agents matched from 3 registries", type: "code-comment" },
-  { text: "", type: "blank" },
-  { text: "# 2. Interview — sandbox each candidate with your data", type: "comment" },
-  { text: "results = hr.evaluate(", type: "code" },
-  { text: "    candidates=candidates,", type: "code" },
-  { text: '    test_data="s3://our-tickets/sample_500.jsonl",', type: "string" },
-  { text: '    criteria=["accuracy", "latency", "cost", "pii_leakage"],', type: "code" },
-  { text: "    sandbox=True # isolated environment, your data never leaves", type: "code-comment" },
+  { text: "# Authenticate with your alpha API key and base URL", type: "comment" },
+  { text: "client = Client(", type: "code" },
+  { text: '    api_key="YOUR_API_KEY",', type: "code" },
+  { text: '    base_url="YOUR_ALPHA_BASE_URL",', type: "code" },
   { text: ")", type: "code" },
   { text: "", type: "blank" },
-  { text: "# 3. Hire — the best candidate joins your workflow", type: "comment" },
-  { text: 'hired = hr.select(results, strategy="pareto-optimal")', type: "code" },
-  { text: 'hired.onboard(webhook="https://ops.acme.com/agents/new")', type: "code" },
+  { text: "# 1. Extract — upload an invoice, receive normalized fields", type: "comment" },
+  { text: 'with open("invoice.pdf", "rb") as file:', type: "code" },
+  { text: "    result = client.documents.invoices.extract(", type: "code" },
+  { text: "        file=file,", type: "code" },
+  { text: '        line_items_mode="preferred",', type: "code" },
+  { text: '        required_fields=["total"],', type: "code" },
+  { text: '        idempotency_key="invoice-demo-001", # replay-safe billing', type: "code-comment" },
+  { text: "    )", type: "code" },
   { text: "", type: "blank" },
-  { text: "# 4. Monitor — continuous performance reviews", type: "comment" },
-  { text: "hr.monitor(", type: "code" },
-  { text: "    agent=hired,", type: "code" },
-  { text: '    sla={"accuracy": 0.95, "latency_p99": "1800ms"},', type: "code" },
-  { text: '    on_underperform="re-evaluate" # automatically find a replacement', type: "code-comment" },
-  { text: ")", type: "code" },
+  { text: "# Every field comes back with a confidence score", type: "comment" },
+  { text: 'print(result["request_id"])', type: "code" },
+  { text: '_total = result["invoice"]["total"]', type: "code" },
+  { text: 'print(_total["value"], _total["confidence"]) # → 108.25 0.99', type: "code-comment" },
+  { text: "", type: "blank" },
+  { text: "# 2. Route — pin a provider set or strategy when you need control", type: "comment" },
+  { text: 'with open("invoice.pdf", "rb") as file:', type: "code" },
+  { text: "    routed = client.documents.invoices.extract(", type: "code" },
+  { text: "        file=file,", type: "code" },
+  { text: '        provider_set="YOUR_PROVIDER_SET",', type: "code" },
+  { text: '        strategy="highest_quality",', type: "code" },
+  { text: '        idempotency_key="invoice-route-001",', type: "code" },
+  { text: "    )", type: "code" },
+  { text: "", type: "blank" },
+  { text: "# 3. Scale — submit async jobs and poll until they finish", type: "comment" },
+  { text: 'with open("invoice.pdf", "rb") as file:', type: "code" },
+  { text: "    job = client.documents.invoices.submit(", type: "code" },
+  { text: "        file=file,", type: "code" },
+  { text: '        idempotency_key="invoice-async-001",', type: "code" },
+  { text: "    )", type: "code" },
+  { text: "", type: "blank" },
+  { text: 'status = client.jobs.get(job["job_id"]) # → succeeded | failed', type: "code-comment" },
 ];
 
 const ApiTypingDemo = () => {
@@ -180,7 +188,7 @@ const ApiTypingDemo = () => {
             <div className="w-2.5 h-2.5 rounded-full bg-[#2a2b35]" />
           </div>
           <span className="font-mono text-[11px] text-[#e0e0e6]/30 ml-2">
-            PUZZLE A2A SDK - PREVIEW
+            PUZZLE ALPHA SDK - PREVIEW
           </span>
         </div>
         <span className="font-mono text-[10px] text-[#e0e0e6]/20 uppercase tracking-wider">
@@ -212,7 +220,7 @@ const ApiTypingDemo = () => {
       {/* Footer */}
       <div className="border border-[#1e2028] border-t-0 px-4 py-2.5 flex items-center justify-between bg-[#13141b]">
         <span className="font-mono text-[10px] text-[#e0e0e6]/25">
-          Python 3.12 · A2A Protocol
+          Python 3.12 · Puzzle Alpha API
         </span>
         <span className="font-mono text-[10px] text-[#e0e0e6]/15">
           UTF-8 · LF
